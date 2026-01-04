@@ -16,7 +16,12 @@ name = "ngxora"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "ngxora-config",
 ]
+
+[[package]]
+name = "ngxora-config"
+version = "0.1.0"
 
 [[package]]
 name = "rustversion"
