@@ -1,9 +1,10 @@
-use std::error::Error;
+use core::num;
+use std::{any::TypeId, error::Error};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Token {
     pub kind: TokenType,
-    pub len: u8,
+    pub len: usize,
     pub lexeme: String,
     pub number_line: usize,
 }
@@ -12,21 +13,67 @@ pub struct Token {
 pub enum TokenType {
     LBrace,
     RBrace,
-    Semicolone,
+    Semicolon,
     Ident,
 }
 
 impl Token {
-    pub fn tokenize(input: &str) -> Option<Vec<Token>> {
+    pub fn tokenize(input: &str) -> Vec<Token> {
         let len_input = input.len();
-        if len_input == 0 {
-            return None;
-        }
 
         let mut tokens: Vec<Token> = Vec::with_capacity(len_input);
-        let mut peekable_iterator = input.chars().peekable();
-        while let Some(current_character) = peekable_iterator.next() {}
+        let mut lines = input.lines();
+        let mut count_lines = 0;
+        let mut ident_word = String::new();
 
-        Some(tokens)
+        while let Some(line) = lines.next() {
+            count_lines += 1;
+            while let Some(current_char) = line.chars().peekable().next() {
+                // if char is spec symbols we clear string
+                if let Some(kind_indent) = punct_token_type(current_char) {
+                    flush(&mut tokens, kind_indent, &mut ident_word, count_lines);
+                    continue;
+                }
+
+                if current_char.is_whitespace() {
+                    flush(&mut tokens, TokenType::Ident, &mut ident_word, count_lines);
+                    continue;
+                }
+
+                if current_char == '#' {
+                    flush(&mut tokens, TokenType::Ident, &mut ident_word, count_lines);
+                    continue;
+                }
+
+                // if not spec symbols added char in string
+                ident_word.push(current_char);
+            }
+
+            flush(&mut tokens, TokenType::Ident, &mut ident_word, count_lines);
+        }
+
+        tokens
+    }
+}
+
+fn flush(tokens: &mut Vec<Token>, kind_token: TokenType, ident: &mut String, number_line: usize) {
+    if !ident.is_empty() {
+        tokens.push(Token {
+            kind: kind_token,
+            lexeme: ident.clone(),
+            number_line: number_line,
+            len: ident.len(),
+        });
+
+        ident.clear();
+    }
+}
+
+fn punct_token_type(c: char) -> Option<TokenType> {
+    match c {
+        '{' => Some(TokenType::LBrace),
+        '}' => Some(TokenType::RBrace),
+        ';' => Some(TokenType::Semicolon),
+        _ => None,
     }
 }
