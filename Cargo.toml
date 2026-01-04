@@ -1,0 +1,15 @@
+[package]
+name = "ngxora"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arc-swap = "1.8.0"
+ngxora-config = { path = "crates/ngxora-config" }
+ngxora-compile = {path = "crates/ngxora-compile"}
+
+[[bin]]
+name = "ngxora"
+test = false
+bench = false
+path = "crates/ngxora-cli/src/main.rs" 

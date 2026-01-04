@@ -1,0 +1,8 @@
+[package]
+name = "ngxora-compile"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ngxora-config = { path = "../ngxora-config" }
+
