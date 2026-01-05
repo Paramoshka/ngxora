@@ -1,5 +1,3 @@
-use core::num;
-use std::{any::TypeId, error::Error};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Token {
