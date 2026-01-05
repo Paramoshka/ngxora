@@ -26,10 +26,16 @@ impl Token {
 
         while let Some(line) = lines.next() {
             count_lines += 1;
-            while let Some(current_char) = line.chars().peekable().next() {
-                // if char is spec symbols we clear string
-                if let Some(kind_indent) = punct_token_type(current_char) {
-                    flush(&mut tokens, kind_indent, &mut ident_word, count_lines);
+            let mut chars = line.chars().peekable();
+            while let Some(current_char) = chars.next() {
+                if let Some(kind) = punct_token_type(current_char) {
+                    flush(&mut tokens, TokenType::Ident, &mut ident_word, count_lines);
+                    tokens.push(Token {
+                        kind,
+                        len: 1,
+                        lexeme: current_char.to_string(),
+                        number_line: count_lines,
+                    });
                     continue;
                 }
 
@@ -40,10 +46,9 @@ impl Token {
 
                 if current_char == '#' {
                     flush(&mut tokens, TokenType::Ident, &mut ident_word, count_lines);
-                    continue;
+                    break;
                 }
 
-                // if not spec symbols added char in string
                 ident_word.push(current_char);
             }
 
