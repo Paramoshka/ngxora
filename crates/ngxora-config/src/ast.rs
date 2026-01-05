@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Ast {
     pub items: Vec<Node>,
 }
@@ -9,15 +9,29 @@ pub enum Node {
     Block(Block),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Directive {
     pub name: String,
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Block {
     pub name: String,
     pub args: Vec<String>,
     pub children: Vec<Node>,
+}
+
+impl Node {
+    pub fn directive(name: String, args: Vec<String>) -> Self {
+        Self::Directive(Directive { name, args })
+    }
+
+    pub fn block(name: String, args: Vec<String>, children: Vec<Node>) -> Self {
+        Self::Block(Block {
+            name,
+            args,
+            children,
+        })
+    }
 }
