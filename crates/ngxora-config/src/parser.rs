@@ -1,4 +1,8 @@
-use crate::{ast::Ast, lexer::Token};
+use crate::{
+    Node,
+    ast::Ast,
+    lexer::{Token, TokenType},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -13,7 +17,16 @@ impl Ast {
 
     fn parse_tokens(tokens: &Vec<Token>) -> Result<Self, ParseError> {
         let ast = Ast { items: Vec::new() };
-        // TODO
+        let mut iterable_token = tokens.iter().peekable();
+        if let Some(token) = iterable_token.next() {
+            match token.kind {
+                TokenType::Ident => todo!(),
+                TokenType::LBrace => todo!(),
+                TokenType::RBrace => todo!(),
+                TokenType::Semicolon => todo!(),
+            }
+        }
+
         Ok(ast)
     }
 }
