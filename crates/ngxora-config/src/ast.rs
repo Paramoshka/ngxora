@@ -1,3 +1,5 @@
+use crate::{ParseError, lexer::Token};
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Ast {
     pub items: Vec<Node>,
@@ -33,5 +35,18 @@ impl Node {
             args,
             children,
         })
+    }
+}
+
+impl Ast {
+    pub fn parse_config(input: &str) -> Result<Self, ParseError> {
+        let tokens = Token::tokenize(input);
+        Self::parse_tokens(&tokens)
+    }
+
+    fn parse_tokens(tokens: &Vec<Token>) -> Result<Self, ParseError> {
+        let ast = Ast { items: Vec::new() };
+        todo!();
+        Ok(ast)
     }
 }

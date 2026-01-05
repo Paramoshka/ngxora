@@ -1,9 +1,10 @@
+use crate::Node;
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Token {
+pub struct Token<'a> {
     pub kind: TokenType,
     pub len: usize,
-    pub lexeme: String,
+    pub lexeme: &'a str,
     pub number_line: usize,
 }
 
@@ -15,60 +16,75 @@ pub enum TokenType {
     Ident,
 }
 
-impl Token {
+impl<'a> Token<'a> {
     pub fn tokenize(input: &str) -> Vec<Token> {
         let len_input = input.len();
 
         let mut tokens: Vec<Token> = Vec::with_capacity(len_input);
         let mut lines = input.lines();
         let mut count_lines = 0;
-        let mut ident_word = String::new();
 
         while let Some(line) = lines.next() {
             count_lines += 1;
-            let mut chars = line.chars().peekable();
-            while let Some(current_char) = chars.next() {
-                if let Some(kind) = punct_token_type(current_char) {
-                    flush(&mut tokens, TokenType::Ident, &mut ident_word, count_lines);
+            let end_line = line.len() - 1; // index last symbol in line
+            let mut end_lexeme = 1;
+
+            for (i, current_char) in line.char_indices() {
+                if let lexeme = build_lexeme(input, i, end_lexeme, end_line) {
+                    if let Some(kind) = punct_token_type(current_char) {
+                        continue;
+                    }
+
+                    if current_char.is_whitespace() {
+                        end_lexeme = i + 1;
+                        continue;
+                    }
+
+                    if current_char == '#' {
+                        end_lexeme = i + 1;
+                        break;
+                    }
+
+                    end_lexeme += 1;
+
                     tokens.push(Token {
                         kind,
                         len: 1,
-                        lexeme: current_char.to_string(),
+                        lexeme: lexeme,
                         number_line: count_lines,
                     });
-                    continue;
                 }
-
-                if current_char.is_whitespace() {
-                    flush(&mut tokens, TokenType::Ident, &mut ident_word, count_lines);
-                    continue;
-                }
-
-                if current_char == '#' {
-                    flush(&mut tokens, TokenType::Ident, &mut ident_word, count_lines);
-                    break;
-                }
-
-                ident_word.push(current_char);
             }
-
-            flush(&mut tokens, TokenType::Ident, &mut ident_word, count_lines);
         }
 
         tokens
     }
 }
 
-fn flush(tokens: &mut Vec<Token>, kind_token: TokenType, ident: &mut String, number_line: usize) {
-    if !ident.is_empty() {
-        tokens.push(Token {
-            kind: kind_token,
-            lexeme: ident.clone(),
-            number_line: number_line,
-            len: ident.len(),
-        });
+fn build_lexeme(input: &str, start: usize, end: usize, end_line: usize) -> Option<&str> {
+    if end < end_line {
+        return Some(&input[start..end]);
+    } else {
+        return None;
+    }
+}
 
-        ident.clear();
+fn flush<'a>(
+    tokens: &mut Vec<Token<'a>>,
+    input: &'a str,
+    start: Option<usize>,
+    end: usize,
+    line: usize,
+) {
+    if let Some(s) = start {
+        if s < end {
+            tokens.push(Token {
+                kind: TokenType::Ident,
+                lexeme: &input[s..end],
+                len: end - s,
+                number_line: line,
+            });
+        }
     }
 }
 
