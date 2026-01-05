@@ -44,7 +44,7 @@ impl Ast {
         Self::parse_tokens(&tokens)
     }
 
-    fn parse_tokens(tokens: &Vec<Token>) -> Result<Self, ParseError> {
+    fn parse_tokens<'a>(tokens: &[Token<'a>]) -> Result<Self, ParseError> {
         let ast = Ast { items: Vec::new() };
         todo!();
         Ok(ast)

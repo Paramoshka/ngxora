@@ -1,5 +1,3 @@
-use crate::Node;
-
 #[derive(Debug, PartialEq, Clone)]
 pub struct Token<'a> {
     pub kind: TokenType,
@@ -17,74 +15,76 @@ pub enum TokenType {
 }
 
 impl<'a> Token<'a> {
-    pub fn tokenize(input: &str) -> Vec<Token> {
-        let len_input = input.len();
+    pub fn tokenize(input: &'a str) -> Vec<Token<'a>> {
+        let mut tokens: Vec<Token<'a>> = Vec::new();
+        let mut line: usize = 1;
 
-        let mut tokens: Vec<Token> = Vec::with_capacity(len_input);
-        let mut lines = input.lines();
-        let mut count_lines = 0;
+        let mut word_start: Option<usize> = None;
+        let mut chars = input.char_indices().peekable();
 
-        while let Some(line) = lines.next() {
-            count_lines += 1;
-            let end_line = line.len() - 1; // index last symbol in line
-            let mut end_lexeme = 1;
+        while let Some((i, c)) = chars.next() {
+            if c == '\n' {
+                flush(&mut tokens, input, &mut word_start, i, line);
+                line += 1;
+                continue;
+            }
 
-            for (i, current_char) in line.char_indices() {
-                if let lexeme = build_lexeme(input, i, end_lexeme, end_line) {
-                    if let Some(kind) = punct_token_type(current_char) {
-                        continue;
-                    }
+            if c.is_whitespace() {
+                flush(&mut tokens, input, &mut word_start, i, line);
+                continue;
+            }
 
-                    if current_char.is_whitespace() {
-                        end_lexeme = i + 1;
-                        continue;
-                    }
-
-                    if current_char == '#' {
-                        end_lexeme = i + 1;
+            if c == '#' {
+                flush(&mut tokens, input, &mut word_start, i, line);
+                while let Some((_, cc)) = chars.next() {
+                    if cc == '\n' {
+                        line += 1;
                         break;
                     }
-
-                    end_lexeme += 1;
-
-                    tokens.push(Token {
-                        kind,
-                        len: 1,
-                        lexeme: lexeme,
-                        number_line: count_lines,
-                    });
                 }
+                continue;
+            }
+
+            if let Some(kind) = punct_token_type(c) {
+                flush(&mut tokens, input, &mut word_start, i, line);
+
+                let end = i + c.len_utf8();
+                tokens.push(Token {
+                    kind,
+                    len: end - i,
+                    lexeme: &input[i..end],
+                    number_line: line,
+                });
+                continue;
+            }
+
+            if word_start.is_none() {
+                word_start = Some(i);
             }
         }
 
+        flush(&mut tokens, input, &mut word_start, input.len(), line);
         tokens
-    }
-}
-
-fn build_lexeme(input: &str, start: usize, end: usize, end_line: usize) -> Option<&str> {
-    if end < end_line {
-        return Some(&input[start..end]);
-    } else {
-        return None;
     }
 }
 
 fn flush<'a>(
     tokens: &mut Vec<Token<'a>>,
     input: &'a str,
-    start: Option<usize>,
+    start: &mut Option<usize>,
     end: usize,
     line: usize,
 ) {
-    if let Some(s) = start {
-        if s < end {
-            tokens.push(Token {
-                kind: TokenType::Ident,
-                lexeme: &input[s..end],
-                len: end - s,
-                number_line: line,
-            });
-        }
+    let Some(s) = start.take() else {
+        return;
+    };
+    if s < end {
+        tokens.push(Token {
+            kind: TokenType::Ident,
+            lexeme: &input[s..end],
+            len: end - s,
+            number_line: line,
+        });
     }
 }
 
