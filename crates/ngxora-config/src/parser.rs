@@ -15,7 +15,7 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(tokens: &'a [Token]) -> Self {
+    pub fn new(tokens: &'a [Token<'a>]) -> Self {
         Self { tokens, pos: 0 }
     }
 
@@ -44,7 +44,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_items(&mut self, until_rbrace: bool) -> Result<Vec<Node>, ParseError> {
+    pub fn parse_items(&mut self, until_rbrace: bool) -> Result<Vec<Node>, ParseError> {
         let mut items: Vec<Node> = Vec::new();
 
         while let Some(token) = self.peek() {
@@ -61,8 +61,10 @@ impl<'a> Parser<'a> {
             items.push(self.parse_stmt()?);
         }
 
-        if until_rbrace {
-            self.expect(TokenType::LBrace)?;
+        if until_rbrace && self.peek().is_none() {
+            return Err(ParseError {
+                message: "unexpected EOF: expected '}'".into(),
+            });
         }
 
         Ok(items)

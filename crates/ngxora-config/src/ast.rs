@@ -45,9 +45,8 @@ impl Ast {
     }
 
     fn parse_tokens<'a>(tokens: &[Token<'a>]) -> Result<Self, ParseError> {
-        let ast = Ast { items: Vec::new() };
         let mut parser = Parser::new(tokens);
-
-        Ok(ast)
+        let items = parser.parse_items(false)?;
+        Ok(Ast { items })
     }
 }
