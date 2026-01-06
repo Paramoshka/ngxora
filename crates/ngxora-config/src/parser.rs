@@ -62,7 +62,7 @@ impl<'a> Parser<'a> {
         }
 
         if until_rbrace {
-            // TODO
+            self.expect(TokenType::LBrace)?;
         }
 
         Ok(items)
@@ -94,10 +94,23 @@ impl<'a> Parser<'a> {
 
         match self.peek().map(|t| &t.kind) {
             Some(TokenType::Semicolon) => {
-                self.next(); // consumed
+                self.next(); // consumed ";"
                 Ok(Node::directive(name, args))
             }
-            None => todo!(),
+
+            Some(TokenType::LBrace) => {
+                self.next(); // consumed "{"
+                let children = self.parse_items(true)?;
+                self.expect(TokenType::RBrace)?;
+                Ok(Node::block(name, args, children))
+            }
+
+            Some(kind) => Err(ParseError {
+                message: format!("expected ';' or '{{', got {:?}", kind),
+            }),
+            None => Err(ParseError {
+                message: "unexpected EOF after directive".into(),
+            }),
         }
     }
 }
