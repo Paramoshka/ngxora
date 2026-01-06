@@ -31,20 +31,16 @@ impl<'a> Parser<'a> {
         tok
     }
 
-    fn expect(&mut self, kind: TokenType) -> Result<&'a Token, ParseError> {
-        match self.next() {
-            Some(t) if t.kind == kind => Ok(t),
-
-            Some(t) => Err(ParseError {
-                message: format!(
-                    "expected {:?}, got {:?} at line {}",
-                    kind, t.kind, t.number_line
-                ),
-            }),
-
-            None => Err(ParseError {
-                message: format!("expected {:?}, got EOF", kind),
-            }),
+    fn expect(&mut self, kind: TokenType) -> Result<(), ParseError> {
+        let tok = self.next().ok_or(ParseError {
+            message: "unexpected EOF".into(),
+        })?;
+        if tok.kind == kind {
+            Ok(())
+        } else {
+            Err(ParseError {
+                message: format!("expected {:?}, got {:?}", kind, tok.kind),
+            })
         }
     }
 
@@ -73,8 +69,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> Result<Node, ParseError> {
-        // TODO
+        let name_tok = self.next().ok_or(ParseError {
+            message: "unexpected EOF".into(),
+        })?;
 
-        Ok(())
+        if name_tok.kind != TokenType::Ident {
+            return Err(ParseError {
+                message: format!("expected Ident, got {:?}", name_tok.kind),
+            });
+        };
+
+        let name = name_tok.lexeme.to_string();
+        let mut args = Vec::new();
     }
 }
