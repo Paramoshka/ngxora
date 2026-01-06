@@ -81,5 +81,23 @@ impl<'a> Parser<'a> {
 
         let name = name_tok.lexeme.to_string();
         let mut args = Vec::new();
+
+        while let Some(tok) = self.peek() {
+            if tok.kind != TokenType::Ident {
+                break;
+            }
+            let tok = self.next().ok_or(ParseError {
+                message: "unexpected EOF".into(),
+            })?;
+            args.push(tok.lexeme.to_string());
+        }
+
+        match self.peek().map(|t| &t.kind) {
+            Some(TokenType::Semicolon) => {
+                self.next(); // consumed
+                Ok(Node::directive(name, args))
+            }
+            None => todo!(),
+        }
     }
 }
