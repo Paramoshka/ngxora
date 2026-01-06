@@ -1,4 +1,7 @@
-use crate::lexer::{Token, TokenType};
+use crate::{
+    Node,
+    lexer::{Token, TokenType},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -16,11 +19,11 @@ impl<'a> Parser<'a> {
         Self { tokens, pos: 0 }
     }
 
-    pub fn peek(&self) -> Option<&'a Token<'a>> {
+    fn peek(&self) -> Option<&'a Token<'a>> {
         self.tokens.get(self.pos)
     }
 
-    pub fn next(&mut self) -> Option<&'a Token<'a>> {
+    fn next(&mut self) -> Option<&'a Token<'a>> {
         let tok = self.tokens.get(self.pos);
         if tok.is_some() {
             self.pos += 1;
@@ -28,18 +31,50 @@ impl<'a> Parser<'a> {
         tok
     }
 
-    pub fn expect(&mut self, kind: TokenType) -> Result<&'a Token, ParseError> {
+    fn expect(&mut self, kind: TokenType) -> Result<&'a Token, ParseError> {
         match self.next() {
             Some(t) if t.kind == kind => Ok(t),
+
             Some(t) => Err(ParseError {
                 message: format!(
                     "expected {:?}, got {:?} at line {}",
                     kind, t.kind, t.number_line
                 ),
             }),
+
             None => Err(ParseError {
                 message: format!("expected {:?}, got EOF", kind),
             }),
         }
+    }
+
+    fn parse_items(&mut self, until_rbrace: bool) -> Result<Vec<Node>, ParseError> {
+        let mut items: Vec<Node> = Vec::new();
+
+        while let Some(token) = self.peek() {
+            if token.kind == TokenType::RBrace {
+                if until_rbrace {
+                    break;
+                }
+
+                return Err(ParseError {
+                    message: "unexpected '}'".into(),
+                });
+            }
+
+            items.push(self.parse_stmt()?);
+        }
+
+        if until_rbrace {
+            // TODO
+        }
+
+        Ok(items)
+    }
+
+    fn parse_stmt(&mut self) -> Result<Node, ParseError> {
+        // TODO
+
+        Ok(())
     }
 }

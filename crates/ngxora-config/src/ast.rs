@@ -48,8 +48,6 @@ impl Ast {
         let ast = Ast { items: Vec::new() };
         let mut parser = Parser::new(tokens);
 
-        // TODO
-
         Ok(ast)
     }
 }
