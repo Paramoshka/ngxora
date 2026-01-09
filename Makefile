@@ -13,6 +13,7 @@ APP        := ngxora
 TAG      ?= dev
 REGISTRY ?= registry.example.com
 IMAGE    ?= $(REGISTRY)/$(APP):$(TAG)
+BUILDER_IMAGE := ngxora-src
 PLATFORMS ?= linux/amd64,linux/arm64
 
 # Tools
@@ -32,6 +33,13 @@ help: ## Show available targets
 all: test build ## Run tests + build artifacts
 ci: lint test build ## CI pipeline (lint + tests + build)
 
+
+# =========================
+# Src section
+# =========================
+image-builder:
+	$(DOCKER) build . -t $(BUILDER_IMAGE) --file ./tools/Dockerfile --target builder
+
 # =========================
 # Tests section
 # =========================
@@ -41,8 +49,8 @@ lint: ## Lint source code
 	$(CARGO) vet ./...
 
 test: test-unit ## Run default test suite
-test-unit: ## Run unit tests
-	$(CARGO) test ./...
+test-unit: image-builder: ## Run unit tests
+	$(DOCKER) run --rm $(BUILDER_IMAGE) ./tools/lint.sh
 
 test-integration: ## Run integration tests
 	# require env or docker compose etc.
