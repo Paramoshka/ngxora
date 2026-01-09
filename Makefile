@@ -49,8 +49,8 @@ lint: ## Lint source code
 	$(CARGO) vet ./...
 
 test: test-unit ## Run default test suite
-test-unit: image-builder: ## Run unit tests
-	$(DOCKER) run --rm $(BUILDER_IMAGE) ./tools/lint.sh
+test-unit: image-builder ## Run unit tests
+	$(DOCKER) run --rm $(BUILDER_IMAGE) bash -lc 'cd /app/crates/ngxora-config && cargo test'
 
 test-integration: ## Run integration tests
 	# require env or docker compose etc.
@@ -60,7 +60,7 @@ test-integration: ## Run integration tests
 # Build section
 # =========================
 
-build: build-bin build-image ## Build all artifacts
+build: build-image ## Build all artifacts
 
 build-image: ## Build docker image locally
 	$(DOCKER) build -t $(IMAGE):$(TAG) .
