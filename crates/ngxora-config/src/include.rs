@@ -77,6 +77,11 @@ where
 
             Node::Block(block) => {
                 let children = resolve_nodes(&block.children, loader)?;
+                out.push(Node::block(
+                    block.name.clone(),
+                    block.args.clone(),
+                    children,
+                ));
             }
 
             other => out.push(other.clone()),
