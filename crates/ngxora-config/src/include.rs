@@ -32,7 +32,7 @@ impl IncludeResolver {
         let loader = |path: &str| {
             std::fs::read_to_string(path).map_err(|e| IncludeError {
                 message: e.to_string(),
-            });
+            })
         };
 
         let nodes = resolve_nodes(&ast.items, &loader)?;
@@ -57,14 +57,27 @@ fn collect_includes(nodes: &[Node], out: &mut Vec<IncludeFile>) {
     }
 }
 
-fn resolve_nodes(nodes: &[Node], load: &impl Fn(&str)) -> Result<Vec<Node>, IncludeError> {
+fn resolve_nodes<F>(nodes: &[Node], loader: &F) -> Result<Vec<Node>, IncludeError>
+where
+    F: Fn(&str) -> Result<String, IncludeError>,
+{
     let mut out: Vec<Node> = Vec::new();
 
     for node in nodes {
         match node {
-            Node::Directive(directive) => todo!(),
+            Node::Directive(directive) if directive.name == INCLUDE_DIRECTIVE => {
+                for path in &directive.args {
+                    let text = loader(path)?;
+                    let ast = Ast::parse_config(&text)
+                        .map_err(|e| IncludeError { message: e.message })?;
 
-            Node::Block(block) => todo!(),
+                    out.extend(resolve_nodes(&ast.items, loader)?);
+                }
+            }
+
+            Node::Block(block) => {
+                let children = resolve_nodes(&block.children, loader)?;
+            }
 
             other => out.push(other.clone()),
         }
