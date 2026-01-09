@@ -40,6 +40,7 @@ impl IncludeResolver {
     }
 }
 
+// It does not perform a payload yet, it may be necessary to expand the functionality.
 fn collect_includes(nodes: &[Node], out: &mut Vec<IncludeFile>) {
     for node in nodes {
         match node {
