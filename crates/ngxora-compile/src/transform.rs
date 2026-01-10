@@ -1,17 +1,28 @@
-use ngxora_config::Ast;
+use ngxora_config::{Ast, Node};
 
-use crate::ir::Ir;
+use crate::{consts, ir::{Http, Ir}};
 
 impl Ir {
-    pub fn new(&self, ast: &Ast) -> Self {
-        let ir: Ir = Ir::default();
+    pub fn from_ast(ast: &Ast) -> Self {
+        let mut ir = Ir::default();
+        let mut http: Option<Http> = None;
         for node in &ast.items {
             match node {
-                ngxora_config::Node::Directive(directive) => todo!(),
-                ngxora_config::Node::Block(block) => todo!(),
+                Node::Directive(_directive) => {}
+                Node::Block(block) => match block.name.as_str() {
+                    consts::HTTP => {
+                        if http.is_some() {
+                            continue;
+                        }
+                        http = Some(Http { servers: Vec::new() });
+                        // TODO: lower `block.children` into `http.servers`
+                    }
+                    _ => {}
+                },
             }
         }
 
+        ir.http = http;
         ir
     }
 }
