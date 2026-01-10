@@ -50,7 +50,7 @@ lint: ## Lint source code
 
 test: test-unit ## Run default test suite
 test-unit: image-builder ## Run unit tests
-	$(DOCKER) run --rm $(BUILDER_IMAGE) bash -lc 'cd /app/crates/ngxora-config && cargo test'
+	$(DOCKER) run --rm -w /app/crates/ngxora-config $(BUILDER_IMAGE) cargo test
 
 test-integration: ## Run integration tests
 	# require env or docker compose etc.
