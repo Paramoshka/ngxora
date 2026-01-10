@@ -1,6 +1,9 @@
-#[derive(Debug, Eq, PartialEq)]
+// Intermediate Representation layer
+
+#[derive(Debug, Eq, PartialEq, Default)]
 pub struct Ir {
-    pub http: Vec<Http>,
+    pub http: Option<Http>,
+    // events ?
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -27,11 +30,13 @@ pub enum ListenEndpoint {
     Unix { path: String },
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub struct Location {
     pub matcher: LocationMatcher,
     pub directives: Vec<LocationDirective>, // proxy_pass, root, try_files...
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum LocationMatcher {
     Prefix(String), // `location /api/ {}`
     Exact(String),  // `location = / {}`
@@ -43,6 +48,7 @@ pub enum LocationMatcher {
     Named(String),  // `@name`
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum LocationDirective {
     ProxyPass(String),
     Root(String),

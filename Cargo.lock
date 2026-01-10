@@ -23,6 +23,9 @@ dependencies = [
 [[package]]
 name = "ngxora-compile"
 version = "0.1.0"
+dependencies = [
+ "ngxora-config",
+]
 
 [[package]]
 name = "ngxora-config"
