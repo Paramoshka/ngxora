@@ -4,3 +4,7 @@ pub const LOCATION: &str = "location";
 
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";
+
+// Inner directives in blocs
+pub const TCP_NODELAY: &str = "tcp_nodelay";
+pub const KEEPALIVE_TIMEOUT: &str = "tcp_nodelay";
