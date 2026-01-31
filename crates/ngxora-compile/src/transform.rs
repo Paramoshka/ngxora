@@ -140,7 +140,25 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
 }
 
 fn lower_location(block: &Block) -> Result<Location, LowerErr> {
-    todo!()
+    let mut location: Option<Location> = None;
+
+    match block.args.as_slice() {
+        [] => {
+            Err(LowerErr {
+                message: format!("location block must have a path, after directive '/' "),
+            });
+        }
+
+        [path] => {}
+
+        _ => {
+            return Err(LowerErr {
+                message: format!("unsupported server directive: {}", d.name),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn block_named<'a>(node: &'a Node, name: &'a str) -> Option<&'a Block> {
