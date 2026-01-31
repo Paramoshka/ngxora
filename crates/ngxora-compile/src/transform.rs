@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::{
     consts,
-    ir::{Http, Ir, Listen, Location, Server, Switch},
+    ir::{Http, Ir, Listen, Location, LocationMatcher, Server, Switch},
 };
 
 pub struct LowerErr {
@@ -159,6 +159,32 @@ fn lower_location(block: &Block) -> Result<Location, LowerErr> {
     }
 
     Ok(())
+}
+
+fn parse_location_matcher(args: &[String]) -> Result<LocationMatcher, LowerErr> {
+    match args {
+        [op, pattern] if op == "~" => Ok(LocationMatcher::Regex {
+            case_insensitive: false,
+            pattern: pattern.clone(),
+        }),
+
+        [op, pattern] if op == "~*" => Ok(LocationMatcher::Regex {
+            case_insensitive: true,
+            pattern: pattern.clone(),
+        }),
+
+        [op, path] if op == "^~" => Ok(LocationMatcher::PreferPrefix(path.clone())),
+
+        [name] if name.starts_with('@') => Ok(LocationMatcher::Named(
+            name.trim_start_matches('@').to_string(),
+        )),
+
+        [path] => Ok(LocationMatcher::Prefix(path.clone())),
+
+        _ => Err(LowerErr {
+            message: format!("invalid location args: {:?}", args),
+        }),
+    }
 }
 
 fn block_named<'a>(node: &'a Node, name: &'a str) -> Option<&'a Block> {
