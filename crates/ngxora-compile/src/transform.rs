@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::{
     consts,
-    ir::{Http, Ir, Listen, Location, LocationMatcher, Server, Switch},
+    ir::{Http, Ir, Listen, Location, LocationDirective, LocationMatcher, Server, Switch},
 };
 
 pub struct LowerErr {
@@ -140,23 +140,8 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
 }
 
 fn lower_location(block: &Block) -> Result<Location, LowerErr> {
-    let mut location: Option<Location> = None;
-
-    match block.args.as_slice() {
-        [] => {
-            Err(LowerErr {
-                message: format!("location block must have a path, after directive '/' "),
-            });
-        }
-
-        [path] => {}
-
-        _ => {
-            return Err(LowerErr {
-                message: format!("unsupported server directive: {}", d.name),
-            });
-        }
-    }
+    let matcher = parse_location_matcher(&block.args)?;
+    let directives = parse_location_directives(&block.children)?;
 
     Ok(())
 }
@@ -185,6 +170,24 @@ fn parse_location_matcher(args: &[String]) -> Result<LocationMatcher, LowerErr> 
             message: format!("invalid location args: {:?}", args),
         }),
     }
+}
+
+fn parse_location_directives(nodes: &Vec<Node>) -> Result<Vec<LocationDirective>, LowerErr> {
+    let mut directives: Vec<LocationDirective> = Vec::new();
+    for node in nodes {
+        match node {
+            Node::Directive(directive) => {
+                let location_directive = appy_location_directive(&directive)?;
+            }
+            Node::Block(block) => {
+                return Err(LowerErr {
+                    message: format!("Unexpected inner block in location block: {:?}", block.name),
+                });
+            }
+        }
+    }
+
+    Ok(directives)
 }
 
 fn block_named<'a>(node: &'a Node, name: &'a str) -> Option<&'a Block> {
