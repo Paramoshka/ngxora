@@ -144,7 +144,10 @@ fn lower_location(block: &Block) -> Result<Location, LowerErr> {
     let matcher = parse_location_matcher(&block.args)?;
     let directives = parse_location_directives(&block.children)?;
 
-    Ok(())
+    Ok(Location {
+        matcher,
+        directives,
+    })
 }
 
 fn parse_location_matcher(args: &[String]) -> Result<LocationMatcher, LowerErr> {
@@ -178,7 +181,8 @@ fn parse_location_directives(nodes: &Vec<Node>) -> Result<Vec<LocationDirective>
     for node in nodes {
         match node {
             Node::Directive(directive) => {
-                let location_directive = appy_location_directive(directive)?;
+                let location_directive = apply_location_directive(directive)?;
+                directives.push(location_directive);
             }
             Node::Block(block) => {
                 return Err(LowerErr {
