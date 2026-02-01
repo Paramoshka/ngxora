@@ -1,6 +1,8 @@
 // Intermediate Representation layer
 use std::net::{IpAddr, Ipv4Addr};
 
+use url::Url;
+
 #[derive(Debug, Eq, PartialEq, Default)]
 pub struct Ir {
     pub http: Option<Http>,
@@ -70,7 +72,7 @@ pub enum LocationMatcher {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum LocationDirective {
-    ProxyPass(String),
+    ProxyPass(Url),
     Root(String),
     TryFiles(String),
 }

@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 ngxora-config = { path = "../ngxora-config" }
+url = "2.5"
 

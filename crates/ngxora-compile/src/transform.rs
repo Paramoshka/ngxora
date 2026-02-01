@@ -1,5 +1,6 @@
 use ngxora_config::{Ast, Block, Directive, Node};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::{fmt::format, net::SocketAddr};
+use url::{ParseError, Url};
 
 use crate::{
     consts,
@@ -177,7 +178,7 @@ fn parse_location_directives(nodes: &Vec<Node>) -> Result<Vec<LocationDirective>
     for node in nodes {
         match node {
             Node::Directive(directive) => {
-                let location_directive = appy_location_directive(&directive)?;
+                let location_directive = appy_location_directive(directive)?;
             }
             Node::Block(block) => {
                 return Err(LowerErr {
@@ -188,6 +189,29 @@ fn parse_location_directives(nodes: &Vec<Node>) -> Result<Vec<LocationDirective>
     }
 
     Ok(directives)
+}
+
+fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, LowerErr> {
+    match directive.name.as_str() {
+        consts::PROXY_PASS => match directive.args.as_slice() {
+            [raw_url] => {
+                let parsed_url = Url::parse(raw_url).map_err(|e| LowerErr {
+                    message: format!("proxy_pass: invalid URL: {:?}", e),
+                })?;
+                Ok(LocationDirective::ProxyPass(parsed_url))
+            }
+            [] => Err(LowerErr {
+                message: "proxy_pass: expected URL".into(),
+            }),
+            _ => Err(LowerErr {
+                message: "proxy_pass: expected exactly 1 argument".into(),
+            }),
+        },
+
+        _ => Err(LowerErr {
+            message: format!("unknown directive in location: {}", directive.name),
+        }),
+    }
 }
 
 fn block_named<'a>(node: &'a Node, name: &'a str) -> Option<&'a Block> {
