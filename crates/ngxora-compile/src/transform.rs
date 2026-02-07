@@ -1,5 +1,5 @@
 use ngxora_config::{Ast, Block, Directive, Node};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use url::Url;
 
 use crate::{
@@ -7,6 +7,7 @@ use crate::{
     ir::{Http, Ir, Listen, Location, LocationDirective, LocationMatcher, Server, Switch},
 };
 
+#[derive(Debug)]
 pub struct LowerErr {
     pub message: String,
 }
@@ -252,10 +253,21 @@ fn parse_listen_directives(args: &[String]) -> Result<Listen, LowerErr> {
             });
         }
         [endpoint, params @ ..] => {
-            if let Ok(sa) = endpoint.parse::<SocketAddr>() {
+            if let Some(port_str) = endpoint.strip_prefix("*:") {
+                let port = port_str.parse::<u16>().map_err(|_| LowerErr {
+                    message: format!("listen: invalid port {:?}", port_str),
+                })?;
+                listen.addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+                listen.port = port;
+            } else if endpoint.starts_with("unix:") {
+                return Err(LowerErr {
+                    message: "listen: unix sockets not supported".into(),
+                });
+            } else if let Ok(sa) = endpoint.parse::<SocketAddr>() {
                 listen.addr = sa.ip();
                 listen.port = sa.port();
             } else if let Ok(port) = endpoint.parse::<u16>() {
+                listen.addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
                 listen.port = port;
             } else {
                 return Err(LowerErr {
