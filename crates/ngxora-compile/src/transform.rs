@@ -1,6 +1,6 @@
 use ngxora_config::{Ast, Block, Directive, Node};
-use std::{fmt::format, net::SocketAddr};
-use url::{ParseError, Url};
+use std::net::SocketAddr;
+use url::Url;
 
 use crate::{
     consts,
@@ -12,7 +12,7 @@ pub struct LowerErr {
 }
 
 impl Ir {
-    pub fn from_ast(ast: &Ast) -> Self {
+    pub fn from_ast(ast: &Ast) -> Result<Self, LowerErr> {
         let mut ir = Ir::default();
         let mut http: Option<Http> = None;
         for node in &ast.items {
@@ -21,7 +21,7 @@ impl Ir {
                 Node::Block(block) => match block.name.as_str() {
                     consts::HTTP => match lower_http(block) {
                         Ok(h) => http = Some(h),
-                        Err(_) => todo!(),
+                        Err(e) => return Err(e),
                     },
                     _ => {}
                 },
@@ -29,7 +29,7 @@ impl Ir {
         }
 
         ir.http = http;
-        ir
+        Ok(ir)
     }
 }
 
@@ -41,18 +41,15 @@ fn lower_http(block: &Block) -> Result<Http, LowerErr> {
             Node::Directive(directive) => apply_http_directive(&mut http, directive)?,
             Node::Block(block) => match block_named(children_block, consts::SERVER) {
                 // fill up server block
-                Some(b) => match b.name.as_str() {
-                    consts::SERVER_NAME => match lower_server(&b) {
-                        Ok(server) => http.servers.push(server),
-                        Err(e) => return Err(e),
-                    },
-                    _ => {
-                        return Err(LowerErr {
-                            message: format!("Unknown block name: {:?}", block.name),
-                        });
-                    }
-                },
-                None => todo!(),
+                Some(b) => {
+                    let server = lower_server(b)?;
+                    http.servers.push(server);
+                }
+                None => {
+                    return Err(LowerErr {
+                        message: format!("Unknown block name: {:?}", block.name),
+                    });
+                }
             },
         }
     }
@@ -95,21 +92,11 @@ fn lower_server(block: &Block) -> Result<Server, LowerErr> {
             Node::Directive(directive) => apply_server_directive(&mut server, directive)?,
 
             Node::Block(block) => match block_named(children, consts::LOCATION) {
-                Some(b) => match b.name.as_str() {
-                    // fill up location block
-                    consts::LOCATION => match lower_location(&b) {
-                        Ok(location) => server.locations.push(location),
-                        Err(e) => return Err(e),
-                    },
-
-                    _ => {
-                        return Err(LowerErr {
-                            message: format!("Unkonown name of block: {:?}", block.name),
-                        });
-                    }
-                },
-
-                _ => {
+                Some(b) => {
+                    let location = lower_location(b)?;
+                    server.locations.push(location);
+                }
+                None => {
                     return Err(LowerErr {
                         message: format!("Unknown name of block: {:?}", block.name),
                     });
@@ -125,10 +112,20 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
     match d.name.as_str() {
         // fill up `listen 80 default_server`;
         consts::LISTEN => {
-            if let Ok(listen) = parse_listen_directives(&d.args) {
-                server.listens.push(listen);
-            }
+            let listen = parse_listen_directives(&d.args)?;
+            server.listens.push(listen);
         }
+
+        consts::SERVER_NAME => match d.args.as_slice() {
+            [] => {
+                return Err(LowerErr {
+                    message: "server_name: expected at least 1 argument".into(),
+                });
+            }
+            names => {
+                server.server_names.extend(names.iter().cloned());
+            }
+        },
 
         _ => {
             return Err(LowerErr {
@@ -152,6 +149,8 @@ fn lower_location(block: &Block) -> Result<Location, LowerErr> {
 
 fn parse_location_matcher(args: &[String]) -> Result<LocationMatcher, LowerErr> {
     match args {
+        [op, path] if op == "=" => Ok(LocationMatcher::Exact(path.clone())),
+
         [op, pattern] if op == "~" => Ok(LocationMatcher::Regex {
             case_insensitive: false,
             pattern: pattern.clone(),
