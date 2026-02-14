@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-arc-swap = "1.8.0"
-ngxora-config = { path = "crates/ngxora-config" }
+arc-swap = "1.8.2"
+ngxora-config = {path = "crates/ngxora-config"}
 ngxora-compile = {path = "crates/ngxora-compile"}
+ngxora-runtime = {path = "crates/ngxora-runtime"}
 
 [[bin]]
 name = "ngxora"
