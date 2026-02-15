@@ -1,5 +1,7 @@
+use std::fmt::Error;
 // Intermediate Representation layer
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 
 use url::Url;
 
@@ -31,6 +33,36 @@ pub struct Server {
     pub server_names: Vec<String>,
     pub locations: Vec<Location>,
     pub listens: Vec<Listen>,
+    pub tls: Option<TlsIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsIdentity {
+    pub cert: PemSource,
+    pub key: PemSource,
+}
+
+impl Default for TlsIdentity {
+    fn default() -> Self {
+        Self {
+            cert: PemSource::Path(PathBuf::new()),
+            key: PemSource::Path(PathBuf::new()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PemSource {
+    Path(PathBuf),
+    InlinePem(String),
+}
+
+impl PemSource {
+    pub fn new(raw_path: &[String], _is_inline: bool) -> Result<Self, Error> {
+        let path: PathBuf = raw_path.iter().collect();
+        let pem_source: PemSource = PemSource::Path(path);
+        Ok(pem_source)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

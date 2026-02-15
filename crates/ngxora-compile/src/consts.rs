@@ -11,3 +11,7 @@ pub const KEEPALIVE_TIMEOUT: &str = "keepalive_timeout";
 
 // Listener directives
 pub const PROXY_PASS: &str = "proxy_pass";
+
+// TLS CERTS
+pub const SSL_CERTIFICATE: &str = "ssl_certificate";
+pub const SSL_CERTIFICATE_KEY: &str = "ssl_certificate_key";

@@ -4,7 +4,10 @@ use url::Url;
 
 use crate::{
     consts,
-    ir::{Http, Ir, Listen, Location, LocationDirective, LocationMatcher, Server, Switch},
+    ir::{
+        Http, Ir, Listen, Location, LocationDirective, LocationMatcher, PemSource, Server, Switch,
+        TlsIdentity,
+    },
 };
 
 #[derive(Debug)]
@@ -125,6 +128,50 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
             }
             names => {
                 server.server_names.extend(names.iter().cloned());
+            }
+        },
+
+        consts::SSL_CERTIFICATE => match d.args.as_slice() {
+            [cert] => {
+                let ps =
+                    PemSource::new(std::slice::from_ref(cert), false).map_err(|_| LowerErr {
+                        message: "ssl_certificate: invalid certificate source".into(),
+                    })?;
+
+                let tls = server.tls.get_or_insert_with(TlsIdentity::default);
+                tls.cert = ps;
+            }
+            [] => {
+                return Err(LowerErr {
+                    message: "ssl_certificate: expected 1 argument".into(),
+                });
+            }
+            _ => {
+                return Err(LowerErr {
+                    message: "ssl_certificate: expected exactly 1 argument".into(),
+                });
+            }
+        },
+
+        consts::SSL_CERTIFICATE_KEY => match d.args.as_slice() {
+            [key] => {
+                let ps =
+                    PemSource::new(std::slice::from_ref(key), false).map_err(|_| LowerErr {
+                        message: "ssl_certificate_key: invalid key source".into(),
+                    })?;
+
+                let tls = server.tls.get_or_insert_with(TlsIdentity::default);
+                tls.key = ps;
+            }
+            [] => {
+                return Err(LowerErr {
+                    message: "ssl_certificate_key: expected 1 argument".into(),
+                });
+            }
+            _ => {
+                return Err(LowerErr {
+                    message: "ssl_certificate_key: expected exactly 1 argument".into(),
+                });
             }
         },
 
