@@ -76,6 +76,7 @@ pub struct VirtualHostRoutes {
     pub default: Option<ServerRoutes>,
 }
 
+// CompiledRouter stores the Ir representation in an optimized form.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct CompiledRouter {
     pub listeners: HashMap<ListenKey, VirtualHostRoutes>,
@@ -160,11 +161,18 @@ impl ProxyHttp for DynamicProxy {
 
     fn new_ctx(&self) -> Self::CTX {}
 
+    // upstream_peer method allows for advanced configurations, including HTTPS, SNI, and dynamic load balancing based on the request headers.
     async fn upstream_peer(
         &self,
-        _session: &mut Session,
-        _ctx: &mut Self::CTX,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        todo!("pick upstream using CompiledRouter")
+        //extract listen_key, host, path
+        //find listener in CompiledRouter
+        //choose vhost by host, fallback to default
+        //match location by nginx priority
+        //build and return HttpPeer from selected target
+        // if no route: return error.
+        todo!()
     }
 }
