@@ -1,3 +1,4 @@
+use arc_swap::{ArcSwap, ArcSwapAny};
 use async_trait::async_trait;
 use ngxora_compile::ir::{Http, Listen, Location, LocationDirective, LocationMatcher, Server};
 use pingora::Result;
@@ -140,26 +141,29 @@ fn compile_locations(locations: &[Location]) -> Vec<CompiledLocation> {
 }
 
 pub struct DynamicProxy {
-    routing: Arc<RwLock<CompiledRouter>>,
+    routing: ArcSwap<CompiledRouter>,
 }
 
 impl DynamicProxy {
     pub fn new(routing: CompiledRouter) -> Self {
         Self {
-            routing: Arc::new(RwLock::new(routing)),
+            routing: ArcSwap::from_pointee(routing),
         }
     }
 
-    pub fn router(&self) -> Arc<RwLock<CompiledRouter>> {
-        Arc::clone(&self.routing)
+    /// Retrieve routes for a specific key (Lock-free)
+    pub fn get_routes(&self, key: &ListenKey) -> Option<Arc<VirtualHostRoutes>> {
+        // .load() returns a Guard which can be treated like Arc<CompiledRouter>
+        let router = self.routing.load();
+
+        // Return a reference-counted pointer to the specific routes
+        // This assumes VirtualHostRoutes is wrapped in Arc or cloned
+        router.listeners.get(key).cloned().map(Arc::new)
     }
 
-    pub fn with_routes<F, R>(&self, key: &ListenKey, f: F) -> Option<R>
-    where
-        F: FnOnce(&VirtualHostRoutes) -> R,
-    {
-        let router_lock = self.routing.read().ok()?;
-        router_lock.listeners.get(key).map(f)
+    /// Replace the entire routing table (Atomic write)
+    pub fn update_routing(&self, new_router: CompiledRouter) {
+        self.routing.store(Arc::new(new_router));
     }
 }
 
@@ -216,7 +220,7 @@ impl ProxyHttp for DynamicProxy {
             ssl: is_ssl,
         };
 
-        let virtual_host = self.with_routes(&listen_key, |vs| {});
+        let virtual_host = self.get_routes(&listen_key);
 
         //choose vhost by host, fallback to default
         //match location by nginx priority
