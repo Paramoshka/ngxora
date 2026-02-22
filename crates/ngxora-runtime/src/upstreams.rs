@@ -153,6 +153,14 @@ impl DynamicProxy {
     pub fn router(&self) -> Arc<RwLock<CompiledRouter>> {
         Arc::clone(&self.routing)
     }
+
+    pub fn with_routes<F, R>(&self, key: &ListenKey, f: F) -> Option<R>
+    where
+        F: FnOnce(&VirtualHostRoutes) -> R,
+    {
+        let router_lock = self.routing.read().ok()?;
+        router_lock.listeners.get(key).map(f)
+    }
 }
 
 #[async_trait]
@@ -168,11 +176,52 @@ impl ProxyHttp for DynamicProxy {
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         //extract listen_key, host, path
+        // 1. Get the Path
+        let _path = session.req_header().uri.path();
+
+        // 2. Get the Host (returns Option<&HeaderValue>)
+        let server_addr = session.server_addr().ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                "missing downstream server addr",
+            )
+        })?;
+
+        let inet = server_addr.as_inet().ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                "downstream server addr is not inet (likely UDS)",
+            )
+        })?;
+
+        let addr = inet.ip();
+        let port = inet.port();
+
+        // while not used.
+        let _host = session
+            .get_header("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("default.com");
+
+        // 3. Check is SSL.
+        let is_ssl = session
+            .digest()
+            .and_then(|d| d.ssl_digest.as_ref())
+            .is_some();
+
         //find listener in CompiledRouter
+        let listen_key = ListenKey {
+            addr: addr,
+            port: port,
+            ssl: is_ssl,
+        };
+
+        let virtual_host = self.with_routes(&listen_key, |vs| {});
+
         //choose vhost by host, fallback to default
         //match location by nginx priority
         //build and return HttpPeer from selected target
         // if no route: return error.
-        todo!()
+        todo!("");
     }
 }
