@@ -180,8 +180,6 @@ impl ProxyHttp for DynamicProxy {
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         //extract listen_key, host, path
-        // 1. Get the Path
-        let _path = session.req_header().uri.path();
 
         // 2. Get the Host (returns Option<&HeaderValue>)
         let server_addr = session.server_addr().ok_or_else(|| {
@@ -201,12 +199,6 @@ impl ProxyHttp for DynamicProxy {
         let addr = inet.ip();
         let port = inet.port();
 
-        // while not used.
-        let _host = session
-            .get_header("host")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("default.com");
-
         // 3. Check is SSL.
         let is_ssl = session
             .digest()
@@ -220,9 +212,51 @@ impl ProxyHttp for DynamicProxy {
             ssl: is_ssl,
         };
 
-        let virtual_host = self.get_routes(&listen_key);
-
         //choose vhost by host, fallback to default
+        let vhosts = self.get_routes(&listen_key).ok_or_else(|| {
+            pingora::Error::explain(pingora::ErrorType::HTTPStatus(404), "no listener matched")
+        })?;
+
+        // 2) Host fallback: exact host -> default vhost
+        let host = session
+            .get_header("host")
+            .and_then(|v| v.to_str().ok())
+            .map(|h| h.split(':').next().unwrap_or(h).to_ascii_lowercase());
+
+        let server_routes = host
+            .as_deref()
+            .and_then(|h| vhosts.named.get(h))
+            .or(vhosts.default.as_ref())
+            .ok_or_else(|| {
+                pingora::Error::explain(
+                    pingora::ErrorType::HTTPStatus(404),
+                    "no virtual host matched",
+                )
+            })?;
+
+        let path = session.req_header().uri.path();
+        let mut selected: Option<&RouteTarget> = None;
+
+        for location in &server_routes.locations {
+            let is_match = match &location.matcher {
+                CompiledMatcher::Exact(p) => path == p,
+                CompiledMatcher::Prefix(p) | CompiledMatcher::PreferPrefix(p) => {
+                    path.starts_with(p)
+                }
+                CompiledMatcher::Regex { .. } => false,
+                CompiledMatcher::Named(_) => false,
+            };
+
+            if is_match {
+                selected = Some(&location.target);
+                break; // first-match
+            }
+        }
+
+        let target = selected.ok_or_else(|| {
+            pingora::Error::explain(pingora::ErrorType::HTTPStatus(404), "no location matched")
+        })?;
+
         //match location by nginx priority
         //build and return HttpPeer from selected target
         // if no route: return error.
