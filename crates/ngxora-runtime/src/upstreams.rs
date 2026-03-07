@@ -1,12 +1,18 @@
-use arc_swap::{ArcSwap, ArcSwapAny};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use ngxora_compile::ir::{Http, Listen, Location, LocationDirective, LocationMatcher, Server};
+use ngxora_compile::ir::{
+    Http, Listen, Location, LocationDirective, LocationMatcher, Server, TlsIdentity,
+};
 use pingora::Result;
 use pingora::upstreams::peer::HttpPeer;
 use pingora_proxy::{ProxyHttp, Session};
+use regex::RegexBuilder;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct ListenKey {
@@ -27,7 +33,12 @@ impl From<&Listen> for ListenKey {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RouteTarget {
-    ProxyPass { upstream: String },
+    ProxyPass {
+        host: String,
+        port: u16,
+        tls: bool,
+        sni: String,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -77,10 +88,17 @@ pub struct VirtualHostRoutes {
     pub default: Option<ServerRoutes>,
 }
 
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct ListenerTlsConfig {
+    pub named: HashMap<String, TlsIdentity>,
+    pub default: Option<TlsIdentity>,
+}
+
 // CompiledRouter stores the Ir representation in an optimized form.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct CompiledRouter {
     pub listeners: HashMap<ListenKey, VirtualHostRoutes>,
+    pub listener_tls: HashMap<ListenKey, ListenerTlsConfig>,
 }
 
 // Alias to keep compatibility with the misspelled name used in discussion.
@@ -101,7 +119,8 @@ impl CompiledRouter {
         };
 
         for listen in &server.listens {
-            let listener = self.listeners.entry(ListenKey::from(listen)).or_default();
+            let listen_key = ListenKey::from(listen);
+            let listener = self.listeners.entry(listen_key.clone()).or_default();
 
             for name in &server.server_names {
                 listener
@@ -113,6 +132,25 @@ impl CompiledRouter {
                 || (server.server_names.is_empty() && listener.default.is_none())
             {
                 listener.default = Some(routes.clone());
+            }
+
+            if listen.ssl {
+                let listener_tls = self.listener_tls.entry(listen_key).or_default();
+
+                if let Some(tls) = server.tls.as_ref() {
+                    for name in &server.server_names {
+                        listener_tls
+                            .named
+                            .insert(name.to_ascii_lowercase(), tls.clone());
+                    }
+
+                    if listen.default_server
+                        || listener_tls.default.is_none()
+                        || server.server_names.is_empty()
+                    {
+                        listener_tls.default = Some(tls.clone());
+                    }
+                }
             }
         }
     }
@@ -126,9 +164,27 @@ fn compile_locations(locations: &[Location]) -> Vec<CompiledLocation> {
                 .directives
                 .iter()
                 .find_map(|directive| match directive {
-                    LocationDirective::ProxyPass(url) => Some(RouteTarget::ProxyPass {
-                        upstream: url.to_string(),
-                    }),
+                    LocationDirective::ProxyPass(url) => {
+                        let host = url.host_str()?.to_string();
+                        let port = url.port_or_known_default()?;
+                        let tls = match url.scheme() {
+                            "http" => false,
+                            "https" => true,
+                            _ => return None,
+                        };
+                        let sni = if tls && host.parse::<IpAddr>().is_err() {
+                            host.clone()
+                        } else {
+                            String::new()
+                        };
+
+                        Some(RouteTarget::ProxyPass {
+                            host,
+                            port,
+                            tls,
+                            sni,
+                        })
+                    }
                     _ => None,
                 })?;
 
@@ -138,6 +194,54 @@ fn compile_locations(locations: &[Location]) -> Vec<CompiledLocation> {
             })
         })
         .collect()
+}
+
+fn regex_matches(path: &str, pattern: &str, case_insensitive: bool) -> bool {
+    RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
+        .map(|re| re.is_match(path))
+        .unwrap_or(false)
+}
+
+fn select_route_target<'a>(routes: &'a ServerRoutes, path: &str) -> Option<&'a RouteTarget> {
+    let mut best_prefix: Option<(&CompiledLocation, usize)> = None;
+    let mut best_prefer_prefix: Option<(&CompiledLocation, usize)> = None;
+
+    for location in &routes.locations {
+        match &location.matcher {
+            CompiledMatcher::Exact(p) if path == p => return Some(&location.target),
+            CompiledMatcher::Prefix(p) if path.starts_with(p) => {
+                if best_prefix.is_none_or(|(_, len)| p.len() > len) {
+                    best_prefix = Some((location, p.len()));
+                }
+            }
+            CompiledMatcher::PreferPrefix(p) if path.starts_with(p) => {
+                if best_prefer_prefix.is_none_or(|(_, len)| p.len() > len) {
+                    best_prefer_prefix = Some((location, p.len()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some((location, _)) = best_prefer_prefix {
+        return Some(&location.target);
+    }
+
+    for location in &routes.locations {
+        match &location.matcher {
+            CompiledMatcher::Regex {
+                case_insensitive,
+                pattern,
+            } if regex_matches(path, pattern, *case_insensitive) => {
+                return Some(&location.target);
+            }
+            _ => {}
+        }
+    }
+
+    best_prefix.map(|(location, _)| &location.target)
 }
 
 pub struct DynamicProxy {
@@ -177,7 +281,7 @@ impl ProxyHttp for DynamicProxy {
     async fn upstream_peer(
         &self,
         session: &mut Session,
-        ctx: &mut Self::CTX,
+        _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         //extract listen_key, host, path
 
@@ -235,31 +339,19 @@ impl ProxyHttp for DynamicProxy {
             })?;
 
         let path = session.req_header().uri.path();
-        let mut selected: Option<&RouteTarget> = None;
-
-        for location in &server_routes.locations {
-            let is_match = match &location.matcher {
-                CompiledMatcher::Exact(p) => path == p,
-                CompiledMatcher::Prefix(p) | CompiledMatcher::PreferPrefix(p) => {
-                    path.starts_with(p)
-                }
-                CompiledMatcher::Regex { .. } => false,
-                CompiledMatcher::Named(_) => false,
-            };
-
-            if is_match {
-                selected = Some(&location.target);
-                break; // first-match
-            }
-        }
-
-        let target = selected.ok_or_else(|| {
+        let target = select_route_target(server_routes, path).ok_or_else(|| {
             pingora::Error::explain(pingora::ErrorType::HTTPStatus(404), "no location matched")
         })?;
 
-        //match location by nginx priority
-        //build and return HttpPeer from selected target
-        // if no route: return error.
-        todo!("");
+        let peer = match target {
+            RouteTarget::ProxyPass {
+                host,
+                port,
+                tls,
+                sni,
+            } => HttpPeer::new((host.as_str(), *port), *tls, sni.clone()),
+        };
+
+        Ok(Box::new(peer))
     }
 }
