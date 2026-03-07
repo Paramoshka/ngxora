@@ -5,9 +5,12 @@ edition = "2024"
 
 [dependencies]
 arc-swap = "1.8.2"
+env_logger = "0.11"
 ngxora-config = {path = "crates/ngxora-config"}
 ngxora-compile = {path = "crates/ngxora-compile"}
 ngxora-runtime = {path = "crates/ngxora-runtime"}
+pingora = { version = "0.7.0", default-features = false, features = ["lb", "openssl"] }
+pingora-proxy = { version = "0.7.0", default-features = false, features = ["openssl"] }
 
 [[bin]]
 name = "ngxora"

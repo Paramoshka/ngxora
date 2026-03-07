@@ -1,4 +1,4 @@
-use arc_swap::ArcSwap;
+use crate::control::{ApplyResult, ConfigSnapshot, RuntimeState};
 use async_trait::async_trait;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, Server,
@@ -15,7 +15,7 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct ListenKey {
     pub addr: IpAddr,
     pub port: u16,
@@ -274,29 +274,32 @@ fn select_route_target<'a>(routes: &'a ServerRoutes, path: &str) -> Option<&'a R
 }
 
 pub struct DynamicProxy {
-    routing: ArcSwap<CompiledRouter>,
+    state: Arc<RuntimeState>,
 }
 
 impl DynamicProxy {
-    pub fn new(routing: CompiledRouter) -> Self {
-        Self {
-            routing: ArcSwap::from_pointee(routing),
-        }
+    pub fn new(state: Arc<RuntimeState>) -> Self {
+        Self { state }
+    }
+
+    pub fn from_router(routing: CompiledRouter) -> Self {
+        Self::new(Arc::new(RuntimeState::bootstrap(routing)))
+    }
+
+    pub fn runtime_state(&self) -> &Arc<RuntimeState> {
+        &self.state
     }
 
     /// Retrieve routes for a specific key (Lock-free)
     pub fn get_routes(&self, key: &ListenKey) -> Option<Arc<VirtualHostRoutes>> {
-        // .load() returns a Guard which can be treated like Arc<CompiledRouter>
-        let router = self.routing.load();
-
-        // Return a reference-counted pointer to the specific routes
-        // This assumes VirtualHostRoutes is wrapped in Arc or cloned
-        router.listeners.get(key).cloned().map(Arc::new)
+        let snapshot = self.state.snapshot();
+        snapshot.router.listeners.get(key).cloned().map(Arc::new)
     }
 
-    /// Replace the entire routing table (Atomic write)
-    pub fn update_routing(&self, new_router: CompiledRouter) {
-        self.routing.store(Arc::new(new_router));
+    /// Replace the entire routing table if listener topology stays compatible.
+    pub fn update_routing(&self, new_router: CompiledRouter) -> ApplyResult {
+        self.state
+            .apply_snapshot(ConfigSnapshot::new("runtime-update", new_router))
     }
 }
 
@@ -307,8 +310,8 @@ impl ProxyHttp for DynamicProxy {
     fn new_ctx(&self) -> Self::CTX {}
 
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
-        let router = self.routing.load();
-        session.set_keepalive(router.http_options.downstream_keepalive_timeout);
+        let snapshot = self.state.snapshot();
+        session.set_keepalive(snapshot.router.http_options.downstream_keepalive_timeout);
         Ok(false)
     }
 

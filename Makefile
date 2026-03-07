@@ -38,7 +38,7 @@ ci: lint test build ## CI pipeline (lint + tests + build)
 # Src section
 # =========================
 image-builder:
-	$(DOCKER) build . -t $(BUILDER_IMAGE) --file ./tools/Dockerfile --target builder
+	$(DOCKER) build . -t $(BUILDER_IMAGE) --file ./Dockerfile --target builder
 
 # =========================
 # Tests section

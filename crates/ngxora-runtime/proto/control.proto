@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package ngxora.control.v1;
+
+service ControlPlane {
+  rpc ApplySnapshot(ConfigSnapshot) returns (ApplyResult);
+  rpc GetSnapshot(GetSnapshotRequest) returns (ConfigSnapshot);
+}
+
+message GetSnapshotRequest {}
+
+message ApplyResult {
+  bool applied = 1;
+  bool restart_required = 2;
+  string message = 3;
+  string active_version = 4;
+  uint64 active_generation = 5;
+}
+
+message ConfigSnapshot {
+  string version = 1;
+  HttpOptions http = 2;
+  repeated Listener listeners = 3;
+  repeated VirtualHost virtual_hosts = 4;
+}
+
+message HttpOptions {
+  uint64 downstream_keepalive_timeout_seconds = 1;
+  bool tcp_nodelay = 2;
+}
+
+message Listener {
+  string name = 1;
+  string address = 2;
+  uint32 port = 3;
+  bool tls = 4;
+  bool default_server = 5;
+}
+
+message VirtualHost {
+  string listener = 1;
+  repeated string server_names = 2;
+  TlsBinding tls = 3;
+  repeated Route routes = 4;
+}
+
+message TlsBinding {
+  string cert_path = 1;
+  string key_path = 2;
+}
+
+message Route {
+  Match match = 1;
+  Upstream upstream = 2;
+}
+
+message Match {
+  oneof kind {
+    string prefix = 1;
+    string exact = 2;
+    string prefer_prefix = 3;
+    Regex regex = 4;
+  }
+}
+
+message Regex {
+  string pattern = 1;
+  bool case_insensitive = 2;
+}
+
+message Upstream {
+  string scheme = 1;
+  string host = 2;
+  uint32 port = 3;
+}
