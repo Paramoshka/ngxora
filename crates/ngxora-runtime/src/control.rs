@@ -1,6 +1,8 @@
-use crate::upstreams::{CompiledRouter, ListenKey};
+use crate::upstreams::{CompiledRouter, ListenKey, ServerRoutes, VirtualHostRoutes};
 use arc_swap::ArcSwap;
-use std::collections::BTreeSet;
+use ngxora_plugin_api::{PluginChain, empty_plugin_chain};
+use ngxora_plugin_registry::PluginRegistry;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -32,30 +34,48 @@ pub struct ApplyResult {
     pub active_generation: u64,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct RuntimeSnapshot {
     pub generation: u64,
     pub version: String,
     pub router: CompiledRouter,
+    plugin_chains: HashMap<u64, PluginChain>,
 }
 
-#[derive(Debug)]
+impl RuntimeSnapshot {
+    pub fn plugin_chain(&self, route_id: u64) -> PluginChain {
+        self.plugin_chains
+            .get(&route_id)
+            .cloned()
+            .unwrap_or_else(empty_plugin_chain)
+    }
+}
+
 pub struct RuntimeState {
     current: ArcSwap<RuntimeSnapshot>,
     bootstrap_topology: BTreeSet<ListenKey>,
+    registry: Arc<PluginRegistry>,
     generation: AtomicU64,
 }
 
 impl RuntimeState {
     pub fn new(snapshot: ConfigSnapshot) -> Self {
+        Self::with_registry(snapshot, Arc::new(PluginRegistry::with_builtin_plugins()))
+    }
+
+    pub fn with_registry(snapshot: ConfigSnapshot, registry: Arc<PluginRegistry>) -> Self {
         let bootstrap_topology = listener_topology(&snapshot.router);
+        let initial_snapshot = Self::build_runtime_snapshot(
+            &registry,
+            snapshot.version,
+            snapshot.router,
+            1,
+        )
+        .expect("bootstrap snapshot plugin resolution failed");
         Self {
-            current: ArcSwap::from_pointee(RuntimeSnapshot {
-                generation: 1,
-                version: snapshot.version,
-                router: snapshot.router,
-            }),
+            current: ArcSwap::from_pointee(initial_snapshot),
             bootstrap_topology,
+            registry,
             generation: AtomicU64::new(1),
         }
     }
@@ -84,12 +104,33 @@ impl RuntimeState {
             };
         }
 
+        let next_version = next.version;
+        let next_router = next.router;
+        let active_generation = self.generation() + 1;
+        let runtime_snapshot = match Self::build_runtime_snapshot(
+            &self.registry,
+            next_version.clone(),
+            next_router,
+            active_generation,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(message) => {
+                let current = self.snapshot();
+                return ApplyResult {
+                    applied: false,
+                    restart_required: false,
+                    message,
+                    active_version: current.version.clone(),
+                    active_generation: current.generation,
+                };
+            }
+        };
+
         let active_generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let active_version = next.version.clone();
+        let active_version = runtime_snapshot.version.clone();
         self.current.store(Arc::new(RuntimeSnapshot {
             generation: active_generation,
-            version: next.version,
-            router: next.router,
+            ..runtime_snapshot
         }));
 
         ApplyResult {
@@ -101,17 +142,24 @@ impl RuntimeState {
         }
     }
 
-    pub fn force_apply(&self, next: ConfigSnapshot) {
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.current.store(Arc::new(RuntimeSnapshot {
+    fn build_runtime_snapshot(
+        registry: &PluginRegistry,
+        version: String,
+        router: CompiledRouter,
+        generation: u64,
+    ) -> Result<RuntimeSnapshot, String> {
+        let plugin_chains = build_plugin_chains(&router, registry)?;
+
+        Ok(RuntimeSnapshot {
             generation,
-            version: next.version,
-            router: next.router,
-        }));
+            version,
+            router,
+            plugin_chains,
+        })
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InProcessControlPlane {
     state: Arc<RuntimeState>,
 }
@@ -136,4 +184,48 @@ impl InProcessControlPlane {
 
 fn listener_topology(router: &CompiledRouter) -> BTreeSet<ListenKey> {
     router.listeners.keys().cloned().collect()
+}
+
+fn build_plugin_chains(
+    router: &CompiledRouter,
+    registry: &PluginRegistry,
+) -> Result<HashMap<u64, PluginChain>, String> {
+    let mut plugin_chains = HashMap::new();
+
+    for routes in router.listeners.values() {
+        collect_plugin_chains_from_vhosts(routes, registry, &mut plugin_chains)?;
+    }
+
+    Ok(plugin_chains)
+}
+
+fn collect_plugin_chains_from_vhosts(
+    routes: &VirtualHostRoutes,
+    registry: &PluginRegistry,
+    plugin_chains: &mut HashMap<u64, PluginChain>,
+) -> Result<(), String> {
+    for server_routes in routes.named.values().chain(routes.default.iter()) {
+        collect_plugin_chains_from_server(server_routes, registry, plugin_chains)?;
+    }
+
+    Ok(())
+}
+
+fn collect_plugin_chains_from_server(
+    routes: &ServerRoutes,
+    registry: &PluginRegistry,
+    plugin_chains: &mut HashMap<u64, PluginChain>,
+) -> Result<(), String> {
+    for location in &routes.locations {
+        if plugin_chains.contains_key(&location.route_id) {
+            continue;
+        }
+
+        let chain = registry
+            .build_chain(&location.plugins)
+            .map_err(|err| format!("failed to build plugin chain for route {}: {err}", location.route_id))?;
+        plugin_chains.insert(location.route_id, chain);
+    }
+
+    Ok(())
 }

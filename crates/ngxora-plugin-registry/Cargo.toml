@@ -1,0 +1,12 @@
+[package]
+name = "ngxora-plugin-registry"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+plugin-headers = ["dep:ngxora-extension-headers"]
+
+[dependencies]
+ngxora-extension-headers = { path = "../extensions/headers", optional = true }
+ngxora-plugin-api = { path = "../ngxora-plugin-api" }

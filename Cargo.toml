@@ -3,6 +3,10 @@ name = "ngxora"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["plugin-headers"]
+plugin-headers = ["ngxora-runtime/plugin-headers"]
+
 [dependencies]
 arc-swap = "1.8.2"
 env_logger = "0.11"

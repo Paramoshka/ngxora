@@ -2,6 +2,7 @@ use super::{
     downstream_keepalive_timeout_secs, select_route_target, CompiledLocation, CompiledMatcher,
     RouteTarget, ServerRoutes,
 };
+use ngxora_plugin_api::PluginSpec;
 use ngxora_compile::ir::KeepaliveTimeout;
 use std::time::Duration;
 
@@ -16,14 +17,19 @@ fn target(id: &str) -> RouteTarget {
 
 fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
     CompiledLocation {
+        route_id: 1,
         matcher,
         target: target(id),
+        plugins: Vec::<PluginSpec>::new(),
     }
 }
 
 fn selected_host<'a>(routes: &'a ServerRoutes, path: &str) -> Option<&'a str> {
     match select_route_target(routes, path) {
-        Some(RouteTarget::ProxyPass { host, .. }) => Some(host.as_str()),
+        Some(CompiledLocation {
+            target: RouteTarget::ProxyPass { host, .. },
+            ..
+        }) => Some(host.as_str()),
         None => None,
     }
 }

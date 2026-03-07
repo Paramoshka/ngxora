@@ -8,6 +8,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 APP        := ngxora
+PLUGINS_CFG ?= plugins.cfg
 
 # Versioning / tagging
 TAG      ?= dev
@@ -15,6 +16,8 @@ REGISTRY ?= registry.example.com
 IMAGE    ?= $(REGISTRY)/$(APP):$(TAG)
 BUILDER_IMAGE := ngxora-src
 PLATFORMS ?= linux/amd64,linux/arm64
+PLUGIN_FEATURES := $(shell if [ -f $(PLUGINS_CFG) ]; then awk 'NF && $$1 !~ /^#/ {print "plugin-" $$1}' $(PLUGINS_CFG) | paste -sd, -; fi)
+CARGO_PLUGIN_FLAGS := --no-default-features $(if $(PLUGIN_FEATURES),--features $(PLUGIN_FEATURES))
 
 # Tools
 CARGO      ?= cargo
@@ -61,6 +64,9 @@ test-integration: ## Run integration tests
 # =========================
 
 build: build-image ## Build all artifacts
+
+build-bin: ## Build local binary with plugins from plugins.cfg
+	$(CARGO) build $(CARGO_PLUGIN_FLAGS)
 
 build-image: ## Build docker image locally
 	$(DOCKER) build -t $(IMAGE):$(TAG) .
