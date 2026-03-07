@@ -1,4 +1,9 @@
-use super::{select_route_target, CompiledLocation, CompiledMatcher, RouteTarget, ServerRoutes};
+use super::{
+    downstream_keepalive_timeout_secs, select_route_target, CompiledLocation, CompiledMatcher,
+    RouteTarget, ServerRoutes,
+};
+use ngxora_compile::ir::KeepaliveTimeout;
+use std::time::Duration;
 
 fn target(id: &str) -> RouteTarget {
     RouteTarget::ProxyPass {
@@ -127,4 +132,31 @@ fn named_location_is_not_selected_for_request_path() {
     };
 
     assert_eq!(selected_host(&routes, "/"), Some("prefix.example.com"));
+}
+
+#[test]
+fn downstream_keepalive_timeout_maps_off_to_none() {
+    assert_eq!(downstream_keepalive_timeout_secs(&KeepaliveTimeout::Off), None);
+}
+
+#[test]
+fn downstream_keepalive_timeout_rounds_up_subsecond_values() {
+    assert_eq!(
+        downstream_keepalive_timeout_secs(&KeepaliveTimeout::Timeout {
+            idle: Duration::from_millis(1_500),
+            header: None,
+        }),
+        Some(2)
+    );
+}
+
+#[test]
+fn downstream_keepalive_timeout_treats_zero_idle_as_disabled() {
+    assert_eq!(
+        downstream_keepalive_timeout_secs(&KeepaliveTimeout::Timeout {
+            idle: Duration::ZERO,
+            header: Some(Duration::from_secs(10)),
+        }),
+        None
+    );
 }

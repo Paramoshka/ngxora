@@ -2,6 +2,7 @@ use std::fmt::Error;
 // Intermediate Representation layer
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use url::Url;
 
@@ -14,7 +15,7 @@ pub struct Ir {
 #[derive(Debug, Eq, PartialEq)]
 pub struct Http {
     pub servers: Vec<Server>,
-    pub keepalive_timeout: String,
+    pub keepalive_timeout: KeepaliveTimeout,
     pub tcp_nodelay: Switch,
 }
 
@@ -22,8 +23,26 @@ impl Default for Http {
     fn default() -> Self {
         Self {
             servers: Vec::new(),
-            keepalive_timeout: "60s".to_string(),
+            keepalive_timeout: KeepaliveTimeout::default(),
             tcp_nodelay: Switch::On,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum KeepaliveTimeout {
+    Off,
+    Timeout {
+        idle: Duration,
+        header: Option<Duration>,
+    },
+}
+
+impl Default for KeepaliveTimeout {
+    fn default() -> Self {
+        Self::Timeout {
+            idle: Duration::from_secs(60),
+            header: None,
         }
     }
 }

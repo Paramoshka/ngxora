@@ -1,7 +1,8 @@
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use ngxora_compile::ir::{
-    Http, Listen, Location, LocationDirective, LocationMatcher, Server, TlsIdentity,
+    Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, Server,
+    TlsIdentity,
 };
 use pingora::Result;
 use pingora::upstreams::peer::HttpPeer;
@@ -94,11 +95,17 @@ pub struct ListenerTlsConfig {
     pub default: Option<TlsIdentity>,
 }
 
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct HttpRuntimeOptions {
+    pub downstream_keepalive_timeout: Option<u64>,
+}
+
 // CompiledRouter stores the Ir representation in an optimized form.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct CompiledRouter {
     pub listeners: HashMap<ListenKey, VirtualHostRoutes>,
     pub listener_tls: HashMap<ListenKey, ListenerTlsConfig>,
+    pub http_options: HttpRuntimeOptions,
 }
 
 // Alias to keep compatibility with the misspelled name used in discussion.
@@ -106,7 +113,14 @@ pub type CompliedRouter = CompiledRouter;
 
 impl CompiledRouter {
     pub fn from_http(http: &Http) -> Self {
-        let mut router = Self::default();
+        let mut router = Self {
+            http_options: HttpRuntimeOptions {
+                downstream_keepalive_timeout: downstream_keepalive_timeout_secs(
+                    &http.keepalive_timeout,
+                ),
+            },
+            ..Self::default()
+        };
         for server in &http.servers {
             router.add_server(server);
         }
@@ -196,6 +210,21 @@ fn compile_locations(locations: &[Location]) -> Vec<CompiledLocation> {
         .collect()
 }
 
+fn downstream_keepalive_timeout_secs(timeout: &KeepaliveTimeout) -> Option<u64> {
+    match timeout {
+        KeepaliveTimeout::Off => None,
+        KeepaliveTimeout::Timeout { idle, .. } => {
+            let millis = idle.as_millis();
+            if millis == 0 {
+                None
+            } else {
+                let secs = millis.div_ceil(1_000);
+                u64::try_from(secs).ok()
+            }
+        }
+    }
+}
+
 fn regex_matches(path: &str, pattern: &str, case_insensitive: bool) -> bool {
     RegexBuilder::new(pattern)
         .case_insensitive(case_insensitive)
@@ -276,6 +305,12 @@ impl ProxyHttp for DynamicProxy {
     type CTX = ();
 
     fn new_ctx(&self) -> Self::CTX {}
+
+    async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
+        let router = self.routing.load();
+        session.set_keepalive(router.http_options.downstream_keepalive_timeout);
+        Ok(false)
+    }
 
     // upstream_peer method allows for advanced configurations, including HTTPS, SNI, and dynamic load balancing based on the request headers.
     async fn upstream_peer(

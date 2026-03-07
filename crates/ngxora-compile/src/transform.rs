@@ -5,8 +5,8 @@ use url::Url;
 use crate::{
     consts,
     ir::{
-        Http, Ir, Listen, Location, LocationDirective, LocationMatcher, PemSource, Server, Switch,
-        TlsIdentity,
+        Http, Ir, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher,
+        PemSource, Server, Switch, TlsIdentity,
     },
 };
 
@@ -63,19 +63,9 @@ fn lower_http(block: &Block) -> Result<Http, LowerErr> {
 
 fn apply_http_directive(http: &mut Http, d: &Directive) -> Result<(), LowerErr> {
     match d.name.as_str() {
-        consts::KEEPALIVE_TIMEOUT => match d.args.as_slice() {
-            [t] => http.keepalive_timeout = t.clone(),
-            [] => {
-                return Err(LowerErr {
-                    message: format!("{}: expected 1 argument", d.name),
-                });
-            }
-            _ => {
-                return Err(LowerErr {
-                    message: format!("{}: expected exactly 1 argument", d.name),
-                });
-            }
-        },
+        consts::KEEPALIVE_TIMEOUT => {
+            http.keepalive_timeout = parse_keepalive_timeout(&d.args)?;
+        }
 
         consts::TCP_NODELAY => http.tcp_nodelay = get_directive_switch(d)?,
 
@@ -288,6 +278,116 @@ fn get_directive_switch(d: &Directive) -> Result<Switch, LowerErr> {
             message: format!("{}: expected exactly one argument on|off", d.name),
         }),
     }
+}
+
+fn parse_keepalive_timeout(args: &[String]) -> Result<KeepaliveTimeout, LowerErr> {
+    match args {
+        [] => Err(LowerErr {
+            message: "keepalive_timeout: expected 1 or 2 arguments".into(),
+        }),
+        [idle] => {
+            let idle = parse_duration_literal(idle, "keepalive_timeout")?;
+            if idle.is_zero() {
+                Ok(KeepaliveTimeout::Off)
+            } else {
+                Ok(KeepaliveTimeout::Timeout { idle, header: None })
+            }
+        }
+        [idle, header] => {
+            let idle = parse_duration_literal(idle, "keepalive_timeout")?;
+            let header = parse_duration_literal(header, "keepalive_timeout")?;
+            if idle.is_zero() && header.is_zero() {
+                Ok(KeepaliveTimeout::Off)
+            } else {
+                Ok(KeepaliveTimeout::Timeout {
+                    idle,
+                    header: Some(header),
+                })
+            }
+        }
+        _ => Err(LowerErr {
+            message: "keepalive_timeout: expected 1 or 2 arguments".into(),
+        }),
+    }
+}
+
+fn parse_duration_literal(raw: &str, directive: &str) -> Result<std::time::Duration, LowerErr> {
+    fn unit_multiplier_millis(unit: &str) -> Option<u128> {
+        match unit {
+            "ms" => Some(1),
+            "s" => Some(1_000),
+            "m" => Some(60_000),
+            "h" => Some(3_600_000),
+            "d" => Some(86_400_000),
+            "w" => Some(604_800_000),
+            "M" => Some(2_592_000_000),  // 30d
+            "y" => Some(31_536_000_000), // 365d
+            _ => None,
+        }
+    }
+
+    if raw.is_empty() {
+        return Err(LowerErr {
+            message: format!("{directive}: invalid time value `{raw}`"),
+        });
+    }
+
+    let mut idx = 0usize;
+    let bytes = raw.as_bytes();
+    let mut total_millis = 0u128;
+    let mut saw_segment = false;
+
+    while idx < bytes.len() {
+        let start = idx;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            idx += 1;
+        }
+
+        if start == idx {
+            return Err(LowerErr {
+                message: format!("{directive}: invalid time value `{raw}`"),
+            });
+        }
+
+        let value = raw[start..idx].parse::<u128>().map_err(|_| LowerErr {
+            message: format!("{directive}: invalid time value `{raw}`"),
+        })?;
+
+        let unit = if idx == bytes.len() {
+            if saw_segment {
+                return Err(LowerErr {
+                    message: format!("{directive}: missing unit in `{raw}`"),
+                });
+            }
+            "s"
+        } else if raw[idx..].starts_with("ms") {
+            idx += 2;
+            "ms"
+        } else {
+            let unit = &raw[idx..idx + 1];
+            idx += 1;
+            unit
+        };
+
+        let multiplier = unit_multiplier_millis(unit).ok_or_else(|| LowerErr {
+            message: format!("{directive}: unsupported time unit `{unit}` in `{raw}`"),
+        })?;
+
+        let segment_millis = value.checked_mul(multiplier).ok_or_else(|| LowerErr {
+            message: format!("{directive}: time value `{raw}` is too large"),
+        })?;
+        total_millis = total_millis
+            .checked_add(segment_millis)
+            .ok_or_else(|| LowerErr {
+                message: format!("{directive}: time value `{raw}` is too large"),
+            })?;
+        saw_segment = true;
+    }
+
+    let total_millis = u64::try_from(total_millis).map_err(|_| LowerErr {
+        message: format!("{directive}: time value `{raw}` is too large"),
+    })?;
+    Ok(std::time::Duration::from_millis(total_millis))
 }
 
 fn parse_listen_directives(args: &[String]) -> Result<Listen, LowerErr> {
