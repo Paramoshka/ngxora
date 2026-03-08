@@ -9,6 +9,7 @@ use ngxora_compile::ir::{
 };
 use ngxora_plugin_api::PluginSpec;
 use pingora::upstreams::peer::HttpPeer;
+use serde_json::json;
 use std::time::Duration;
 
 fn target(id: &str) -> RouteTarget {
@@ -173,6 +174,7 @@ fn compiled_router_rejects_invalid_location_regex() {
                 directives: vec![LocationDirective::ProxyPass(
                     "http://127.0.0.1:8080".parse().unwrap(),
                 )],
+                plugins: Vec::new(),
             }],
             ..Server::default()
         }],
@@ -199,6 +201,7 @@ fn compiled_router_parses_proxy_timeouts() {
                     LocationDirective::ProxyWriteTimeout(Duration::from_secs(20)),
                     LocationDirective::ProxyPass("http://127.0.0.1:8080".parse().unwrap()),
                 ],
+                plugins: Vec::new(),
             }],
             ..Server::default()
         }],
@@ -224,6 +227,49 @@ fn compiled_router_parses_proxy_timeouts() {
             write: Some(Duration::from_secs(20)),
         }
     );
+}
+
+#[test]
+fn compiled_router_preserves_location_plugins() {
+    let http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/".into()),
+                directives: vec![LocationDirective::ProxyPass(
+                    "http://127.0.0.1:8080".parse().unwrap(),
+                )],
+                plugins: vec![PluginSpec {
+                    name: "headers".into(),
+                    config: json!({
+                        "response": {
+                            "add": [
+                                { "name": "X-Proxy", "value": "ngxora" }
+                            ]
+                        }
+                    }),
+                }],
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+    let location = &router
+        .listeners
+        .values()
+        .next()
+        .expect("listener present")
+        .default
+        .as_ref()
+        .expect("default route present")
+        .locations[0];
+
+    assert_eq!(location.plugins, http.servers[0].locations[0].plugins);
 }
 
 #[test]

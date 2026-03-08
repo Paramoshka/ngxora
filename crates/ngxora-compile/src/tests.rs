@@ -4,7 +4,9 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use ngxora_plugin_api::PluginSpec;
     use ngxora_config::Ast;
+    use serde_json::json;
     use url::Url;
 
     use crate::ir::{
@@ -220,6 +222,60 @@ http {
                 LocationDirective::ProxyWriteTimeout(Duration::from_secs(20)),
                 LocationDirective::ProxyPass(Url::parse("http://127.0.0.1:8080").unwrap()),
             ]
+        );
+    }
+
+    #[test]
+    fn from_ast_parses_headers_plugin_block() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location / {
+      headers {
+        request_set X-Request-Id abc;
+        request_remove X-Debug;
+        upstream_request_add X-Upstream edge;
+        response_add X-Proxy ngxora edge;
+      }
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let location = &http.servers[0].locations[0];
+        assert_eq!(
+            location.plugins,
+            vec![PluginSpec {
+                name: "headers".into(),
+                config: json!({
+                    "request": {
+                        "add": [],
+                        "set": [
+                            { "name": "X-Request-Id", "value": "abc" }
+                        ],
+                        "remove": ["X-Debug"]
+                    },
+                    "upstream_request": {
+                        "add": [
+                            { "name": "X-Upstream", "value": "edge" }
+                        ],
+                        "set": [],
+                        "remove": []
+                    },
+                    "response": {
+                        "add": [
+                            { "name": "X-Proxy", "value": "ngxora edge" }
+                        ],
+                        "set": [],
+                        "remove": []
+                    }
+                }),
+            }]
         );
     }
 }

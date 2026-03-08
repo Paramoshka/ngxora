@@ -401,7 +401,7 @@ fn compile_location(
         matcher: CompiledMatcher::try_from(&location.matcher)?,
         target,
         upstream_timeouts: compile_upstream_timeouts(location)?,
-        plugins: Vec::new(),
+        plugins: location.plugins.clone(),
     };
     *next_route_id += 1;
     Ok(Some(compiled))

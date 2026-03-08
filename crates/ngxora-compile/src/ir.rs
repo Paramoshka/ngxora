@@ -1,3 +1,4 @@
+use ngxora_plugin_api::PluginSpec;
 use std::fmt::Error;
 // Intermediate Representation layer
 use std::net::{IpAddr, Ipv4Addr};
@@ -146,6 +147,7 @@ pub enum TlsVerifyClient {
 pub struct Location {
     pub matcher: LocationMatcher,
     pub directives: Vec<LocationDirective>, // proxy_pass, root, try_files...
+    pub plugins: Vec<PluginSpec>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]

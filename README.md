@@ -29,6 +29,9 @@ http {
         server_name localhost;
 
         location / {
+            headers {
+                response_add X-Proxy ngxora;
+            }
             proxy_pass http://example.com;
         }
     }
@@ -78,6 +81,20 @@ Current shape:
 - plugin registry with feature-gated registration
 - `headers` extension as the first simple plugin
 - `plugins.cfg` + `make build-bin` for build-time plugin selection
+
+Text config can now attach the built-in `headers` plugin inside a `location` block:
+
+```nginx
+location /api/ {
+    headers {
+        request_set X-Route api;
+        upstream_request_add X-From-Proxy ngxora;
+        response_add X-Proxy ngxora;
+    }
+
+    proxy_pass http://127.0.0.1:8080;
+}
+```
 
 Example:
 

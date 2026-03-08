@@ -1148,6 +1148,9 @@ name = "ngxora-compile"
 version = "0.1.0"
 dependencies = [
  "ngxora-config",
+ "ngxora-plugin-api",
+ "serde",
+ "serde_json",
  "url",
 ]
 

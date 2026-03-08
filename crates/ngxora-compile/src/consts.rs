@@ -1,6 +1,7 @@
 pub const HTTP: &str = "http";
 pub const SERVER: &str = "server";
 pub const LOCATION: &str = "location";
+pub const HEADERS: &str = "headers";
 
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";
@@ -19,6 +20,15 @@ pub const PROXY_PASS: &str = "proxy_pass";
 pub const PROXY_CONNECT_TIMEOUT: &str = "proxy_connect_timeout";
 pub const PROXY_READ_TIMEOUT: &str = "proxy_read_timeout";
 pub const PROXY_WRITE_TIMEOUT: &str = "proxy_write_timeout";
+pub const REQUEST_ADD: &str = "request_add";
+pub const REQUEST_SET: &str = "request_set";
+pub const REQUEST_REMOVE: &str = "request_remove";
+pub const UPSTREAM_REQUEST_ADD: &str = "upstream_request_add";
+pub const UPSTREAM_REQUEST_SET: &str = "upstream_request_set";
+pub const UPSTREAM_REQUEST_REMOVE: &str = "upstream_request_remove";
+pub const RESPONSE_ADD: &str = "response_add";
+pub const RESPONSE_SET: &str = "response_set";
+pub const RESPONSE_REMOVE: &str = "response_remove";
 
 // TLS CERTS
 pub const SSL_CERTIFICATE: &str = "ssl_certificate";

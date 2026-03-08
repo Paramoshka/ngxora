@@ -28,9 +28,38 @@ http {
             proxy_connect_timeout 3s;
             proxy_read_timeout 30s;
             proxy_write_timeout 30s;
+            headers {
+                request_set X-Tenant edge;
+                upstream_request_add X-From-Proxy ngxora;
+                response_add X-Proxy ngxora;
+            }
             proxy_pass https://127.0.0.1:8443;
         }
     }
+}
+```
+
+## Headers Plugin In Text Config
+
+The built-in `headers` plugin can be attached directly inside a `location` block.
+
+```nginx
+location /api/ {
+    headers {
+        request_add X-Env dev;
+        request_set X-Route api;
+        request_remove X-Debug;
+
+        upstream_request_add X-From-Proxy ngxora;
+        upstream_request_set X-Upstream-Route api;
+        upstream_request_remove X-Legacy;
+
+        response_add X-Proxy ngxora;
+        response_set Cache-Control no-store;
+        response_remove X-Powered-By;
+    }
+
+    proxy_pass http://127.0.0.1:8080;
 }
 ```
 

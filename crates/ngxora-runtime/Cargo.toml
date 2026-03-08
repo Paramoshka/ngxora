@@ -19,3 +19,6 @@ ngxora-plugin-registry = { path = "../ngxora-plugin-registry" }
 pingora = { version = "0.8.0", default-features = false, features = ["lb"] }
 pingora-proxy = { version = "0.8.0", default-features = false }
 regex = "1"
+
+[dev-dependencies]
+serde_json = "1"

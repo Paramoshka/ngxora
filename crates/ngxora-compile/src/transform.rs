@@ -1,4 +1,6 @@
 use ngxora_config::{Ast, Block, Directive, Node};
+use ngxora_plugin_api::PluginSpec;
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use url::Url;
@@ -15,6 +17,26 @@ use crate::{
 #[derive(Debug)]
 pub struct LowerErr {
     pub message: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct HeadersPluginConfig {
+    request: HeaderPatchConfig,
+    upstream_request: HeaderPatchConfig,
+    response: HeaderPatchConfig,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct HeaderPatchConfig {
+    add: Vec<HeaderEntry>,
+    set: Vec<HeaderEntry>,
+    remove: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct HeaderEntry {
+    name: String,
+    value: String,
 }
 
 impl Ir {
@@ -214,11 +236,12 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
 
 fn lower_location(block: &Block) -> Result<Location, LowerErr> {
     let matcher = parse_location_matcher(&block.args)?;
-    let directives = parse_location_directives(&block.children)?;
+    let (directives, plugins) = parse_location_contents(&block.children)?;
 
     Ok(Location {
         matcher,
         directives,
+        plugins,
     })
 }
 
@@ -250,8 +273,9 @@ fn parse_location_matcher(args: &[String]) -> Result<LocationMatcher, LowerErr> 
     }
 }
 
-fn parse_location_directives(nodes: &Vec<Node>) -> Result<Vec<LocationDirective>, LowerErr> {
+fn parse_location_contents(nodes: &[Node]) -> Result<(Vec<LocationDirective>, Vec<PluginSpec>), LowerErr> {
     let mut directives: Vec<LocationDirective> = Vec::new();
+    let mut plugins: Vec<PluginSpec> = Vec::new();
     for node in nodes {
         match node {
             Node::Directive(directive) => {
@@ -259,14 +283,143 @@ fn parse_location_directives(nodes: &Vec<Node>) -> Result<Vec<LocationDirective>
                 directives.push(location_directive);
             }
             Node::Block(block) => {
+                plugins.push(parse_location_plugin_block(block)?);
+            }
+        }
+    }
+
+    Ok((directives, plugins))
+}
+
+fn parse_location_plugin_block(block: &Block) -> Result<PluginSpec, LowerErr> {
+    match block.name.as_str() {
+        consts::HEADERS => lower_headers_plugin(block),
+        _ => Err(LowerErr {
+            message: format!("unexpected inner block in location: {}", block.name),
+        }),
+    }
+}
+
+fn lower_headers_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
+    if !block.args.is_empty() {
+        return Err(LowerErr {
+            message: "headers block: does not accept arguments".into(),
+        });
+    }
+
+    let mut config = HeadersPluginConfig::default();
+    for child in &block.children {
+        match child {
+            Node::Directive(directive) => apply_headers_directive(&mut config, directive)?,
+            Node::Block(block) => {
                 return Err(LowerErr {
-                    message: format!("Unexpected inner block in location block: {:?}", block.name),
+                    message: format!("headers block: nested blocks are not supported: {}", block.name),
                 });
             }
         }
     }
 
-    Ok(directives)
+    let config = serde_json::to_value(config).expect("headers plugin config serializes");
+    Ok(PluginSpec {
+        name: consts::HEADERS.into(),
+        config,
+    })
+}
+
+fn apply_headers_directive(
+    config: &mut HeadersPluginConfig,
+    directive: &Directive,
+) -> Result<(), LowerErr> {
+    match directive.name.as_str() {
+        consts::REQUEST_ADD => {
+            config
+                .request
+                .add
+                .push(parse_header_entry(&directive.args, consts::REQUEST_ADD)?);
+        }
+        consts::REQUEST_SET => {
+            config
+                .request
+                .set
+                .push(parse_header_entry(&directive.args, consts::REQUEST_SET)?);
+        }
+        consts::REQUEST_REMOVE => {
+            config
+                .request
+                .remove
+                .push(parse_header_remove(&directive.args, consts::REQUEST_REMOVE)?);
+        }
+        consts::UPSTREAM_REQUEST_ADD => {
+            config
+                .upstream_request
+                .add
+                .push(parse_header_entry(&directive.args, consts::UPSTREAM_REQUEST_ADD)?);
+        }
+        consts::UPSTREAM_REQUEST_SET => {
+            config
+                .upstream_request
+                .set
+                .push(parse_header_entry(&directive.args, consts::UPSTREAM_REQUEST_SET)?);
+        }
+        consts::UPSTREAM_REQUEST_REMOVE => {
+            config
+                .upstream_request
+                .remove
+                .push(parse_header_remove(&directive.args, consts::UPSTREAM_REQUEST_REMOVE)?);
+        }
+        consts::RESPONSE_ADD => {
+            config
+                .response
+                .add
+                .push(parse_header_entry(&directive.args, consts::RESPONSE_ADD)?);
+        }
+        consts::RESPONSE_SET => {
+            config
+                .response
+                .set
+                .push(parse_header_entry(&directive.args, consts::RESPONSE_SET)?);
+        }
+        consts::RESPONSE_REMOVE => {
+            config
+                .response
+                .remove
+                .push(parse_header_remove(&directive.args, consts::RESPONSE_REMOVE)?);
+        }
+        _ => {
+            return Err(LowerErr {
+                message: format!("headers block: unsupported directive {}", directive.name),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_header_entry(args: &[String], directive: &str) -> Result<HeaderEntry, LowerErr> {
+    match args {
+        [] => Err(LowerErr {
+            message: format!("{directive}: expected header name and value"),
+        }),
+        [name] => Err(LowerErr {
+            message: format!("{directive}: expected header value for `{name}`"),
+        }),
+        [name, value @ ..] => Ok(HeaderEntry {
+            name: name.clone(),
+            value: value.join(" "),
+        }),
+    }
+}
+
+fn parse_header_remove(args: &[String], directive: &str) -> Result<String, LowerErr> {
+    match args {
+        [name] => Ok(name.clone()),
+        [] => Err(LowerErr {
+            message: format!("{directive}: expected header name"),
+        }),
+        _ => Err(LowerErr {
+            message: format!("{directive}: expected exactly 1 argument"),
+        }),
+    }
 }
 
 fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, LowerErr> {
