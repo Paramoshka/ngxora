@@ -16,6 +16,6 @@ http = "1"
 ngxora-compile = { path = "../ngxora-compile" }
 ngxora-plugin-api = { path = "../ngxora-plugin-api" }
 ngxora-plugin-registry = { path = "../ngxora-plugin-registry" }
-pingora = { version = "0.7.0", default-features = false, features = ["lb"] }
-pingora-proxy = { version = "0.7.0", default-features = false }
+pingora = { version = "0.8.0", default-features = false, features = ["lb"] }
+pingora-proxy = { version = "0.8.0", default-features = false }
 regex = "1"
