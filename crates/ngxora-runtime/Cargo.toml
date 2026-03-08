@@ -7,7 +7,6 @@ edition = "2024"
 default = ["openssl"]
 openssl = ["pingora/openssl", "pingora-proxy/openssl"]
 plugin-headers = ["ngxora-plugin-registry/plugin-headers"]
-rustls = ["pingora/rustls", "pingora-proxy/rustls"]
 
 [dependencies]
 arc-swap = "1.8.2"
@@ -24,7 +23,7 @@ regex = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tonic = { version = "0.12", features = ["transport"] }
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
 tower = "0.5"
 url = "2"
 protoc-bin-vendored = "3"

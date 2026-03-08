@@ -148,6 +148,12 @@ Current shape:
 - `headers` extension as the first simple plugin
 - `plugins.cfg` + `make build-bin` for build-time plugin selection
 
+Near-term core roadmap:
+- `client_max_body_size`
+- `send_timeout`
+- `proxy_ssl_verify` and trusted upstream CA support
+- `upstream` blocks with multiple backends
+
 Near-term plugin roadmap:
 - `basic_auth`
 - `cors`
