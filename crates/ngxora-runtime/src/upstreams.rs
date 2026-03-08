@@ -166,6 +166,7 @@ pub struct ListenerTlsConfig {
 pub struct HttpRuntimeOptions {
     pub downstream_keepalive_timeout: Option<u64>,
     pub keepalive_requests: Option<u32>,
+    pub tcp_nodelay: bool,
     pub allow_connect_method_proxying: bool,
     pub h2c: bool,
 }
@@ -190,6 +191,7 @@ impl CompiledRouter {
                     &http.keepalive_timeout,
                 ),
                 keepalive_requests: http.keepalive_requests,
+                tcp_nodelay: matches!(http.tcp_nodelay, ngxora_compile::ir::Switch::On),
                 allow_connect_method_proxying: matches!(
                     http.allow_connect_method_proxying,
                     ngxora_compile::ir::Switch::On

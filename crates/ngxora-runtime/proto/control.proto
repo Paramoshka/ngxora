@@ -27,6 +27,9 @@ message ConfigSnapshot {
 message HttpOptions {
   uint64 downstream_keepalive_timeout_seconds = 1;
   bool tcp_nodelay = 2;
+  uint32 keepalive_requests = 3;
+  bool allow_connect_method_proxying = 4;
+  bool h2c = 5;
 }
 
 message Listener {
@@ -34,24 +37,54 @@ message Listener {
   string address = 2;
   uint32 port = 3;
   bool tls = 4;
-  bool default_server = 5;
+  bool http2 = 5;
+  bool http2_only = 6;
+  ListenerTlsOptions tls_options = 7;
+}
+
+message ListenerTlsOptions {
+  TlsProtocolVersion min_protocol = 1;
+  TlsProtocolVersion max_protocol = 2;
+  TlsVerifyClient verify_client = 3;
+  PemSource client_certificate = 4;
 }
 
 message VirtualHost {
   string listener = 1;
   repeated string server_names = 2;
-  TlsBinding tls = 3;
-  repeated Route routes = 4;
+  bool default_server = 3;
+  TlsBinding tls = 4;
+  repeated Route routes = 5;
 }
 
 message TlsBinding {
-  string cert_path = 1;
-  string key_path = 2;
+  PemSource cert = 1;
+  PemSource key = 2;
+}
+
+message PemSource {
+  oneof source {
+    string path = 1;
+    string inline_pem = 2;
+  }
 }
 
 message Route {
   Match match = 1;
   Upstream upstream = 2;
+  RouteTimeouts timeouts = 3;
+  repeated Plugin plugins = 4;
+}
+
+message RouteTimeouts {
+  uint64 connect_timeout_ms = 1;
+  uint64 read_timeout_ms = 2;
+  uint64 write_timeout_ms = 3;
+}
+
+message Plugin {
+  string name = 1;
+  string json_config = 2;
 }
 
 message Match {
@@ -60,6 +93,7 @@ message Match {
     string exact = 2;
     string prefer_prefix = 3;
     Regex regex = 4;
+    string named = 5;
   }
 }
 
@@ -72,4 +106,18 @@ message Upstream {
   string scheme = 1;
   string host = 2;
   uint32 port = 3;
+}
+
+enum TlsProtocolVersion {
+  TLS_PROTOCOL_VERSION_UNSPECIFIED = 0;
+  TLS_PROTOCOL_VERSION_TLS1 = 1;
+  TLS_PROTOCOL_VERSION_TLS1_2 = 2;
+  TLS_PROTOCOL_VERSION_TLS1_3 = 3;
+}
+
+enum TlsVerifyClient {
+  TLS_VERIFY_CLIENT_UNSPECIFIED = 0;
+  TLS_VERIFY_CLIENT_OFF = 1;
+  TLS_VERIFY_CLIENT_OPTIONAL = 2;
+  TLS_VERIFY_CLIENT_REQUIRED = 3;
 }

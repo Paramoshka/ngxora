@@ -1,11 +1,13 @@
 use ngxora_compile::ir::Ir;
 use ngxora_config::{Ast, include::IncludeResolver};
 use ngxora_runtime::control::{ConfigSnapshot, InProcessControlPlane, RuntimeState};
+use ngxora_runtime::grpc::spawn_control_plane;
 use ngxora_runtime::server::bind_listeners_from_state;
 use ngxora_runtime::upstreams::{CompiledRouter, DynamicProxy};
 use pingora::server::Server;
 use pingora::server::configuration::Opt;
 use std::env;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -13,6 +15,7 @@ use std::sync::Arc;
 struct CliArgs {
     config_path: PathBuf,
     check_only: bool,
+    grpc_addr: Option<SocketAddr>,
 }
 
 fn main() -> ExitCode {
@@ -72,6 +75,11 @@ fn run(cli: CliArgs) -> Result<(), String> {
         cli.config_path.display()
     );
 
+    if let Some(addr) = cli.grpc_addr {
+        spawn_control_plane(addr, control.clone())?;
+        println!("gRPC control plane listening on {addr}");
+    }
+
     server.add_service(proxy);
     server.run_forever();
 }
@@ -122,12 +130,22 @@ where
 {
     let mut config_path: Option<PathBuf> = None;
     let mut check_only = false;
+    let mut grpc_addr: Option<SocketAddr> = None;
 
-    let args = args.into_iter().skip(1).map(Into::into);
-    for arg in args {
-        let arg = arg;
+    let mut args = args.into_iter().skip(1).map(Into::into);
+    while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "--check" => check_only = true,
+            "--grpc-addr" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--grpc-addr requires a socket address".to_string())?;
+                let value = value.to_string_lossy();
+                let addr = value
+                    .parse()
+                    .map_err(|err| format!("invalid --grpc-addr `{value}`: {err}"))?;
+                grpc_addr = Some(addr);
+            }
             "-h" | "--help" => {
                 print_usage();
                 return Ok(None);
@@ -150,9 +168,10 @@ where
     Ok(Some(CliArgs {
         config_path,
         check_only,
+        grpc_addr,
     }))
 }
 
 fn print_usage() {
-    eprintln!("Usage: ngxora [--check] <config-path>");
+    eprintln!("Usage: ngxora [--check] [--grpc-addr <host:port>] <config-path>");
 }
