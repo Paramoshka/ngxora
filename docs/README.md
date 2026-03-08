@@ -4,6 +4,8 @@
 
 The table below describes `gRPC ApplySnapshot` behavior for the current runtime model.
 
+For implementation discipline on new options and plugins, see [Feature Checklist](/home/ivan/projects/pet/ngxora/docs/feature-checklist.md).
+
 ## Downstream Config
 
 ```nginx
