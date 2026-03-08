@@ -5,10 +5,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+ARG CARGO_BUILD_FLAGS=""
 
 COPY . .
 
-RUN cargo build --release --bin ngxora
+RUN cargo build --release --bin ngxora ${CARGO_BUILD_FLAGS}
 RUN ./target/release/ngxora --check /app/examples/ngxora.conf
 
 FROM debian:bookworm-slim

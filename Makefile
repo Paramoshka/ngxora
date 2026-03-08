@@ -13,20 +13,26 @@ PLUGINS_CFG ?= plugins.cfg
 # Versioning / tagging
 TAG      ?= dev
 REGISTRY ?= registry.example.com
-IMAGE    ?= $(REGISTRY)/$(APP):$(TAG)
+IMAGE_REPO ?= $(REGISTRY)/$(APP)
+IMAGE    ?= $(IMAGE_REPO):$(TAG)
 BUILDER_IMAGE := ngxora-src
 PLATFORMS ?= linux/amd64,linux/arm64
 PLUGIN_FEATURES := $(shell if [ -f $(PLUGINS_CFG) ]; then awk 'NF && $$1 !~ /^#/ {print "plugin-" $$1}' $(PLUGINS_CFG) | paste -sd, -; fi)
 CARGO_PLUGIN_FLAGS := --no-default-features $(if $(PLUGIN_FEATURES),--features $(PLUGIN_FEATURES))
+RUNTIME_FEATURE_FLAGS := $(if $(PLUGIN_FEATURES),--features $(PLUGIN_FEATURES))
 
 # Tools
 CARGO      ?= cargo
 DOCKER  ?= docker
+GRYPE   ?= grype
+GRYPE_FAIL_ON ?= high
+CARGO_TARGET_DIR ?= target
+CARGO_LOCK_FLAGS ?= --locked
 
 .PHONY: help all ci \
         test test-unit test-integration lint \
         build build-bin build-image \
-        publish publish-image publish-release \
+        publish publish-image publish-release registry-login scan-image \
         clean
 
 help: ## Show available targets
@@ -41,35 +47,44 @@ ci: lint test build ## CI pipeline (lint + tests + build)
 # Src section
 # =========================
 image-builder:
-	$(DOCKER) build . -t $(BUILDER_IMAGE) --file ./Dockerfile --target builder
+	CARGO_BUILD_FLAGS="$(CARGO_PLUGIN_FLAGS)" $(DOCKER) build . \
+		--build-arg CARGO_BUILD_FLAGS \
+		-t $(BUILDER_IMAGE) \
+		--file ./Dockerfile \
+		--target builder
 
 # =========================
 # Tests section
 # =========================
 
 lint: ## Lint source code
-	@echo "lint: (example)"; \
-	$(CARGO) vet ./...
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) fmt --check
 
 test: test-unit ## Run default test suite
-test-unit: image-builder ## Run unit tests
-	$(DOCKER) run --rm -w /app/crates/ngxora-config $(BUILDER_IMAGE) cargo test
+test-unit: ## Run unit tests
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/ngxora-config/Cargo.toml
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/ngxora-compile/Cargo.toml
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/extensions/headers/Cargo.toml
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/ngxora-runtime/Cargo.toml $(RUNTIME_FEATURE_FLAGS)
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/ngxora.conf
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/ngxora-tls.conf
 
 test-integration: ## Run integration tests
-	# require env or docker compose etc.
-	$(CARGO) test -tags=integration ./...
+	@echo "test-integration: no integration suite configured yet"
 
 # =========================
 # Build section
 # =========================
 
-build: build-image ## Build all artifacts
+build: build-bin build-image ## Build all artifacts
 
-build-bin: ## Build local binary with plugins from plugins.cfg
-	$(CARGO) build $(CARGO_PLUGIN_FLAGS)
+build-bin: ## Build local release binary with plugins from plugins.cfg
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) build $(CARGO_LOCK_FLAGS) --release --bin $(APP) $(CARGO_PLUGIN_FLAGS)
 
 build-image: ## Build docker image locally
-	$(DOCKER) build -t $(IMAGE):$(TAG) .
+	CARGO_BUILD_FLAGS="$(CARGO_PLUGIN_FLAGS)" $(DOCKER) build \
+		--build-arg CARGO_BUILD_FLAGS \
+		-t $(IMAGE) .
 
 # =========================
 # Publish section
@@ -77,8 +92,17 @@ build-image: ## Build docker image locally
 
 publish: test build publish-image ## Default publish (safe)
 
-publish-image: ## Push docker image to registry
-	$(DOCKER) push $(IMAGE):$(TAG)
+registry-login: ## Log in to the container registry using env vars
+	test -n "$(REGISTRY_USERNAME)" || (echo "REGISTRY_USERNAME is required"; exit 1)
+	test -n "$(REGISTRY_TOKEN)" || (echo "REGISTRY_TOKEN is required"; exit 1)
+	printf '%s' "$(REGISTRY_TOKEN)" | $(DOCKER) login "$(REGISTRY)" -u "$(REGISTRY_USERNAME)" --password-stdin
+
+scan-image: ## Scan the built image with grype and fail on configured severity
+	command -v $(GRYPE) >/dev/null 2>&1 || (echo "grype is required"; exit 1)
+	$(GRYPE) $(IMAGE) --fail-on $(GRYPE_FAIL_ON)
+
+publish-image: registry-login ## Push docker image to registry
+	$(DOCKER) push $(IMAGE)
 
 publish-release: ## Publish release artifacts (example placeholder)
 	@echo "publish-release: implement (GitHub/GitLab release upload)"
