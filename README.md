@@ -18,6 +18,35 @@ It aims for a simple split:
 - compile-time plugins for policy and request/response behavior
 - Pingora-powered data plane
 
+## Quick start
+
+Pull the published image:
+
+```bash
+docker pull paramoshka/ngxora:main
+```
+
+Run it with the bundled example config:
+
+```bash
+docker run --rm -p 8080:8080 paramoshka/ngxora:main
+```
+
+Then check the default route:
+
+```bash
+curl http://127.0.0.1:8080/
+```
+
+Run it with your own config:
+
+```bash
+docker run --rm \
+  -p 8080:8080 \
+  -v "$(pwd)/examples/ngxora.conf:/etc/ngxora/ngxora.conf:ro" \
+  paramoshka/ngxora:main
+```
+
 ## nginx-style config
 
 ```nginx
