@@ -90,6 +90,35 @@ The runtime is built around atomic snapshot apply:
 
 The gRPC transport for the control plane is the intended next layer on top of this runtime model.
 
+You can now start the built-in Rust gRPC control plane alongside the proxy:
+
+```bash
+cargo run -- --grpc-addr 127.0.0.1:50051 examples/ngxora.conf
+```
+
+For sidecar-style local control, use a Unix domain socket instead:
+
+```bash
+cargo run -- --grpc-uds /tmp/ngxora-control.sock examples/ngxora.conf
+```
+
+And inspect the current snapshot with the example Rust client:
+
+```bash
+cargo run -p ngxora-runtime --example get_snapshot -- --uds /tmp/ngxora-control.sock
+```
+
+Push a minimal replacement snapshot back into `ngxora`:
+
+```bash
+cargo run -p ngxora-runtime --example apply_snapshot -- \
+  --uds /tmp/ngxora-control.sock \
+  --version manual-v2 \
+  --server-name localhost \
+  --upstream-host example.com \
+  --upstream-port 80
+```
+
 ## Security roadmap
 
 The runtime control-plane model is meant for trusted environments until the networked gRPC layer is fully hardened.

@@ -1386,6 +1386,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "http",
+ "hyper-util",
  "ngxora-compile",
  "ngxora-plugin-api",
  "ngxora-plugin-registry",
@@ -1396,8 +1397,10 @@ dependencies = [
  "regex",
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
+ "tower 0.5.3",
  "url",
 ]
 

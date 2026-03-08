@@ -1,7 +1,7 @@
 use ngxora_compile::ir::Ir;
 use ngxora_config::{Ast, include::IncludeResolver};
 use ngxora_runtime::control::{ConfigSnapshot, InProcessControlPlane, RuntimeState};
-use ngxora_runtime::grpc::spawn_control_plane;
+use ngxora_runtime::grpc::{spawn_control_plane, spawn_control_plane_uds};
 use ngxora_runtime::server::bind_listeners_from_state;
 use ngxora_runtime::upstreams::{CompiledRouter, DynamicProxy};
 use pingora::server::Server;
@@ -16,6 +16,7 @@ struct CliArgs {
     config_path: PathBuf,
     check_only: bool,
     grpc_addr: Option<SocketAddr>,
+    grpc_uds: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -80,6 +81,11 @@ fn run(cli: CliArgs) -> Result<(), String> {
         println!("gRPC control plane listening on {addr}");
     }
 
+    if let Some(path) = cli.grpc_uds {
+        spawn_control_plane_uds(path.clone(), control.clone())?;
+        println!("gRPC control plane listening on unix://{}", path.display());
+    }
+
     server.add_service(proxy);
     server.run_forever();
 }
@@ -131,6 +137,7 @@ where
     let mut config_path: Option<PathBuf> = None;
     let mut check_only = false;
     let mut grpc_addr: Option<SocketAddr> = None;
+    let mut grpc_uds: Option<PathBuf> = None;
 
     let mut args = args.into_iter().skip(1).map(Into::into);
     while let Some(arg) = args.next() {
@@ -145,6 +152,12 @@ where
                     .parse()
                     .map_err(|err| format!("invalid --grpc-addr `{value}`: {err}"))?;
                 grpc_addr = Some(addr);
+            }
+            "--grpc-uds" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--grpc-uds requires a filesystem path".to_string())?;
+                grpc_uds = Some(PathBuf::from(value));
             }
             "-h" | "--help" => {
                 print_usage();
@@ -165,13 +178,20 @@ where
         return Err("missing config path".into());
     };
 
+    if grpc_addr.is_some() && grpc_uds.is_some() {
+        return Err("use either --grpc-addr or --grpc-uds, not both".into());
+    }
+
     Ok(Some(CliArgs {
         config_path,
         check_only,
         grpc_addr,
+        grpc_uds,
     }))
 }
 
 fn print_usage() {
-    eprintln!("Usage: ngxora [--check] [--grpc-addr <host:port>] <config-path>");
+    eprintln!(
+        "Usage: ngxora [--check] [--grpc-addr <host:port> | --grpc-uds <path>] <config-path>"
+    );
 }

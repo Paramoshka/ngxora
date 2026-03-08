@@ -15,8 +15,13 @@ use ngxora_plugin_api::PluginSpec;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::Duration;
+#[cfg(unix)]
+use tokio::net::UnixListener;
+#[cfg(unix)]
+use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server as GrpcServer;
 use tonic::{Request, Response, Status};
 use url::Url;
@@ -91,11 +96,7 @@ pub fn spawn_control_plane(
     addr: SocketAddr,
     control: InProcessControlPlane,
 ) -> Result<JoinHandle<()>, String> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("ngxora-grpc")
-        .build()
-        .map_err(|err| format!("failed to build gRPC runtime: {err}"))?;
+    let runtime = grpc_runtime()?;
 
     Ok(std::thread::spawn(move || {
         runtime.block_on(async move {
@@ -104,6 +105,92 @@ pub fn spawn_control_plane(
             }
         });
     }))
+}
+
+/// Runs the gRPC control plane over a Unix domain socket for local agent-sidecar use.
+#[cfg(unix)]
+pub async fn serve_control_plane_uds(
+    path: PathBuf,
+    control: InProcessControlPlane,
+) -> Result<(), String> {
+    prepare_uds_path(&path)?;
+    let listener = UnixListener::bind(&path)
+        .map_err(|err| format!("failed to bind gRPC UDS {}: {err}", path.display()))?;
+    let incoming = UnixListenerStream::new(listener);
+
+    GrpcServer::builder()
+        .add_service(ControlPlaneServer::new(GrpcControlPlane::new(control)))
+        .serve_with_incoming(incoming)
+        .await
+        .map_err(|err| format!("gRPC control plane stopped on {}: {err}", path.display()))
+}
+
+#[cfg(not(unix))]
+pub async fn serve_control_plane_uds(
+    _path: PathBuf,
+    _control: InProcessControlPlane,
+) -> Result<(), String> {
+    Err("UDS gRPC control plane is only available on unix targets".into())
+}
+
+/// Spawns the UDS gRPC control plane on its own Tokio runtime.
+pub fn spawn_control_plane_uds(
+    path: PathBuf,
+    control: InProcessControlPlane,
+) -> Result<JoinHandle<()>, String> {
+    let runtime = grpc_runtime()?;
+
+    Ok(std::thread::spawn(move || {
+        runtime.block_on(async move {
+            if let Err(err) = serve_control_plane_uds(path.clone(), control).await {
+                eprintln!("gRPC control plane stopped on {}: {err}", path.display());
+            }
+        });
+    }))
+}
+
+fn grpc_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("ngxora-grpc")
+        .build()
+        .map_err(|err| format!("failed to build gRPC runtime: {err}"))
+}
+
+#[cfg(unix)]
+fn prepare_uds_path(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create directory {}: {err}", parent.display()))?;
+    }
+
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            #[allow(clippy::useless_conversion)]
+            let is_socket = std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type());
+            if !is_socket {
+                return Err(format!(
+                    "gRPC UDS path {} already exists and is not a socket",
+                    path.display()
+                ));
+            }
+            std::fs::remove_file(path).map_err(|err| {
+                format!(
+                    "failed to remove stale gRPC socket {}: {err}",
+                    path.display()
+                )
+            })?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(format!(
+                "failed to inspect gRPC socket path {}: {err}",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn proto_apply_result(result: RuntimeApplyResult) -> ProtoApplyResult {
