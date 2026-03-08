@@ -1,6 +1,7 @@
 syntax = "proto3";
 
 package ngxora.control.v1;
+option go_package = "github.com/paramoshka/ngxora/sdk/go/ngxora/control/v1;controlv1";
 
 service ControlPlane {
   rpc ApplySnapshot(ConfigSnapshot) returns (ApplyResult);

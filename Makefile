@@ -31,7 +31,7 @@ CARGO_LOCK_FLAGS ?= --locked
 
 .PHONY: help all ci \
         test test-unit test-integration lint \
-        build build-bin build-image \
+        build build-bin build-image gen-go-sdk \
         publish publish-image publish-release registry-login scan-image \
         clean
 
@@ -85,6 +85,9 @@ build-image: ## Build docker image locally
 	CARGO_BUILD_FLAGS="$(CARGO_PLUGIN_FLAGS)" $(DOCKER) build \
 		--build-arg CARGO_BUILD_FLAGS \
 		-t $(IMAGE) .
+
+gen-go-sdk: ## Generate Go SDK from control.proto
+	./sdk/go/gen.sh
 
 # =========================
 # Publish section

@@ -27,6 +27,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.12", features = ["transport"] }
 tower = "0.5"
 url = "2"
+protoc-bin-vendored = "3"
 
 [dev-dependencies]
 

@@ -119,6 +119,14 @@ cargo run -p ngxora-runtime --example apply_snapshot -- \
   --upstream-port 80
 ```
 
+The same `control.proto` can also generate a Go SDK for an external agent:
+
+```bash
+make gen-go-sdk
+```
+
+That emits Go bindings under `sdk/go/ngxora/control/v1`.
+
 ## Security roadmap
 
 The runtime control-plane model is meant for trusted environments until the networked gRPC layer is fully hardened.
