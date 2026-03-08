@@ -82,6 +82,17 @@ Current shape:
 - `headers` extension as the first simple plugin
 - `plugins.cfg` + `make build-bin` for build-time plugin selection
 
+Near-term plugin roadmap:
+- `basic_auth`
+- `cors`
+- `rate_limit`
+
+Later plugin roadmap:
+- `geoip`
+- `jwt_auth`
+- `cache`
+- `ext_authz`
+
 Text config can now attach the built-in `headers` plugin inside a `location` block:
 
 ```nginx
