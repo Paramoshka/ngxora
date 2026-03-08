@@ -58,6 +58,17 @@ The runtime is built around atomic snapshot apply:
 
 The gRPC transport for the control plane is the intended next layer on top of this runtime model.
 
+## Security roadmap
+
+The runtime control-plane model is meant for trusted environments until the networked gRPC layer is fully hardened.
+
+Planned hardening work:
+- authenticated and authorized gRPC control-plane access
+- rate limiting and audit logging for snapshot operations
+- protected-header policy for mutation plugins such as `headers`
+
+In practice, this means route and TLS snapshot updates are already part of the runtime model, but the public control-plane surface and plugin guardrails are still being tightened.
+
 ## Plugins
 
 Plugins are compiled in, not loaded through unstable runtime ABI tricks.

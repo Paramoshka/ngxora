@@ -17,17 +17,27 @@ use std::sync::Arc;
 #[path = "server_tests.rs"]
 mod tests;
 
+#[derive(Debug, Clone)]
+pub(crate) struct DownstreamTlsInfo {
+    pub(crate) sni: Option<String>,
+}
+
 #[cfg(feature = "openssl")]
 mod openssl_listener_tls {
-    use super::{listener_addr, pem_source_path, select_listener_tls, ListenKey, RuntimeState};
+    use super::{
+        DownstreamTlsInfo, ListenKey, RuntimeState, listener_addr, pem_source_path,
+        select_listener_tls,
+    };
     use async_trait::async_trait;
     use ngxora_compile::ir::TlsIdentity;
     use pingora::listeners::TlsAccept;
+    use pingora::protocols::tls::TlsRef;
     use pingora::tls::ext;
     use pingora::tls::pkey::{PKey, Private};
     use pingora::tls::ssl::{NameType, SslRef};
     use pingora::tls::x509::X509;
     use pingora::Result;
+    use std::any::Any;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -188,6 +198,16 @@ mod openssl_listener_tls {
                 );
             }
         }
+
+        async fn handshake_complete_callback(
+            &self,
+            ssl: &TlsRef,
+        ) -> Option<Arc<dyn Any + Send + Sync>> {
+            let sni = ssl
+                .servername(NameType::HOST_NAME)
+                .map(|value| value.to_ascii_lowercase());
+            Some(Arc::new(DownstreamTlsInfo { sni }))
+        }
     }
 }
 
@@ -311,6 +331,24 @@ fn apply_listener_tls_settings(
     };
     settings.set_alpn(alpn);
 
+    #[cfg(not(feature = "openssl"))]
+    {
+        if tls.protocols.is_some() {
+            return Err(pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                "ssl_protocols requires build with feature `openssl`",
+            ));
+        }
+
+        if tls.verify_client != TlsVerifyClient::Off || tls.client_certificate.is_some() {
+            return Err(pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                "ssl_verify_client and ssl_client_certificate require build with feature `openssl`",
+            ));
+        }
+    }
+
+    #[cfg(feature = "openssl")]
     if let Some(protocols) = tls.protocols {
         settings
             .set_min_proto_version(Some(ssl_version(protocols.min)))
@@ -330,12 +368,14 @@ fn apply_listener_tls_settings(
             })?;
     }
 
+    #[cfg(feature = "openssl")]
     match tls.verify_client {
         TlsVerifyClient::Off => settings.set_verify(SslVerifyMode::NONE),
         TlsVerifyClient::Optional => settings.set_verify(SslVerifyMode::PEER),
         TlsVerifyClient::Required => settings.set_verify(required_verify_mode()),
     }
 
+    #[cfg(feature = "openssl")]
     if matches!(
         tls.verify_client,
         TlsVerifyClient::Optional | TlsVerifyClient::Required

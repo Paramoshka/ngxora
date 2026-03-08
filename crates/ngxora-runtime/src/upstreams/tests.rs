@@ -1,9 +1,11 @@
 use super::{
-    downstream_keepalive_timeout_secs, select_route_target, CompiledLocation, CompiledMatcher,
-    RouteTarget, ServerRoutes,
+    downstream_keepalive_timeout_secs, select_route_target, validate_sni_host_consistency,
+    CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter, RouteTarget, ServerRoutes,
 };
 use ngxora_plugin_api::PluginSpec;
-use ngxora_compile::ir::KeepaliveTimeout;
+use ngxora_compile::ir::{
+    Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, Server,
+};
 use std::time::Duration;
 
 fn target(id: &str) -> RouteTarget {
@@ -24,6 +26,12 @@ fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
     }
 }
 
+fn regex(pattern: &str, case_insensitive: bool) -> CompiledMatcher {
+    CompiledMatcher::Regex(
+        CompiledRegex::new(pattern.to_string(), case_insensitive).expect("regex compiles"),
+    )
+}
+
 fn selected_host<'a>(routes: &'a ServerRoutes, path: &str) -> Option<&'a str> {
     match select_route_target(routes, path) {
         Some(CompiledLocation {
@@ -40,13 +48,7 @@ fn exact_match_wins() {
         locations: vec![
             location(CompiledMatcher::Prefix("/".into()), "prefix"),
             location(CompiledMatcher::Exact("/app".into()), "exact"),
-            location(
-                CompiledMatcher::Regex {
-                    case_insensitive: false,
-                    pattern: "^/app$".into(),
-                },
-                "regex",
-            ),
+            location(regex("^/app$", false), "regex"),
         ],
     };
 
@@ -61,13 +63,7 @@ fn prefer_prefix_blocks_regex() {
                 CompiledMatcher::PreferPrefix("/images/".into()),
                 "prefer-prefix",
             ),
-            location(
-                CompiledMatcher::Regex {
-                    case_insensitive: false,
-                    pattern: "\\.(png|jpg)$".into(),
-                },
-                "regex",
-            ),
+            location(regex("\\.(png|jpg)$", false), "regex"),
         ],
     };
 
@@ -82,20 +78,8 @@ fn first_matching_regex_wins_over_plain_prefix() {
     let routes = ServerRoutes {
         locations: vec![
             location(CompiledMatcher::Prefix("/api/".into()), "prefix"),
-            location(
-                CompiledMatcher::Regex {
-                    case_insensitive: false,
-                    pattern: "^/api/v[0-9]+/".into(),
-                },
-                "regex-1",
-            ),
-            location(
-                CompiledMatcher::Regex {
-                    case_insensitive: false,
-                    pattern: "^/api/".into(),
-                },
-                "regex-2",
-            ),
+            location(regex("^/api/v[0-9]+/", false), "regex-1"),
+            location(regex("^/api/", false), "regex-2"),
         ],
     };
 
@@ -112,13 +96,7 @@ fn longest_plain_prefix_is_used_when_no_regex_matches() {
             location(CompiledMatcher::Prefix("/".into()), "root"),
             location(CompiledMatcher::Prefix("/api/".into()), "api"),
             location(CompiledMatcher::Prefix("/api/internal/".into()), "internal"),
-            location(
-                CompiledMatcher::Regex {
-                    case_insensitive: false,
-                    pattern: "^/admin/".into(),
-                },
-                "regex",
-            ),
+            location(regex("^/admin/", false), "regex"),
         ],
     };
 
@@ -165,4 +143,38 @@ fn downstream_keepalive_timeout_treats_zero_idle_as_disabled() {
         }),
         None
     );
+}
+
+#[test]
+fn validate_sni_host_consistency_rejects_mismatch() {
+    let err = validate_sni_host_consistency(Some("api.example.com"), Some("edge.example.com"))
+        .expect_err("expected mismatch to fail");
+
+    assert_eq!(err.etype(), &pingora::ErrorType::HTTPStatus(421));
+}
+
+#[test]
+fn compiled_router_rejects_invalid_location_regex() {
+    let http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Regex {
+                    case_insensitive: false,
+                    pattern: "(".into(),
+                },
+                directives: vec![LocationDirective::ProxyPass(
+                    "http://127.0.0.1:8080".parse().unwrap(),
+                )],
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let err = CompiledRouter::from_http(&http).expect_err("expected invalid regex to fail");
+    assert!(err.contains("invalid location regex"));
 }

@@ -5,6 +5,8 @@ mod tests {
         include::IncludeResolver,
         lexer::{Token, TokenType},
     };
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn tokenizes_simple_block_and_comment() {
@@ -65,7 +67,7 @@ mod tests {
 
         let input = format!("http {{ include {}; }}", include_path);
         let ast = Ast::parse_config(&input).unwrap();
-        let resolver = IncludeResolver::new(&ast);
+        let resolver = IncludeResolver::new(&ast, std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
         let resolved = resolver.resolve(&ast).unwrap();
 
         let expected = Ast {
@@ -84,5 +86,51 @@ mod tests {
         };
 
         assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn rejects_include_cycle() {
+        let base = unique_temp_dir("ngxora-include-cycle");
+        fs::create_dir_all(&base).unwrap();
+        let a = base.join("a.conf");
+        let b = base.join("b.conf");
+        fs::write(&a, format!("include {};", b.display())).unwrap();
+        fs::write(&b, format!("include {};", a.display())).unwrap();
+
+        let input = format!("http {{ include {}; }}", a.display());
+        let ast = Ast::parse_config(&input).unwrap();
+        let resolver = IncludeResolver::new(&ast, &base);
+        let err = resolver.resolve(&ast).unwrap_err();
+
+        assert!(err.message.contains("include cycle detected"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn rejects_include_escape_from_root() {
+        let root = unique_temp_dir("ngxora-include-root");
+        let outside = unique_temp_dir("ngxora-include-outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let escaped = outside.join("escaped.conf");
+        fs::write(&escaped, "server { listen 80; }").unwrap();
+
+        let input = format!("http {{ include {}; }}", escaped.display());
+        let ast = Ast::parse_config(&input).unwrap();
+        let resolver = IncludeResolver::new(&ast, &root);
+        let err = resolver.resolve(&ast).unwrap_err();
+
+        assert!(err.message.contains("escapes root config directory"));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
     }
 }

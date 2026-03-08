@@ -81,7 +81,11 @@ fn load_router(path: &Path) -> Result<CompiledRouter, String> {
         .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
     let ast = Ast::parse_config(&text)
         .map_err(|err| format!("failed to parse config {}: {}", path.display(), err.message))?;
-    let ast = IncludeResolver::new(&ast).resolve(&ast).map_err(|err| {
+    let root_dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let ast = IncludeResolver::new(&ast, root_dir).resolve(&ast).map_err(|err| {
         format!(
             "failed to resolve includes in {}: {}",
             path.display(),

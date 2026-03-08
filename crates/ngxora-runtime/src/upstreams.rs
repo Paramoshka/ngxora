@@ -1,4 +1,5 @@
 use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState};
+use crate::server::DownstreamTlsInfo;
 use async_trait::async_trait;
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
@@ -12,7 +13,7 @@ use pingora::Result;
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
 use pingora_proxy::{ProxyHttp, Session};
-use regex::RegexBuilder;
+use regex::{Regex, RegexBuilder};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -51,28 +52,61 @@ pub enum RouteTarget {
 pub enum CompiledMatcher {
     Prefix(String),
     Exact(String),
-    Regex {
-        case_insensitive: bool,
-        pattern: String,
-    },
+    Regex(CompiledRegex),
     PreferPrefix(String),
     Named(String),
 }
 
-impl From<&LocationMatcher> for CompiledMatcher {
-    fn from(value: &LocationMatcher) -> Self {
+#[derive(Debug, Clone)]
+pub struct CompiledRegex {
+    pub case_insensitive: bool,
+    pub pattern: String,
+    regex: Regex,
+}
+
+impl PartialEq for CompiledRegex {
+    fn eq(&self, other: &Self) -> bool {
+        self.case_insensitive == other.case_insensitive && self.pattern == other.pattern
+    }
+}
+
+impl Eq for CompiledRegex {}
+
+impl CompiledRegex {
+    fn new(pattern: String, case_insensitive: bool) -> Result<Self, String> {
+        let regex = RegexBuilder::new(&pattern)
+            .case_insensitive(case_insensitive)
+            .build()
+            .map_err(|err| format!("invalid location regex `{pattern}`: {err}"))?;
+
+        Ok(Self {
+            case_insensitive,
+            pattern,
+            regex,
+        })
+    }
+
+    fn is_match(&self, path: &str) -> bool {
+        self.regex.is_match(path)
+    }
+}
+
+impl TryFrom<&LocationMatcher> for CompiledMatcher {
+    type Error = String;
+
+    fn try_from(value: &LocationMatcher) -> Result<Self, Self::Error> {
         match value {
-            LocationMatcher::Prefix(path) => Self::Prefix(path.clone()),
-            LocationMatcher::Exact(path) => Self::Exact(path.clone()),
+            LocationMatcher::Prefix(path) => Ok(Self::Prefix(path.clone())),
+            LocationMatcher::Exact(path) => Ok(Self::Exact(path.clone())),
             LocationMatcher::Regex {
                 case_insensitive,
                 pattern,
-            } => Self::Regex {
-                case_insensitive: *case_insensitive,
-                pattern: pattern.clone(),
-            },
-            LocationMatcher::PreferPrefix(path) => Self::PreferPrefix(path.clone()),
-            LocationMatcher::Named(name) => Self::Named(name.clone()),
+            } => Ok(Self::Regex(CompiledRegex::new(
+                pattern.clone(),
+                *case_insensitive,
+            )?)),
+            LocationMatcher::PreferPrefix(path) => Ok(Self::PreferPrefix(path.clone())),
+            LocationMatcher::Named(name) => Ok(Self::Named(name.clone())),
         }
     }
 }
@@ -170,7 +204,7 @@ impl CompiledRouter {
 
     fn add_server(&mut self, server: &Server, next_route_id: &mut u64) -> Result<(), String> {
         let routes = ServerRoutes {
-            locations: compile_locations(&server.locations, next_route_id),
+            locations: compile_locations(&server.locations, next_route_id)?,
         };
 
         for listen in &server.listens {
@@ -279,7 +313,10 @@ fn listen_key_addr(key: &ListenKey) -> String {
     std::net::SocketAddr::new(key.addr, key.port).to_string()
 }
 
-fn compile_locations(locations: &[Location], next_route_id: &mut u64) -> Vec<CompiledLocation> {
+fn compile_locations(
+    locations: &[Location],
+    next_route_id: &mut u64,
+) -> Result<Vec<CompiledLocation>, String> {
     locations
         .iter()
         .filter_map(|location| {
@@ -311,15 +348,19 @@ fn compile_locations(locations: &[Location], next_route_id: &mut u64) -> Vec<Com
                     _ => None,
                 })?;
 
+            let matcher = match CompiledMatcher::try_from(&location.matcher) {
+                Ok(matcher) => matcher,
+                Err(err) => return Some(Err(err)),
+            };
             let compiled = CompiledLocation {
                 route_id: *next_route_id,
-                matcher: CompiledMatcher::from(&location.matcher),
+                matcher,
                 target,
                 plugins: Vec::new(),
             };
             *next_route_id += 1;
 
-            Some(compiled)
+            Some(Ok(compiled))
         })
         .collect()
 }
@@ -337,14 +378,6 @@ fn downstream_keepalive_timeout_secs(timeout: &KeepaliveTimeout) -> Option<u64> 
             }
         }
     }
-}
-
-fn regex_matches(path: &str, pattern: &str, case_insensitive: bool) -> bool {
-    RegexBuilder::new(pattern)
-        .case_insensitive(case_insensitive)
-        .build()
-        .map(|re| re.is_match(path))
-        .unwrap_or(false)
 }
 
 fn select_route_target<'a>(
@@ -377,10 +410,7 @@ fn select_route_target<'a>(
 
     for location in &routes.locations {
         match &location.matcher {
-            CompiledMatcher::Regex {
-                case_insensitive,
-                pattern,
-            } if regex_matches(path, pattern, *case_insensitive) => {
+            CompiledMatcher::Regex(regex) if regex.is_match(path) => {
                 return Some(location);
             }
             _ => {}
@@ -388,6 +418,48 @@ fn select_route_target<'a>(
     }
 
     best_prefix.map(|(location, _)| location)
+}
+
+fn request_host(session: &Session) -> Result<Option<String>> {
+    let Some(host) = session.get_header("host") else {
+        return Ok(None);
+    };
+
+    let host = host.to_str().map_err(|_| {
+        pingora::Error::explain(
+            pingora::ErrorType::HTTPStatus(400),
+            "invalid host header encoding",
+        )
+    })?;
+
+    Ok(Some(
+        host.split(':')
+            .next()
+            .unwrap_or(host)
+            .trim_end_matches('.')
+            .to_ascii_lowercase(),
+    ))
+}
+
+fn downstream_sni(session: &Session) -> Option<String> {
+    session
+        .digest()
+        .and_then(|digest| digest.ssl_digest.as_ref())
+        .and_then(|ssl| ssl.extension.get::<DownstreamTlsInfo>())
+        .and_then(|info| info.sni.clone())
+}
+
+fn validate_sni_host_consistency(host: Option<&str>, sni: Option<&str>) -> Result<()> {
+    if let (Some(host), Some(sni)) = (host, sni) {
+        if host != sni {
+            return Err(pingora::Error::explain(
+                pingora::ErrorType::HTTPStatus(421),
+                format!("tls sni `{sni}` does not match http host `{host}`"),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -517,12 +589,17 @@ fn resolve_route<'a>(
         return Ok(None);
     };
 
-    let host = session
-        .get_header("host")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(':').next().unwrap_or(value).to_ascii_lowercase());
+    let host = request_host(session)?;
+    let sni = if listen_key.ssl {
+        downstream_sni(session)
+    } else {
+        None
+    };
+    validate_sni_host_consistency(host.as_deref(), sni.as_deref())?;
 
-    let Some(server_routes) = host
+    let routing_host = host.clone().or(sni);
+
+    let Some(server_routes) = routing_host
         .as_deref()
         .and_then(|value| vhosts.named.get(value))
         .or(vhosts.default.as_ref())
