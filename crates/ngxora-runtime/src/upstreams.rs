@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
     LocationMatcher, PemSource, Server, TlsIdentity, TlsProtocolBounds, TlsVerifyClient,
+    UpstreamTimeouts,
 };
 use ngxora_plugin_api::{
     HeaderMapMut, LocalResponse, PluginError, PluginFlow, PluginSpec, PluginState, RequestCtx,
@@ -119,6 +120,7 @@ pub struct CompiledLocation {
     pub route_id: u64,
     pub matcher: CompiledMatcher,
     pub target: RouteTarget,
+    pub upstream_timeouts: UpstreamTimeouts,
     pub plugins: Vec<PluginSpec>,
 }
 
@@ -324,6 +326,18 @@ fn proxy_pass_sni(host: &str, tls: bool) -> String {
     }
 }
 
+fn set_timeout_once(
+    slot: &mut Option<std::time::Duration>,
+    value: std::time::Duration,
+    directive: &str,
+) -> Result<(), String> {
+    if slot.replace(value).is_some() {
+        return Err(format!("{directive} is duplicated in the same location"));
+    }
+
+    Ok(())
+}
+
 fn route_target_from_directive(directive: &LocationDirective) -> Option<RouteTarget> {
     match directive {
         LocationDirective::ProxyPass(url) => {
@@ -353,6 +367,27 @@ fn route_target(location: &Location) -> Option<RouteTarget> {
         .find_map(route_target_from_directive)
 }
 
+fn compile_upstream_timeouts(location: &Location) -> Result<UpstreamTimeouts, String> {
+    let mut timeouts = UpstreamTimeouts::default();
+
+    for directive in &location.directives {
+        match directive {
+            LocationDirective::ProxyConnectTimeout(value) => {
+                set_timeout_once(&mut timeouts.connect, *value, "proxy_connect_timeout")?;
+            }
+            LocationDirective::ProxyReadTimeout(value) => {
+                set_timeout_once(&mut timeouts.read, *value, "proxy_read_timeout")?;
+            }
+            LocationDirective::ProxyWriteTimeout(value) => {
+                set_timeout_once(&mut timeouts.write, *value, "proxy_write_timeout")?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(timeouts)
+}
+
 fn compile_location(
     location: &Location,
     next_route_id: &mut u64,
@@ -365,6 +400,7 @@ fn compile_location(
         route_id: *next_route_id,
         matcher: CompiledMatcher::try_from(&location.matcher)?,
         target,
+        upstream_timeouts: compile_upstream_timeouts(location)?,
         plugins: Vec::new(),
     };
     *next_route_id += 1;
@@ -540,6 +576,7 @@ struct ResolvedLocation<'a> {
 #[derive(Clone)]
 struct SelectedRoute {
     target: RouteTarget,
+    upstream_timeouts: UpstreamTimeouts,
     plugins: ngxora_plugin_api::PluginChain,
 }
 
@@ -652,6 +689,7 @@ impl SelectedRoute {
     fn from_resolved(snapshot: &RuntimeSnapshot, resolved: &ResolvedLocation<'_>) -> Self {
         Self {
             target: resolved.location.target.clone(),
+            upstream_timeouts: resolved.location.upstream_timeouts,
             plugins: snapshot.plugin_chain(resolved.location.route_id),
         }
     }
@@ -698,6 +736,21 @@ fn set_content_length(header: &mut ResponseHeader, value: impl ToString) -> Resu
                 format!("failed to finalize plugin response: {err}"),
             )
         })
+}
+
+fn normalized_peer_timeout(timeout: Option<std::time::Duration>) -> Option<std::time::Duration> {
+    match timeout {
+        Some(timeout) if timeout.is_zero() => None,
+        other => other,
+    }
+}
+
+// Route-level timeout directives are mapped directly to Pingora upstream peer
+// options, so they can change live with route snapshots.
+fn apply_upstream_timeouts(peer: &mut HttpPeer, timeouts: UpstreamTimeouts) {
+    peer.options.connection_timeout = normalized_peer_timeout(timeouts.connect);
+    peer.options.read_timeout = normalized_peer_timeout(timeouts.read);
+    peer.options.write_timeout = normalized_peer_timeout(timeouts.write);
 }
 
 // Plugins can short-circuit the request path with a local response, but that
@@ -897,7 +950,11 @@ impl ProxyHttp for DynamicProxy {
                 port,
                 tls,
                 sni,
-            } => HttpPeer::new((host.as_str(), *port), *tls, sni.clone()),
+            } => {
+                let mut peer = HttpPeer::new((host.as_str(), *port), *tls, sni.clone());
+                apply_upstream_timeouts(&mut peer, selected.upstream_timeouts);
+                peer
+            }
         };
 
         Ok(Box::new(peer))

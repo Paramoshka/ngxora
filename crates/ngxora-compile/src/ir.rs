@@ -148,6 +148,13 @@ pub struct Location {
     pub directives: Vec<LocationDirective>, // proxy_pass, root, try_files...
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+pub struct UpstreamTimeouts {
+    pub connect: Option<Duration>,
+    pub read: Option<Duration>,
+    pub write: Option<Duration>,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum LocationMatcher {
     Prefix(String), // `location /api/ {}`
@@ -163,6 +170,9 @@ pub enum LocationMatcher {
 #[derive(Debug, Eq, PartialEq)]
 pub enum LocationDirective {
     ProxyPass(Url),
+    ProxyConnectTimeout(Duration),
+    ProxyReadTimeout(Duration),
+    ProxyWriteTimeout(Duration),
     Root(String),
     TryFiles(String),
 }

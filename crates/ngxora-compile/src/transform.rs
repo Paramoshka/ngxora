@@ -285,6 +285,15 @@ fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, 
                 message: "proxy_pass: expected exactly 1 argument".into(),
             }),
         },
+        consts::PROXY_CONNECT_TIMEOUT => Ok(LocationDirective::ProxyConnectTimeout(
+            parse_single_duration_directive(&directive.args, consts::PROXY_CONNECT_TIMEOUT)?,
+        )),
+        consts::PROXY_READ_TIMEOUT => Ok(LocationDirective::ProxyReadTimeout(
+            parse_single_duration_directive(&directive.args, consts::PROXY_READ_TIMEOUT)?,
+        )),
+        consts::PROXY_WRITE_TIMEOUT => Ok(LocationDirective::ProxyWriteTimeout(
+            parse_single_duration_directive(&directive.args, consts::PROXY_WRITE_TIMEOUT)?,
+        )),
 
         _ => Err(LowerErr {
             message: format!("unknown directive in location: {}", directive.name),
@@ -358,6 +367,21 @@ fn parse_keepalive_requests(args: &[String]) -> Result<u32, LowerErr> {
         }),
         _ => Err(LowerErr {
             message: "keepalive_requests: expected exactly 1 argument".into(),
+        }),
+    }
+}
+
+fn parse_single_duration_directive(
+    args: &[String],
+    directive: &str,
+) -> Result<std::time::Duration, LowerErr> {
+    match args {
+        [value] => parse_duration_literal(value, directive),
+        [] => Err(LowerErr {
+            message: format!("{directive}: expected 1 argument"),
+        }),
+        _ => Err(LowerErr {
+            message: format!("{directive}: expected exactly 1 argument"),
         }),
     }
 }

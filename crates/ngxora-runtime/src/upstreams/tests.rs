@@ -1,11 +1,14 @@
 use super::{
-    downstream_keepalive_timeout_secs, select_route_target, validate_sni_host_consistency,
-    CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter, RouteTarget, ServerRoutes,
+    apply_upstream_timeouts, downstream_keepalive_timeout_secs, select_route_target,
+    validate_sni_host_consistency, CompiledLocation, CompiledMatcher, CompiledRegex,
+    CompiledRouter, RouteTarget, ServerRoutes,
 };
-use ngxora_plugin_api::PluginSpec;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, Server,
+    UpstreamTimeouts,
 };
+use ngxora_plugin_api::PluginSpec;
+use pingora::upstreams::peer::HttpPeer;
 use std::time::Duration;
 
 fn target(id: &str) -> RouteTarget {
@@ -22,6 +25,7 @@ fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
         route_id: 1,
         matcher,
         target: target(id),
+        upstream_timeouts: UpstreamTimeouts::default(),
         plugins: Vec::<PluginSpec>::new(),
     }
 }
@@ -177,4 +181,64 @@ fn compiled_router_rejects_invalid_location_regex() {
 
     let err = CompiledRouter::from_http(&http).expect_err("expected invalid regex to fail");
     assert!(err.contains("invalid location regex"));
+}
+
+#[test]
+fn compiled_router_parses_proxy_timeouts() {
+    let http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/".into()),
+                directives: vec![
+                    LocationDirective::ProxyConnectTimeout(Duration::from_secs(2)),
+                    LocationDirective::ProxyReadTimeout(Duration::from_secs(15)),
+                    LocationDirective::ProxyWriteTimeout(Duration::from_secs(20)),
+                    LocationDirective::ProxyPass("http://127.0.0.1:8080".parse().unwrap()),
+                ],
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+    let location = &router
+        .listeners
+        .values()
+        .next()
+        .expect("listener present")
+        .default
+        .as_ref()
+        .expect("default route present")
+        .locations[0];
+
+    assert_eq!(
+        location.upstream_timeouts,
+        UpstreamTimeouts {
+            connect: Some(Duration::from_secs(2)),
+            read: Some(Duration::from_secs(15)),
+            write: Some(Duration::from_secs(20)),
+        }
+    );
+}
+
+#[test]
+fn apply_upstream_timeouts_maps_zero_to_none() {
+    let mut peer = HttpPeer::new(("127.0.0.1", 8080), false, String::new());
+    apply_upstream_timeouts(
+        &mut peer,
+        UpstreamTimeouts {
+            connect: Some(Duration::ZERO),
+            read: Some(Duration::from_secs(10)),
+            write: Some(Duration::from_secs(5)),
+        },
+    );
+
+    assert_eq!(peer.options.connection_timeout, None);
+    assert_eq!(peer.options.read_timeout, Some(Duration::from_secs(10)));
+    assert_eq!(peer.options.write_timeout, Some(Duration::from_secs(5)));
 }

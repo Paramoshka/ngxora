@@ -3,7 +3,7 @@ use crate::upstreams::{
     CompiledLocation, CompiledMatcher, CompiledRouter, ListenKey, RouteTarget, ServerRoutes,
     VirtualHostRoutes,
 };
-use ngxora_compile::ir::{Http, Listen, Server, Switch};
+use ngxora_compile::ir::{Http, Listen, Server, Switch, UpstreamTimeouts};
 use ngxora_plugin_api::PluginSpec;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -42,6 +42,7 @@ fn router_with_route_plugin(port: u16, plugin_name: &str) -> CompiledRouter {
             tls: false,
             sni: String::new(),
         },
+        upstream_timeouts: UpstreamTimeouts::default(),
         plugins: vec![PluginSpec {
             name: plugin_name.into(),
             config: Default::default(),

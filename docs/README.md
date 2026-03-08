@@ -25,6 +25,9 @@ http {
         ssl_client_certificate /etc/ngxora/tls/client-ca.pem;
 
         location / {
+            proxy_connect_timeout 3s;
+            proxy_read_timeout 30s;
+            proxy_write_timeout 30s;
             proxy_pass https://127.0.0.1:8443;
         }
     }
@@ -36,6 +39,7 @@ http {
 | Option | Scope | gRPC ApplySnapshot | Notes |
 | --- | --- | --- | --- |
 | `location` / `proxy_pass` | route | Live | Applied through `RuntimeState` swap |
+| `proxy_connect_timeout` / `proxy_read_timeout` / `proxy_write_timeout` | route | Live | Applied to `HttpPeer.options` per selected upstream route |
 | `server_name` | virtual host | Live | Host routing updates without restart |
 | `ssl_certificate` / `ssl_certificate_key` | TLS identity | Live | Works for existing TLS listeners through runtime SNI cert lookup |
 | plugin config | route | Live | Only if plugin code is already compiled into the binary |

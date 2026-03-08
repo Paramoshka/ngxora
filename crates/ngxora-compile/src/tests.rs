@@ -191,4 +191,35 @@ http {
 
         assert!(err.message.contains("requires ssl_client_certificate"));
     }
+
+    #[test]
+    fn from_ast_parses_proxy_timeouts() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location /api/ {
+      proxy_connect_timeout 3s;
+      proxy_read_timeout 15s;
+      proxy_write_timeout 20s;
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let location = &http.servers[0].locations[0];
+        assert_eq!(
+            location.directives,
+            vec![
+                LocationDirective::ProxyConnectTimeout(Duration::from_secs(3)),
+                LocationDirective::ProxyReadTimeout(Duration::from_secs(15)),
+                LocationDirective::ProxyWriteTimeout(Duration::from_secs(20)),
+                LocationDirective::ProxyPass(Url::parse("http://127.0.0.1:8080").unwrap()),
+            ]
+        );
+    }
 }
