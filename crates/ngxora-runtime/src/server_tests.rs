@@ -20,6 +20,7 @@ fn tls_listener(port: u16, default_server: bool) -> Listen {
         port,
         ssl: true,
         default_server,
+        ..Listen::default()
     }
 }
 
@@ -44,7 +45,7 @@ fn compiled_router_deduplicates_shared_tls_listener() {
         ..Http::default()
     };
 
-    let router = CompiledRouter::from_http(&http);
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
     let listen_key = ListenKey {
         addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         port: 443,
@@ -72,6 +73,33 @@ fn compiled_router_deduplicates_shared_tls_listener() {
 }
 
 #[test]
+fn compiled_router_rejects_conflicting_shared_listener_protocols() {
+    let http = Http {
+        servers: vec![
+            Server {
+                server_names: vec!["example.com".into()],
+                listens: vec![Listen {
+                    http2: true,
+                    ..tls_listener(443, true)
+                }],
+                tls: Some(tls_identity("/tmp/example.crt", "/tmp/example.key")),
+                ..Server::default()
+            },
+            Server {
+                server_names: vec!["www.example.com".into()],
+                listens: vec![tls_listener(443, false)],
+                tls: Some(tls_identity("/tmp/example.crt", "/tmp/example.key")),
+                ..Server::default()
+            },
+        ],
+        ..Http::default()
+    };
+
+    let err = CompiledRouter::from_http(&http).expect_err("expected listener conflict");
+    assert!(err.contains("conflicting protocol settings"));
+}
+
+#[test]
 fn select_listener_tls_prefers_named_sni() {
     let key = ListenKey {
         addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -84,6 +112,7 @@ fn select_listener_tls_prefers_named_sni() {
             tls_identity("/tmp/example.crt", "/tmp/example.key"),
         )]),
         default: Some(tls_identity("/tmp/default.crt", "/tmp/default.key")),
+        ..ListenerTlsConfig::default()
     };
 
     let resolved =
@@ -104,6 +133,7 @@ fn select_listener_tls_falls_back_to_default() {
             tls_identity("/tmp/example.crt", "/tmp/example.key"),
         )]),
         default: Some(tls_identity("/tmp/default.crt", "/tmp/default.key")),
+        ..ListenerTlsConfig::default()
     };
 
     let resolved =
@@ -122,6 +152,7 @@ fn default_listener_tls_uses_first_named_when_default_missing() {
     let tls = ListenerTlsConfig {
         named: HashMap::from([("example.com".into(), named_only.clone())]),
         default: None,
+        ..ListenerTlsConfig::default()
     };
 
     let resolved = default_listener_tls(&key, &tls).expect("expected named fallback");
@@ -142,6 +173,7 @@ fn listener_has_multiple_identities_detects_conflict() {
             ),
         ]),
         default: Some(tls_identity("/tmp/default.crt", "/tmp/default.key")),
+        ..ListenerTlsConfig::default()
     };
 
     assert!(listener_has_multiple_identities(&tls));

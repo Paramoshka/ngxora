@@ -1,8 +1,8 @@
 use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState};
 use async_trait::async_trait;
 use ngxora_compile::ir::{
-    Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, Server,
-    TlsIdentity,
+    DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
+    LocationMatcher, PemSource, Server, TlsIdentity, TlsProtocolBounds, TlsVerifyClient,
 };
 use ngxora_plugin_api::{
     HeaderMapMut, LocalResponse, PluginError, PluginFlow, PluginSpec, PluginState, RequestCtx,
@@ -104,20 +104,38 @@ pub struct VirtualHostRoutes {
 }
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct ListenerProtocolConfig {
+    pub http2: bool,
+    pub http2_only: bool,
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub struct ListenerTlsSettings {
+    pub protocols: Option<TlsProtocolBounds>,
+    pub verify_client: TlsVerifyClient,
+    pub client_certificate: Option<PemSource>,
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ListenerTlsConfig {
     pub named: HashMap<String, TlsIdentity>,
     pub default: Option<TlsIdentity>,
+    pub settings: ListenerTlsSettings,
 }
 
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct HttpRuntimeOptions {
     pub downstream_keepalive_timeout: Option<u64>,
+    pub keepalive_requests: Option<u32>,
+    pub allow_connect_method_proxying: bool,
+    pub h2c: bool,
 }
 
 // CompiledRouter stores the Ir representation in an optimized form.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct CompiledRouter {
     pub listeners: HashMap<ListenKey, VirtualHostRoutes>,
+    pub listener_protocols: HashMap<ListenKey, ListenerProtocolConfig>,
     pub listener_tls: HashMap<ListenKey, ListenerTlsConfig>,
     pub http_options: HttpRuntimeOptions,
 }
@@ -126,31 +144,38 @@ pub struct CompiledRouter {
 pub type CompliedRouter = CompiledRouter;
 
 impl CompiledRouter {
-    pub fn from_http(http: &Http) -> Self {
+    pub fn from_http(http: &Http) -> Result<Self, String> {
         let mut router = Self {
             http_options: HttpRuntimeOptions {
                 downstream_keepalive_timeout: downstream_keepalive_timeout_secs(
                     &http.keepalive_timeout,
                 ),
+                keepalive_requests: http.keepalive_requests,
+                allow_connect_method_proxying: matches!(
+                    http.allow_connect_method_proxying,
+                    ngxora_compile::ir::Switch::On
+                ),
+                h2c: matches!(http.h2c, ngxora_compile::ir::Switch::On),
             },
             ..Self::default()
         };
         let mut next_route_id = 1;
 
         for server in &http.servers {
-            router.add_server(server, &mut next_route_id);
+            router.add_server(server, &mut next_route_id)?;
         }
 
-        router
+        Ok(router)
     }
 
-    fn add_server(&mut self, server: &Server, next_route_id: &mut u64) {
+    fn add_server(&mut self, server: &Server, next_route_id: &mut u64) -> Result<(), String> {
         let routes = ServerRoutes {
             locations: compile_locations(&server.locations, next_route_id),
         };
 
         for listen in &server.listens {
             let listen_key = ListenKey::from(listen);
+            self.merge_listener_protocols(&listen_key, listen)?;
             let listener = self.listeners.entry(listen_key.clone()).or_default();
 
             for name in &server.server_names {
@@ -166,7 +191,13 @@ impl CompiledRouter {
             }
 
             if listen.ssl {
-                let listener_tls = self.listener_tls.entry(listen_key).or_default();
+                self.merge_listener_tls_settings(&listen_key, &server.tls_options)?;
+                let listener_tls = self.listener_tls.entry(listen_key).or_insert_with(|| {
+                    ListenerTlsConfig {
+                        settings: ListenerTlsSettings::from(&server.tls_options),
+                        ..ListenerTlsConfig::default()
+                    }
+                });
 
                 if let Some(tls) = server.tls.as_ref() {
                     for name in &server.server_names {
@@ -184,7 +215,68 @@ impl CompiledRouter {
                 }
             }
         }
+
+        Ok(())
     }
+
+    fn merge_listener_protocols(&mut self, key: &ListenKey, listen: &Listen) -> Result<(), String> {
+        let config = ListenerProtocolConfig {
+            http2: listen.http2,
+            http2_only: listen.http2_only,
+        };
+        if let Some(current) = self.listener_protocols.get(key) {
+            if current != &config {
+                return Err(format!(
+                    "listener {} has conflicting protocol settings across server blocks",
+                    listen_key_addr(key)
+                ));
+            }
+            return Ok(());
+        }
+
+        self.listener_protocols.insert(key.clone(), config);
+        Ok(())
+    }
+
+    fn merge_listener_tls_settings(
+        &mut self,
+        key: &ListenKey,
+        options: &DownstreamTlsOptions,
+    ) -> Result<(), String> {
+        let settings = ListenerTlsSettings::from(options);
+        if let Some(current) = self.listener_tls.get(key).map(|tls| &tls.settings) {
+            if current != &settings {
+                return Err(format!(
+                    "listener {} has conflicting TLS settings across server blocks",
+                    listen_key_addr(key)
+                ));
+            }
+            return Ok(());
+        }
+
+        self.listener_tls.insert(
+            key.clone(),
+            ListenerTlsConfig {
+                settings,
+                ..ListenerTlsConfig::default()
+            },
+        );
+        Ok(())
+    }
+}
+
+impl From<&DownstreamTlsOptions> for ListenerTlsSettings {
+    fn from(value: &DownstreamTlsOptions) -> Self {
+        Self {
+            protocols: value.protocols,
+            verify_client: value.verify_client,
+            client_certificate: value.client_certificate.clone(),
+        }
+    }
+}
+
+fn listen_key_addr(key: &ListenKey) -> String {
+    std::net::SocketAddr::new(key.addr, key.port).to_string()
 }
 
 fn compile_locations(locations: &[Location], next_route_id: &mut u64) -> Vec<CompiledLocation> {

@@ -1,8 +1,11 @@
-use crate::upstreams::{CompiledRouter, ListenKey, ServerRoutes, VirtualHostRoutes};
+use crate::upstreams::{
+    CompiledRouter, ListenKey, ListenerProtocolConfig, ListenerTlsSettings, ServerRoutes,
+    VirtualHostRoutes,
+};
 use arc_swap::ArcSwap;
 use ngxora_plugin_api::{PluginChain, empty_plugin_chain};
 use ngxora_plugin_registry::PluginRegistry;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -53,7 +56,7 @@ impl RuntimeSnapshot {
 
 pub struct RuntimeState {
     current: ArcSwap<RuntimeSnapshot>,
-    bootstrap_topology: BTreeSet<ListenKey>,
+    bootstrap_config: RestartConfigFingerprint,
     registry: Arc<PluginRegistry>,
     generation: AtomicU64,
 }
@@ -64,7 +67,7 @@ impl RuntimeState {
     }
 
     pub fn with_registry(snapshot: ConfigSnapshot, registry: Arc<PluginRegistry>) -> Self {
-        let bootstrap_topology = listener_topology(&snapshot.router);
+        let bootstrap_config = restart_fingerprint(&snapshot.router);
         let initial_snapshot = Self::build_runtime_snapshot(
             &registry,
             snapshot.version,
@@ -74,7 +77,7 @@ impl RuntimeState {
         .expect("bootstrap snapshot plugin resolution failed");
         Self {
             current: ArcSwap::from_pointee(initial_snapshot),
-            bootstrap_topology,
+            bootstrap_config,
             registry,
             generation: AtomicU64::new(1),
         }
@@ -93,12 +96,13 @@ impl RuntimeState {
     }
 
     pub fn apply_snapshot(&self, next: ConfigSnapshot) -> ApplyResult {
-        if listener_topology(&next.router) != self.bootstrap_topology {
+        if restart_fingerprint(&next.router) != self.bootstrap_config {
             let current = self.snapshot();
             return ApplyResult {
                 applied: false,
                 restart_required: true,
-                message: "listener topology changed; restart required".into(),
+                message: "listener or bootstrap transport settings changed; restart required"
+                    .into(),
                 active_version: current.version.clone(),
                 active_generation: current.generation,
             };
@@ -182,8 +186,42 @@ impl InProcessControlPlane {
     }
 }
 
-fn listener_topology(router: &CompiledRouter) -> BTreeSet<ListenKey> {
-    router.listeners.keys().cloned().collect()
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RestartConfigFingerprint {
+    listeners: BTreeMap<ListenKey, ListenerRestartConfig>,
+    allow_connect_method_proxying: bool,
+    h2c: bool,
+    keepalive_requests: Option<u32>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ListenerRestartConfig {
+    protocol: ListenerProtocolConfig,
+    tls: Option<ListenerTlsSettings>,
+}
+
+fn restart_fingerprint(router: &CompiledRouter) -> RestartConfigFingerprint {
+    let mut listeners = BTreeMap::new();
+    for key in router.listeners.keys() {
+        listeners.insert(
+            key.clone(),
+            ListenerRestartConfig {
+                protocol: router
+                    .listener_protocols
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_default(),
+                tls: router.listener_tls.get(key).map(|cfg| cfg.settings.clone()),
+            },
+        );
+    }
+
+    RestartConfigFingerprint {
+        listeners,
+        allow_connect_method_proxying: router.http_options.allow_connect_method_proxying,
+        h2c: router.http_options.h2c,
+        keepalive_requests: router.http_options.keepalive_requests,
+    }
 }
 
 fn build_plugin_chains(

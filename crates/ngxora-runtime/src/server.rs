@@ -1,9 +1,14 @@
 use crate::control::RuntimeState;
-use crate::upstreams::{CompiledRouter, ListenKey, ListenerTlsConfig};
-use ngxora_compile::ir::{PemSource, TlsIdentity};
+use crate::upstreams::{
+    CompiledRouter, ListenKey, ListenerProtocolConfig, ListenerTlsConfig, ListenerTlsSettings,
+};
+use ngxora_compile::ir::{PemSource, TlsIdentity, TlsProtocolVersion, TlsVerifyClient};
+use pingora::apps::HttpServerOptions;
+use pingora::listeners::ALPN;
 use pingora::listeners::tls::TlsSettings;
 use pingora::services::listening::Service;
 use pingora::Result;
+use pingora::tls::ssl::{SslVerifyMode, SslVersion};
 use pingora_proxy::{HttpProxy, ProxyHttp};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -267,28 +272,130 @@ fn resolve_single_listener_tls<'a>(
 
 fn listener_tls_settings(
     key: &ListenKey,
-    _tls: &ListenerTlsConfig,
+    tls: &ListenerTlsConfig,
+    protocol: &ListenerProtocolConfig,
     state: Arc<RuntimeState>,
 ) -> Result<TlsSettings> {
     #[cfg(feature = "openssl")]
     {
         let callbacks = openssl_listener_tls::SniCertResolver::new(state, key.clone());
         let mut settings = TlsSettings::with_callbacks(callbacks)?;
-        settings.enable_h2();
+        apply_listener_tls_settings(&mut settings, protocol, &tls.settings)?;
         Ok(settings)
     }
 
     #[cfg(not(feature = "openssl"))]
     {
         let _ = state;
-        let identity = resolve_single_listener_tls(key, _tls)?;
+        let identity = resolve_single_listener_tls(key, tls)?;
         let cert_path = pem_source_path(&identity.cert, "ssl certificate")?;
         let key_path = pem_source_path(&identity.key, "ssl certificate key")?;
 
         let mut settings = TlsSettings::intermediate(cert_path, key_path)?;
-        settings.enable_h2();
+        apply_listener_tls_settings(&mut settings, protocol, &tls.settings)?;
         Ok(settings)
     }
+}
+
+fn apply_listener_tls_settings(
+    settings: &mut TlsSettings,
+    protocol: &ListenerProtocolConfig,
+    tls: &ListenerTlsSettings,
+) -> Result<()> {
+    let alpn = if protocol.http2_only {
+        ALPN::H2
+    } else if protocol.http2 {
+        ALPN::H2H1
+    } else {
+        ALPN::H1
+    };
+    settings.set_alpn(alpn);
+
+    if let Some(protocols) = tls.protocols {
+        settings
+            .set_min_proto_version(Some(ssl_version(protocols.min)))
+            .map_err(|err| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!("failed to set minimum TLS version: {err}"),
+                )
+            })?;
+        settings
+            .set_max_proto_version(Some(ssl_version(protocols.max)))
+            .map_err(|err| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!("failed to set maximum TLS version: {err}"),
+                )
+            })?;
+    }
+
+    match tls.verify_client {
+        TlsVerifyClient::Off => settings.set_verify(SslVerifyMode::NONE),
+        TlsVerifyClient::Optional => settings.set_verify(SslVerifyMode::PEER),
+        TlsVerifyClient::Required => settings.set_verify(required_verify_mode()),
+    }
+
+    if matches!(
+        tls.verify_client,
+        TlsVerifyClient::Optional | TlsVerifyClient::Required
+    ) {
+        let client_ca = tls.client_certificate.as_ref().ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                "ssl_verify_client requires ssl_client_certificate",
+            )
+        })?;
+        let client_ca_path = pem_source_path(client_ca, "ssl client certificate authority")?;
+        settings.set_ca_file(client_ca_path).map_err(|err| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                format!("failed to set ssl_client_certificate `{client_ca_path}`: {err}"),
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn ssl_version(version: TlsProtocolVersion) -> SslVersion {
+    match version {
+        TlsProtocolVersion::Tls1 => SslVersion::TLS1,
+        TlsProtocolVersion::Tls1_2 => SslVersion::TLS1_2,
+        TlsProtocolVersion::Tls1_3 => SslVersion::TLS1_3,
+    }
+}
+
+#[cfg(feature = "openssl")]
+fn required_verify_mode() -> SslVerifyMode {
+    SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT
+}
+
+#[cfg(not(feature = "openssl"))]
+fn required_verify_mode() -> SslVerifyMode {
+    SslVerifyMode::PEER
+}
+
+fn configure_proxy_service<SV>(
+    svc: &mut Service<HttpProxy<SV, ()>>,
+    router: &CompiledRouter,
+) -> Result<()>
+where
+    SV: ProxyHttp,
+{
+    let proxy = svc.app_logic_mut().ok_or_else(|| {
+        pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            "http proxy service application is missing",
+        )
+    })?;
+
+    let mut options = HttpServerOptions::default();
+    options.h2c = router.http_options.h2c;
+    options.allow_connect_method_proxying = router.http_options.allow_connect_method_proxying;
+    options.keepalive_request_limit = router.http_options.keepalive_requests;
+    proxy.server_options = Some(options);
+    Ok(())
 }
 
 fn bind_listeners<SV>(
@@ -299,6 +406,8 @@ fn bind_listeners<SV>(
 where
     SV: ProxyHttp,
 {
+    configure_proxy_service(svc, router)?;
+
     let mut listeners: Vec<_> = router.listeners.keys().cloned().collect();
     listeners.sort_by(|left, right| {
         (left.addr.to_string(), left.port, left.ssl).cmp(&(
@@ -318,7 +427,13 @@ where
                     format!("ssl listener {addr} is missing certificate configuration"),
                 )
             })?;
-            let settings = listener_tls_settings(&key, tls, Arc::clone(&state))?;
+            let protocol = router.listener_protocols.get(&key).ok_or_else(|| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!("listener {addr} is missing protocol configuration"),
+                )
+            })?;
+            let settings = listener_tls_settings(&key, tls, protocol, Arc::clone(&state))?;
             svc.add_tls_with_settings(&addr, None, settings);
         } else {
             svc.add_tcp(&addr);

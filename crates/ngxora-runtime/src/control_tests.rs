@@ -3,7 +3,7 @@ use crate::upstreams::{
     CompiledLocation, CompiledMatcher, CompiledRouter, ListenKey, RouteTarget, ServerRoutes,
     VirtualHostRoutes,
 };
-use ngxora_compile::ir::{Http, Listen, Server};
+use ngxora_compile::ir::{Http, Listen, Server, Switch};
 use ngxora_plugin_api::PluginSpec;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -17,13 +17,14 @@ fn router_on_listener(port: u16) -> CompiledRouter {
                 port,
                 ssl: false,
                 default_server: true,
+                ..Listen::default()
             }],
             ..Server::default()
         }],
         ..Http::default()
     };
 
-    CompiledRouter::from_http(&http)
+    CompiledRouter::from_http(&http).expect("router compiles")
 }
 
 fn router_with_route_plugin(port: u16, plugin_name: &str) -> CompiledRouter {
@@ -61,6 +62,24 @@ fn router_with_route_plugin(port: u16, plugin_name: &str) -> CompiledRouter {
     }
 }
 
+fn router_on_listener_with_h2c(port: u16, h2c: Switch) -> CompiledRouter {
+    let mut http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                port,
+                ssl: false,
+                default_server: true,
+                ..Listen::default()
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+    http.h2c = h2c;
+    CompiledRouter::from_http(&http).expect("router compiles")
+}
+
 #[test]
 fn runtime_state_applies_compatible_snapshot() {
     let state = RuntimeState::new(ConfigSnapshot::new("v1", router_on_listener(8080)));
@@ -84,6 +103,24 @@ fn runtime_state_rejects_listener_topology_change() {
     assert!(result.restart_required);
     assert_eq!(result.active_version, "v1");
     assert_eq!(result.active_generation, 1);
+    assert_eq!(snapshot.version, "v1");
+}
+
+#[test]
+fn runtime_state_rejects_bootstrap_transport_change() {
+    let state = RuntimeState::new(ConfigSnapshot::new(
+        "v1",
+        router_on_listener_with_h2c(8080, Switch::Off),
+    ));
+    let result = state.apply_snapshot(ConfigSnapshot::new(
+        "v2",
+        router_on_listener_with_h2c(8080, Switch::On),
+    ));
+    let snapshot = state.snapshot();
+
+    assert!(!result.applied);
+    assert!(result.restart_required);
+    assert_eq!(result.active_version, "v1");
     assert_eq!(snapshot.version, "v1");
 }
 

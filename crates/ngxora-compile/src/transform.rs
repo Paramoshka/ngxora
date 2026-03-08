@@ -1,4 +1,5 @@
 use ngxora_config::{Ast, Block, Directive, Node};
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use url::Url;
 
@@ -6,7 +7,8 @@ use crate::{
     consts,
     ir::{
         Http, Ir, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher,
-        PemSource, Server, Switch, TlsIdentity,
+        PemSource, Server, Switch, TlsIdentity, TlsProtocolBounds,
+        TlsProtocolVersion, TlsVerifyClient,
     },
 };
 
@@ -66,8 +68,14 @@ fn apply_http_directive(http: &mut Http, d: &Directive) -> Result<(), LowerErr> 
         consts::KEEPALIVE_TIMEOUT => {
             http.keepalive_timeout = parse_keepalive_timeout(&d.args)?;
         }
-
+        consts::KEEPALIVE_REQUESTS => {
+            http.keepalive_requests = Some(parse_keepalive_requests(&d.args)?);
+        }
         consts::TCP_NODELAY => http.tcp_nodelay = get_directive_switch(d)?,
+        consts::ALLOW_CONNECT_METHOD_PROXYING => {
+            http.allow_connect_method_proxying = get_directive_switch(d)?
+        }
+        consts::H2C => http.h2c = get_directive_switch(d)?,
 
         _ => {
             return Err(LowerErr {
@@ -99,6 +107,7 @@ fn lower_server(block: &Block) -> Result<Server, LowerErr> {
         }
     }
 
+    validate_server(&server)?;
     Ok(server)
 }
 
@@ -164,6 +173,34 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
                 });
             }
         },
+
+        consts::SSL_PROTOCOLS => {
+            server.tls_options.protocols = Some(parse_ssl_protocols(&d.args)?);
+        }
+
+        consts::SSL_VERIFY_CLIENT => {
+            server.tls_options.verify_client = parse_ssl_verify_client(&d.args)?;
+        }
+
+        consts::SSL_CLIENT_CERTIFICATE => match d.args.as_slice() {
+            [path] => {
+                let ps =
+                    PemSource::new(std::slice::from_ref(path), false).map_err(|_| LowerErr {
+                        message: "ssl_client_certificate: invalid certificate source".into(),
+                    })?;
+                server.tls_options.client_certificate = Some(ps);
+            }
+            [] => {
+                return Err(LowerErr {
+                    message: "ssl_client_certificate: expected 1 argument".into(),
+                });
+            }
+            _ => {
+                return Err(LowerErr {
+                    message: "ssl_client_certificate: expected exactly 1 argument".into(),
+                });
+            }
+        }
 
         _ => {
             return Err(LowerErr {
@@ -311,6 +348,20 @@ fn parse_keepalive_timeout(args: &[String]) -> Result<KeepaliveTimeout, LowerErr
     }
 }
 
+fn parse_keepalive_requests(args: &[String]) -> Result<u32, LowerErr> {
+    match args {
+        [value] => value.parse::<u32>().map_err(|_| LowerErr {
+            message: format!("keepalive_requests: invalid integer `{value}`"),
+        }),
+        [] => Err(LowerErr {
+            message: "keepalive_requests: expected 1 argument".into(),
+        }),
+        _ => Err(LowerErr {
+            message: "keepalive_requests: expected exactly 1 argument".into(),
+        }),
+    }
+}
+
 fn parse_duration_literal(raw: &str, directive: &str) -> Result<std::time::Duration, LowerErr> {
     fn unit_multiplier_millis(unit: &str) -> Option<u128> {
         match unit {
@@ -426,6 +477,11 @@ fn parse_listen_directives(args: &[String]) -> Result<Listen, LowerErr> {
                 match p.as_str() {
                     "ssl" => listen.ssl = true,
                     "default_server" => listen.default_server = true,
+                    consts::HTTP2 => listen.http2 = true,
+                    consts::HTTP2_ONLY => {
+                        listen.http2 = true;
+                        listen.http2_only = true;
+                    }
                     _ => {
                         return Err(LowerErr {
                             message: format!("Unknow params: {:?}", params),
@@ -436,5 +492,80 @@ fn parse_listen_directives(args: &[String]) -> Result<Listen, LowerErr> {
         }
     }
 
+    if listen.http2 && !listen.ssl {
+        return Err(LowerErr {
+            message: "listen: http2/http2_only requires ssl; use h2c for plaintext HTTP/2".into(),
+        });
+    }
+
     Ok(listen)
+}
+
+fn parse_ssl_protocols(args: &[String]) -> Result<TlsProtocolBounds, LowerErr> {
+    if args.is_empty() {
+        return Err(LowerErr {
+            message: "ssl_protocols: expected at least 1 argument".into(),
+        });
+    }
+
+    let mut versions = BTreeSet::new();
+    for arg in args {
+        let version = match arg.as_str() {
+            "TLSv1" => TlsProtocolVersion::Tls1,
+            "TLSv1.2" => TlsProtocolVersion::Tls1_2,
+            "TLSv1.3" => TlsProtocolVersion::Tls1_3,
+            _ => {
+                return Err(LowerErr {
+                    message: format!("ssl_protocols: unsupported protocol `{arg}`"),
+                });
+            }
+        };
+        versions.insert(version);
+    }
+
+    let versions = versions.into_iter().collect::<Vec<_>>();
+    match versions.as_slice() {
+        [version] => Ok(TlsProtocolBounds {
+            min: *version,
+            max: *version,
+        }),
+        [TlsProtocolVersion::Tls1_2, TlsProtocolVersion::Tls1_3] => Ok(TlsProtocolBounds {
+            min: TlsProtocolVersion::Tls1_2,
+            max: TlsProtocolVersion::Tls1_3,
+        }),
+        _ => Err(LowerErr {
+            message: "ssl_protocols: supported combinations are `TLSv1`, `TLSv1.2`, `TLSv1.3`, or `TLSv1.2 TLSv1.3`".into(),
+        }),
+    }
+}
+
+fn parse_ssl_verify_client(args: &[String]) -> Result<TlsVerifyClient, LowerErr> {
+    match args {
+        [value] => match value.as_str() {
+            "off" => Ok(TlsVerifyClient::Off),
+            "optional" => Ok(TlsVerifyClient::Optional),
+            "required" => Ok(TlsVerifyClient::Required),
+            _ => Err(LowerErr {
+                message: "ssl_verify_client: expected off|optional|required".into(),
+            }),
+        },
+        [] => Err(LowerErr {
+            message: "ssl_verify_client: expected off|optional|required".into(),
+        }),
+        _ => Err(LowerErr {
+            message: "ssl_verify_client: expected exactly one argument".into(),
+        }),
+    }
+}
+
+fn validate_server(server: &Server) -> Result<(), LowerErr> {
+    if server.tls_options.verify_client != TlsVerifyClient::Off
+        && server.tls_options.client_certificate.is_none()
+    {
+        return Err(LowerErr {
+            message: "ssl_verify_client: requires ssl_client_certificate".into(),
+        });
+    }
+
+    Ok(())
 }

@@ -16,7 +16,10 @@ pub struct Ir {
 pub struct Http {
     pub servers: Vec<Server>,
     pub keepalive_timeout: KeepaliveTimeout,
+    pub keepalive_requests: Option<u32>,
     pub tcp_nodelay: Switch,
+    pub allow_connect_method_proxying: Switch,
+    pub h2c: Switch,
 }
 
 impl Default for Http {
@@ -24,7 +27,10 @@ impl Default for Http {
         Self {
             servers: Vec::new(),
             keepalive_timeout: KeepaliveTimeout::default(),
+            keepalive_requests: None,
             tcp_nodelay: Switch::On,
+            allow_connect_method_proxying: Switch::Off,
+            h2c: Switch::Off,
         }
     }
 }
@@ -53,6 +59,7 @@ pub struct Server {
     pub locations: Vec<Location>,
     pub listens: Vec<Listen>,
     pub tls: Option<TlsIdentity>,
+    pub tls_options: DownstreamTlsOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +97,8 @@ pub struct Listen {
     pub port: u16,
     pub ssl: bool,
     pub default_server: bool,
+    pub http2: bool,
+    pub http2_only: bool,
 }
 
 impl Default for Listen {
@@ -99,8 +108,38 @@ impl Default for Listen {
             port: 80,
             ssl: false,
             default_server: false,
+            http2: false,
+            http2_only: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+pub struct DownstreamTlsOptions {
+    pub protocols: Option<TlsProtocolBounds>,
+    pub verify_client: TlsVerifyClient,
+    pub client_certificate: Option<PemSource>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub enum TlsProtocolVersion {
+    Tls1,
+    Tls1_2,
+    Tls1_3,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct TlsProtocolBounds {
+    pub min: TlsProtocolVersion,
+    pub max: TlsProtocolVersion,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum TlsVerifyClient {
+    #[default]
+    Off,
+    Optional,
+    Required,
 }
 
 #[derive(Debug, Eq, PartialEq)]

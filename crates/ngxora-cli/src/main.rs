@@ -101,7 +101,12 @@ fn load_router(path: &Path) -> Result<CompiledRouter, String> {
         ));
     }
 
-    Ok(CompiledRouter::from_http(&http))
+    CompiledRouter::from_http(&http).map_err(|err| {
+        format!(
+            "failed to compile router from config {}: {err}",
+            path.display()
+        )
+    })
 }
 
 fn parse_cli_args<I, T>(args: I) -> Result<Option<CliArgs>, String>
