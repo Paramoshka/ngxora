@@ -85,13 +85,15 @@ fn load_router(path: &Path) -> Result<CompiledRouter, String> {
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let ast = IncludeResolver::new(&ast, root_dir).resolve(&ast).map_err(|err| {
-        format!(
-            "failed to resolve includes in {}: {}",
-            path.display(),
-            err.message
-        )
-    })?;
+    let ast = IncludeResolver::new(&ast, root_dir)
+        .resolve(&ast)
+        .map_err(|err| {
+            format!(
+                "failed to resolve includes in {}: {}",
+                path.display(),
+                err.message
+            )
+        })?;
     let ir = Ir::from_ast(&ast)
         .map_err(|err| format!("failed to lower config {}: {}", path.display(), err.message))?;
     let http = ir

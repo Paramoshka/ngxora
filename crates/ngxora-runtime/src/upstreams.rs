@@ -15,6 +15,7 @@ use pingora::upstreams::peer::HttpPeer;
 use pingora_proxy::{ProxyHttp, Session};
 use regex::{Regex, RegexBuilder};
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -57,6 +58,8 @@ pub enum CompiledMatcher {
     Named(String),
 }
 
+// Regex locations are compiled once during snapshot build so request matching
+// stays cheap and invalid patterns are rejected before they hit the dataplane.
 #[derive(Debug, Clone)]
 pub struct CompiledRegex {
     pub case_insensitive: bool,
@@ -313,54 +316,74 @@ fn listen_key_addr(key: &ListenKey) -> String {
     std::net::SocketAddr::new(key.addr, key.port).to_string()
 }
 
+fn proxy_pass_sni(host: &str, tls: bool) -> String {
+    if tls && host.parse::<IpAddr>().is_err() {
+        host.to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn route_target_from_directive(directive: &LocationDirective) -> Option<RouteTarget> {
+    match directive {
+        LocationDirective::ProxyPass(url) => {
+            let host = url.host_str()?.to_string();
+            let port = url.port_or_known_default()?;
+            let tls = match url.scheme() {
+                "http" => false,
+                "https" => true,
+                _ => return None,
+            };
+
+            Some(RouteTarget::ProxyPass {
+                sni: proxy_pass_sni(&host, tls),
+                host,
+                port,
+                tls,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn route_target(location: &Location) -> Option<RouteTarget> {
+    location
+        .directives
+        .iter()
+        .find_map(route_target_from_directive)
+}
+
+fn compile_location(
+    location: &Location,
+    next_route_id: &mut u64,
+) -> Result<Option<CompiledLocation>, String> {
+    let Some(target) = route_target(location) else {
+        return Ok(None);
+    };
+
+    let compiled = CompiledLocation {
+        route_id: *next_route_id,
+        matcher: CompiledMatcher::try_from(&location.matcher)?,
+        target,
+        plugins: Vec::new(),
+    };
+    *next_route_id += 1;
+    Ok(Some(compiled))
+}
+
+// Only locations with an actionable upstream target are kept. Regex validation
+// also happens here, so broken snapshots fail before they are applied.
 fn compile_locations(
     locations: &[Location],
     next_route_id: &mut u64,
 ) -> Result<Vec<CompiledLocation>, String> {
     locations
         .iter()
-        .filter_map(|location| {
-            let target = location
-                .directives
-                .iter()
-                .find_map(|directive| match directive {
-                    LocationDirective::ProxyPass(url) => {
-                        let host = url.host_str()?.to_string();
-                        let port = url.port_or_known_default()?;
-                        let tls = match url.scheme() {
-                            "http" => false,
-                            "https" => true,
-                            _ => return None,
-                        };
-                        let sni = if tls && host.parse::<IpAddr>().is_err() {
-                            host.clone()
-                        } else {
-                            String::new()
-                        };
-
-                        Some(RouteTarget::ProxyPass {
-                            host,
-                            port,
-                            tls,
-                            sni,
-                        })
-                    }
-                    _ => None,
-                })?;
-
-            let matcher = match CompiledMatcher::try_from(&location.matcher) {
-                Ok(matcher) => matcher,
-                Err(err) => return Some(Err(err)),
-            };
-            let compiled = CompiledLocation {
-                route_id: *next_route_id,
-                matcher,
-                target,
-                plugins: Vec::new(),
-            };
-            *next_route_id += 1;
-
-            Some(Ok(compiled))
+        .map(|location| compile_location(location, next_route_id))
+        .filter_map(|result| match result {
+            Ok(Some(location)) => Some(Ok(location)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
         })
         .collect()
 }
@@ -380,6 +403,8 @@ fn downstream_keepalive_timeout_secs(timeout: &KeepaliveTimeout) -> Option<u64> 
     }
 }
 
+// Match order mirrors nginx semantics:
+// exact > longest ^~ prefix > first matching regex > longest plain prefix.
 fn select_route_target<'a>(
     routes: &'a ServerRoutes,
     path: &str,
@@ -420,6 +445,17 @@ fn select_route_target<'a>(
     best_prefix.map(|(location, _)| location)
 }
 
+fn normalize_authority_host(value: &str) -> String {
+    value
+        .split(':')
+        .next()
+        .unwrap_or(value)
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+// Normalize the HTTP authority used for vhost routing and reject invalid
+// header encodings up front.
 fn request_host(session: &Session) -> Result<Option<String>> {
     let Some(host) = session.get_header("host") else {
         return Ok(None);
@@ -432,13 +468,7 @@ fn request_host(session: &Session) -> Result<Option<String>> {
         )
     })?;
 
-    Ok(Some(
-        host.split(':')
-            .next()
-            .unwrap_or(host)
-            .trim_end_matches('.')
-            .to_ascii_lowercase(),
-    ))
+    Ok(Some(normalize_authority_host(host)))
 }
 
 fn downstream_sni(session: &Session) -> Option<String> {
@@ -462,6 +492,45 @@ fn validate_sni_host_consistency(host: Option<&str>, sni: Option<&str>) -> Resul
     Ok(())
 }
 
+fn request_is_tls(session: &Session) -> bool {
+    session
+        .digest()
+        .and_then(|digest| digest.ssl_digest.as_ref())
+        .is_some()
+}
+
+// Listener lookup is based on the accepted downstream socket, not request
+// headers, so shared :80/:443 sockets stay isolated correctly.
+fn session_listen_key(session: &Session) -> Result<ListenKey> {
+    let server_addr = session.server_addr().ok_or_else(|| {
+        pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            "missing downstream server addr",
+        )
+    })?;
+
+    let inet = server_addr.as_inet().ok_or_else(|| {
+        pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            "downstream server addr is not inet (likely UDS)",
+        )
+    })?;
+
+    Ok(ListenKey {
+        addr: inet.ip(),
+        port: inet.port(),
+        ssl: request_is_tls(session),
+    })
+}
+
+fn select_server_routes<'a>(
+    vhosts: &'a VirtualHostRoutes,
+    host: Option<&str>,
+) -> Option<&'a ServerRoutes> {
+    host.and_then(|value| vhosts.named.get(value))
+        .or(vhosts.default.as_ref())
+}
+
 #[derive(Debug)]
 struct ResolvedLocation<'a> {
     location: &'a CompiledLocation,
@@ -480,6 +549,13 @@ pub struct ProxyContext {
     plugin_state: PluginState,
 }
 
+fn header_editor_error(action: &str, name: &http::HeaderName, err: impl Display) -> PluginError {
+    PluginError::new(
+        "header-editor",
+        format!("failed to {action} header `{name}`: {err}"),
+    )
+}
+
 struct RequestHeaderEditor<'a> {
     inner: &'a mut RequestHeader,
 }
@@ -493,12 +569,7 @@ impl HeaderMapMut for RequestHeaderEditor<'_> {
         self.inner
             .append_header(name, value)
             .map(|_| ())
-            .map_err(|err| {
-                PluginError::new(
-                    "header-editor",
-                    format!("failed to append header `{name}`: {err}"),
-                )
-            })
+            .map_err(|err| header_editor_error("append", name, err))
     }
 
     fn set(
@@ -506,12 +577,9 @@ impl HeaderMapMut for RequestHeaderEditor<'_> {
         name: &http::HeaderName,
         value: http::HeaderValue,
     ) -> Result<(), PluginError> {
-        self.inner.insert_header(name, value).map_err(|err| {
-            PluginError::new(
-                "header-editor",
-                format!("failed to insert header `{name}`: {err}"),
-            )
-        })
+        self.inner
+            .insert_header(name, value)
+            .map_err(|err| header_editor_error("insert", name, err))
     }
 
     fn remove(&mut self, name: &http::HeaderName) {
@@ -532,12 +600,7 @@ impl HeaderMapMut for ResponseHeaderEditor<'_> {
         self.inner
             .append_header(name, value)
             .map(|_| ())
-            .map_err(|err| {
-                PluginError::new(
-                    "header-editor",
-                    format!("failed to append header `{name}`: {err}"),
-                )
-            })
+            .map_err(|err| header_editor_error("append", name, err))
     }
 
     fn set(
@@ -545,12 +608,9 @@ impl HeaderMapMut for ResponseHeaderEditor<'_> {
         name: &http::HeaderName,
         value: http::HeaderValue,
     ) -> Result<(), PluginError> {
-        self.inner.insert_header(name, value).map_err(|err| {
-            PluginError::new(
-                "header-editor",
-                format!("failed to insert header `{name}`: {err}"),
-            )
-        })
+        self.inner
+            .insert_header(name, value)
+            .map_err(|err| header_editor_error("insert", name, err))
     }
 
     fn remove(&mut self, name: &http::HeaderName) {
@@ -558,52 +618,25 @@ impl HeaderMapMut for ResponseHeaderEditor<'_> {
     }
 }
 
+// Route resolution first pins the accepted listener, then enforces TLS
+// authority consistency, and only after that chooses the vhost + location.
 fn resolve_route<'a>(
     router: &'a CompiledRouter,
     session: &Session,
 ) -> Result<Option<ResolvedLocation<'a>>> {
-    let server_addr = session.server_addr().ok_or_else(|| {
-        pingora::Error::explain(
-            pingora::ErrorType::InternalError,
-            "missing downstream server addr",
-        )
-    })?;
-
-    let inet = server_addr.as_inet().ok_or_else(|| {
-        pingora::Error::explain(
-            pingora::ErrorType::InternalError,
-            "downstream server addr is not inet (likely UDS)",
-        )
-    })?;
-
-    let listen_key = ListenKey {
-        addr: inet.ip(),
-        port: inet.port(),
-        ssl: session
-            .digest()
-            .and_then(|d| d.ssl_digest.as_ref())
-            .is_some(),
-    };
+    let listen_key = session_listen_key(session)?;
 
     let Some(vhosts) = router.listeners.get(&listen_key) else {
         return Ok(None);
     };
 
     let host = request_host(session)?;
-    let sni = if listen_key.ssl {
-        downstream_sni(session)
-    } else {
-        None
-    };
+    let sni = listen_key.ssl.then(|| downstream_sni(session)).flatten();
     validate_sni_host_consistency(host.as_deref(), sni.as_deref())?;
 
     let routing_host = host.clone().or(sni);
 
-    let Some(server_routes) = routing_host
-        .as_deref()
-        .and_then(|value| vhosts.named.get(value))
-        .or(vhosts.default.as_ref())
-    else {
+    let Some(server_routes) = select_server_routes(vhosts, routing_host.as_deref()) else {
         return Ok(None);
     };
 
@@ -615,6 +648,15 @@ fn resolve_route<'a>(
     Ok(Some(ResolvedLocation { location, host }))
 }
 
+impl SelectedRoute {
+    fn from_resolved(snapshot: &RuntimeSnapshot, resolved: &ResolvedLocation<'_>) -> Self {
+        Self {
+            target: resolved.location.target.clone(),
+            plugins: snapshot.plugin_chain(resolved.location.route_id),
+        }
+    }
+}
+
 fn select_runtime_route(
     snapshot: &RuntimeSnapshot,
     session: &Session,
@@ -624,10 +666,7 @@ fn select_runtime_route(
     };
 
     Ok(Some((
-        SelectedRoute {
-            target: resolved.location.target.clone(),
-            plugins: snapshot.plugin_chain(resolved.location.route_id),
-        },
+        SelectedRoute::from_resolved(snapshot, &resolved),
         resolved.host,
     )))
 }
@@ -649,6 +688,20 @@ fn map_plugin_error(stage: &str, err: PluginError) -> Box<pingora::Error> {
     )
 }
 
+fn set_content_length(header: &mut ResponseHeader, value: impl ToString) -> Result<()> {
+    let value = value.to_string();
+    header
+        .insert_header(http::header::CONTENT_LENGTH, value)
+        .map_err(|err| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                format!("failed to finalize plugin response: {err}"),
+            )
+        })
+}
+
+// Plugins can short-circuit the request path with a local response, but that
+// response is still normalized through Pingora's typed response writer.
 async fn write_local_response(session: &mut Session, response: LocalResponse) -> Result<()> {
     let mut header = ResponseHeader::build(response.status, None).map_err(|err| {
         pingora::Error::explain(
@@ -666,22 +719,10 @@ async fn write_local_response(session: &mut Session, response: LocalResponse) ->
     }
 
     if response.body.is_empty() {
-        header.insert_header(http::header::CONTENT_LENGTH, 0).map_err(|err| {
-            pingora::Error::explain(
-                pingora::ErrorType::InternalError,
-                format!("failed to finalize plugin response: {err}"),
-            )
-        })?;
+        set_content_length(&mut header, 0)?;
         session.write_response_header(Box::new(header), true).await
     } else {
-        header
-            .insert_header(http::header::CONTENT_LENGTH, response.body.len().to_string())
-            .map_err(|err| {
-                pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    format!("failed to finalize plugin response: {err}"),
-                )
-            })?;
+        set_content_length(&mut header, response.body.len().to_string())?;
         session.write_response_header(Box::new(header), false).await?;
         session.write_response_body(Some(response.body), true).await
     }
@@ -725,6 +766,8 @@ impl ProxyHttp for DynamicProxy {
         ProxyContext::default()
     }
 
+    // Request plugins run in declaration order and may terminate the request
+    // locally before any upstream peer is selected.
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         let snapshot = self.state.snapshot();
         session.set_keepalive(snapshot.router.http_options.downstream_keepalive_timeout);
@@ -788,6 +831,8 @@ impl ProxyHttp for DynamicProxy {
         Ok(())
     }
 
+    // Response plugins run in reverse order so they behave like unwind-style
+    // middleware around the upstream exchange.
     async fn response_filter(
         &self,
         _session: &mut Session,
@@ -825,7 +870,8 @@ impl ProxyHttp for DynamicProxy {
         Ok(())
     }
 
-    // upstream_peer method allows for advanced configurations, including HTTPS, SNI, and dynamic load balancing based on the request headers.
+    // Upstream selection is derived from the already resolved route; if the
+    // request_filter path did not run, we resolve lazily here as a fallback.
     async fn upstream_peer(
         &self,
         session: &mut Session,

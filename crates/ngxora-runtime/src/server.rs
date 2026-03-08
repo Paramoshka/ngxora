@@ -2,7 +2,9 @@ use crate::control::RuntimeState;
 use crate::upstreams::{
     CompiledRouter, ListenKey, ListenerProtocolConfig, ListenerTlsConfig, ListenerTlsSettings,
 };
-use ngxora_compile::ir::{PemSource, TlsIdentity, TlsProtocolVersion, TlsVerifyClient};
+use ngxora_compile::ir::{
+    PemSource, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
+};
 use pingora::apps::HttpServerOptions;
 use pingora::listeners::ALPN;
 use pingora::listeners::tls::TlsSettings;
@@ -17,6 +19,8 @@ use std::sync::Arc;
 #[path = "server_tests.rs"]
 mod tests;
 
+// Carries TLS handshake metadata into the HTTP request phase so routing can
+// enforce SNI/Host consistency on shared TLS listeners.
 #[derive(Debug, Clone)]
 pub(crate) struct DownstreamTlsInfo {
     pub(crate) sni: Option<String>,
@@ -53,17 +57,21 @@ mod openssl_listener_tls {
     }
 
     impl LoadedTlsIdentity {
-        fn load_paths(key: &ListenKey, cert_path: &str, key_path: &str) -> Result<Self> {
-            let cert_bytes = std::fs::read(cert_path).map_err(|err| {
+        fn read_file(key: &ListenKey, path: &str, label: &str) -> Result<Vec<u8>> {
+            std::fs::read(path).map_err(|err| {
                 pingora::Error::explain(
                     pingora::ErrorType::InternalError,
                     format!(
-                        "failed to read ssl certificate for listener {} from {}: {err}",
+                        "failed to read {label} for listener {} from {}: {err}",
                         listener_addr(key),
-                        cert_path
+                        path
                     ),
                 )
-            })?;
+            })
+        }
+
+        fn load_paths(key: &ListenKey, cert_path: &str, key_path: &str) -> Result<Self> {
+            let cert_bytes = Self::read_file(key, cert_path, "ssl certificate")?;
             let cert = X509::from_pem(&cert_bytes).map_err(|err| {
                 pingora::Error::explain(
                     pingora::ErrorType::InternalError,
@@ -75,16 +83,7 @@ mod openssl_listener_tls {
                 )
             })?;
 
-            let key_bytes = std::fs::read(key_path).map_err(|err| {
-                pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    format!(
-                        "failed to read ssl private key for listener {} from {}: {err}",
-                        listener_addr(key),
-                        key_path
-                    ),
-                )
-            })?;
+            let key_bytes = Self::read_file(key, key_path, "ssl private key")?;
             let key = PKey::private_key_from_pem(&key_bytes).map_err(|err| {
                 pingora::Error::explain(
                     pingora::ErrorType::InternalError,
@@ -121,6 +120,8 @@ mod openssl_listener_tls {
             })
         }
 
+        // Certificates are selected from the current runtime snapshot on every
+        // handshake, while the parsed PEM objects are cached per generation.
         fn select(&self, server_name: Option<&str>) -> Result<Arc<LoadedTlsIdentity>> {
             let snapshot = self.state.snapshot();
             let tls = snapshot
@@ -140,7 +141,11 @@ mod openssl_listener_tls {
             self.load_cached(snapshot.generation, identity)
         }
 
-        fn load_cached(&self, generation: u64, identity: &TlsIdentity) -> Result<Arc<LoadedTlsIdentity>> {
+        fn load_cached(
+            &self,
+            generation: u64,
+            identity: &TlsIdentity,
+        ) -> Result<Arc<LoadedTlsIdentity>> {
             let key = LoadedIdentityKey {
                 cert_path: pem_source_path(&identity.cert, "ssl certificate")?.to_owned(),
                 key_path: pem_source_path(&identity.key, "ssl certificate key")?.to_owned(),
@@ -164,32 +169,36 @@ mod openssl_listener_tls {
             cache.identities.insert(key, Arc::clone(&loaded));
             Ok(loaded)
         }
+
+        fn install_identity(&self, ssl: &mut SslRef, identity: &LoadedTlsIdentity) -> Result<()> {
+            ext::ssl_use_certificate(ssl, &identity.cert).map_err(|err| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!(
+                        "failed to install ssl certificate for listener {}: {err}",
+                        listener_addr(&self.listen_key)
+                    ),
+                )
+            })?;
+            ext::ssl_use_private_key(ssl, &identity.key).map_err(|err| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!(
+                        "failed to install ssl private key for listener {}: {err}",
+                        listener_addr(&self.listen_key)
+                    ),
+                )
+            })?;
+            Ok(())
+        }
     }
 
     #[async_trait]
     impl TlsAccept for SniCertResolver {
         async fn certificate_callback(&self, ssl: &mut SslRef) {
-            let result = self.select(ssl.servername(NameType::HOST_NAME)).and_then(|identity| {
-                ext::ssl_use_certificate(ssl, &identity.cert).map_err(|err| {
-                    pingora::Error::explain(
-                        pingora::ErrorType::InternalError,
-                        format!(
-                            "failed to install ssl certificate for listener {}: {err}",
-                            listener_addr(&self.listen_key)
-                        ),
-                    )
-                })?;
-                ext::ssl_use_private_key(ssl, &identity.key).map_err(|err| {
-                    pingora::Error::explain(
-                        pingora::ErrorType::InternalError,
-                        format!(
-                            "failed to install ssl private key for listener {}: {err}",
-                            listener_addr(&self.listen_key)
-                        ),
-                    )
-                })?;
-                Ok(())
-            });
+            let result = self
+                .select(ssl.servername(NameType::HOST_NAME))
+                .and_then(|identity| self.install_identity(ssl, &identity));
 
             if let Err(err) = result {
                 eprintln!(
@@ -215,6 +224,8 @@ fn listener_addr(key: &ListenKey) -> String {
     SocketAddr::new(key.addr, key.port).to_string()
 }
 
+// Listener certificates are loaded from files because Pingora's bind path
+// expects filesystem-backed identities today.
 fn pem_source_path<'a>(source: &'a PemSource, label: &str) -> Result<&'a str> {
     match source {
         PemSource::Path(path) => path.to_str().ok_or_else(|| {
@@ -256,6 +267,9 @@ fn listener_has_multiple_identities(tls: &ListenerTlsConfig) -> bool {
         .any(|candidate| candidate != reference)
 }
 
+// Select the certificate that should terminate the current TLS handshake. With
+// OpenSSL builds this can vary by SNI; without it we only allow a single
+// identity per listener.
 fn select_listener_tls<'a>(
     key: &ListenKey,
     tls: &'a ListenerTlsConfig,
@@ -290,6 +304,9 @@ fn resolve_single_listener_tls<'a>(
     Ok(identity)
 }
 
+// Build the TLS settings used when a listener is bound. Live config updates can
+// change route state and SNI maps, but the socket and protocol policy are still
+// bootstrap-time concerns.
 fn listener_tls_settings(
     key: &ListenKey,
     tls: &ListenerTlsConfig,
@@ -317,65 +334,67 @@ fn listener_tls_settings(
     }
 }
 
-fn apply_listener_tls_settings(
-    settings: &mut TlsSettings,
-    protocol: &ListenerProtocolConfig,
-    tls: &ListenerTlsSettings,
-) -> Result<()> {
-    let alpn = if protocol.http2_only {
+fn listener_alpn(protocol: &ListenerProtocolConfig) -> ALPN {
+    if protocol.http2_only {
         ALPN::H2
     } else if protocol.http2 {
         ALPN::H2H1
     } else {
         ALPN::H1
-    };
-    settings.set_alpn(alpn);
+    }
+}
 
-    #[cfg(not(feature = "openssl"))]
-    {
-        if tls.protocols.is_some() {
-            return Err(pingora::Error::explain(
-                pingora::ErrorType::InternalError,
-                "ssl_protocols requires build with feature `openssl`",
-            ));
-        }
-
-        if tls.verify_client != TlsVerifyClient::Off || tls.client_certificate.is_some() {
-            return Err(pingora::Error::explain(
-                pingora::ErrorType::InternalError,
-                "ssl_verify_client and ssl_client_certificate require build with feature `openssl`",
-            ));
-        }
+#[cfg(not(feature = "openssl"))]
+fn reject_openssl_only_tls_settings(tls: &ListenerTlsSettings) -> Result<()> {
+    if tls.protocols.is_some() {
+        return Err(pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            "ssl_protocols requires build with feature `openssl`",
+        ));
     }
 
-    #[cfg(feature = "openssl")]
-    if let Some(protocols) = tls.protocols {
-        settings
-            .set_min_proto_version(Some(ssl_version(protocols.min)))
-            .map_err(|err| {
-                pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    format!("failed to set minimum TLS version: {err}"),
-                )
-            })?;
-        settings
-            .set_max_proto_version(Some(ssl_version(protocols.max)))
-            .map_err(|err| {
-                pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    format!("failed to set maximum TLS version: {err}"),
-                )
-            })?;
+    if tls.verify_client != TlsVerifyClient::Off || tls.client_certificate.is_some() {
+        return Err(pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            "ssl_verify_client and ssl_client_certificate require build with feature `openssl`",
+        ));
     }
 
-    #[cfg(feature = "openssl")]
+    Ok(())
+}
+
+#[cfg(feature = "openssl")]
+fn apply_protocol_bounds(settings: &mut TlsSettings, protocols: TlsProtocolBounds) -> Result<()> {
+    settings
+        .set_min_proto_version(Some(ssl_version(protocols.min)))
+        .map_err(|err| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                format!("failed to set minimum TLS version: {err}"),
+            )
+        })?;
+    settings
+        .set_max_proto_version(Some(ssl_version(protocols.max)))
+        .map_err(|err| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                format!("failed to set maximum TLS version: {err}"),
+            )
+        })?;
+    Ok(())
+}
+
+#[cfg(feature = "openssl")]
+fn apply_client_verification(
+    settings: &mut TlsSettings,
+    tls: &ListenerTlsSettings,
+) -> Result<()> {
     match tls.verify_client {
         TlsVerifyClient::Off => settings.set_verify(SslVerifyMode::NONE),
         TlsVerifyClient::Optional => settings.set_verify(SslVerifyMode::PEER),
         TlsVerifyClient::Required => settings.set_verify(required_verify_mode()),
     }
 
-    #[cfg(feature = "openssl")]
     if matches!(
         tls.verify_client,
         TlsVerifyClient::Optional | TlsVerifyClient::Required
@@ -398,6 +417,29 @@ fn apply_listener_tls_settings(
     Ok(())
 }
 
+// Apply listener-level TLS protocol policy. This is intentionally strict:
+// unsupported security settings are rejected instead of being silently ignored.
+fn apply_listener_tls_settings(
+    settings: &mut TlsSettings,
+    protocol: &ListenerProtocolConfig,
+    tls: &ListenerTlsSettings,
+) -> Result<()> {
+    settings.set_alpn(listener_alpn(protocol));
+
+    #[cfg(not(feature = "openssl"))]
+    reject_openssl_only_tls_settings(tls)?;
+
+    #[cfg(feature = "openssl")]
+    if let Some(protocols) = tls.protocols {
+        apply_protocol_bounds(settings, protocols)?;
+    }
+
+    #[cfg(feature = "openssl")]
+    apply_client_verification(settings, tls)?;
+
+    Ok(())
+}
+
 fn ssl_version(version: TlsProtocolVersion) -> SslVersion {
     match version {
         TlsProtocolVersion::Tls1 => SslVersion::TLS1,
@@ -409,11 +451,6 @@ fn ssl_version(version: TlsProtocolVersion) -> SslVersion {
 #[cfg(feature = "openssl")]
 fn required_verify_mode() -> SslVerifyMode {
     SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT
-}
-
-#[cfg(not(feature = "openssl"))]
-fn required_verify_mode() -> SslVerifyMode {
-    SslVerifyMode::PEER
 }
 
 fn configure_proxy_service<SV>(
@@ -438,6 +475,46 @@ where
     Ok(())
 }
 
+fn sorted_listener_keys(router: &CompiledRouter) -> Vec<ListenKey> {
+    let mut listeners: Vec<_> = router.listeners.keys().cloned().collect();
+    listeners.sort_by(|left, right| {
+        (left.addr.to_string(), left.port, left.ssl).cmp(&(
+            right.addr.to_string(),
+            right.port,
+            right.ssl,
+        ))
+    });
+    listeners
+}
+
+fn listener_protocol<'a>(
+    router: &'a CompiledRouter,
+    key: &ListenKey,
+    addr: &str,
+) -> Result<&'a ListenerProtocolConfig> {
+    router.listener_protocols.get(key).ok_or_else(|| {
+        pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            format!("listener {addr} is missing protocol configuration"),
+        )
+    })
+}
+
+fn listener_tls<'a>(
+    router: &'a CompiledRouter,
+    key: &ListenKey,
+    addr: &str,
+) -> Result<&'a ListenerTlsConfig> {
+    router.listener_tls.get(key).ok_or_else(|| {
+        pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            format!("ssl listener {addr} is missing certificate configuration"),
+        )
+    })
+}
+
+// Bind each unique socket once. Virtual hosts, SNI maps, and route selection
+// are handled later from the compiled runtime snapshot.
 fn bind_listeners<SV>(
     svc: &mut Service<HttpProxy<SV, ()>>,
     router: &CompiledRouter,
@@ -448,31 +525,12 @@ where
 {
     configure_proxy_service(svc, router)?;
 
-    let mut listeners: Vec<_> = router.listeners.keys().cloned().collect();
-    listeners.sort_by(|left, right| {
-        (left.addr.to_string(), left.port, left.ssl).cmp(&(
-            right.addr.to_string(),
-            right.port,
-            right.ssl,
-        ))
-    });
-
-    for key in listeners {
+    for key in sorted_listener_keys(router) {
         let addr = listener_addr(&key);
 
         if key.ssl {
-            let tls = router.listener_tls.get(&key).ok_or_else(|| {
-                pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    format!("ssl listener {addr} is missing certificate configuration"),
-                )
-            })?;
-            let protocol = router.listener_protocols.get(&key).ok_or_else(|| {
-                pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    format!("listener {addr} is missing protocol configuration"),
-                )
-            })?;
+            let tls = listener_tls(router, &key, &addr)?;
+            let protocol = listener_protocol(router, &key, &addr)?;
             let settings = listener_tls_settings(&key, tls, protocol, Arc::clone(&state))?;
             svc.add_tls_with_settings(&addr, None, settings);
         } else {
