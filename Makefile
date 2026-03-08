@@ -12,9 +12,9 @@ PLUGINS_CFG ?= plugins.cfg
 
 # Versioning / tagging
 TAG      ?= dev
-REGISTRY ?= registry.example.com
-IMAGE_REPO ?= $(REGISTRY)/$(APP)
-IMAGE    ?= $(IMAGE_REPO):$(TAG)
+REGISTRY ?=
+IMAGE_REPO ?= $(APP)
+IMAGE    ?= $(if $(strip $(REGISTRY)),$(REGISTRY)/$(IMAGE_REPO),$(IMAGE_REPO)):$(TAG)
 BUILDER_IMAGE := ngxora-src
 PLATFORMS ?= linux/amd64,linux/arm64
 PLUGIN_FEATURES := $(shell if [ -f $(PLUGINS_CFG) ]; then awk 'NF && $$1 !~ /^#/ {print "plugin-" $$1}' $(PLUGINS_CFG) | paste -sd, -; fi)
@@ -93,6 +93,7 @@ build-image: ## Build docker image locally
 publish: test build publish-image ## Default publish (safe)
 
 registry-login: ## Log in to the container registry using env vars
+	test -n "$(REGISTRY)" || (echo "REGISTRY is required"; exit 1)
 	test -n "$(REGISTRY_USERNAME)" || (echo "REGISTRY_USERNAME is required"; exit 1)
 	test -n "$(REGISTRY_TOKEN)" || (echo "REGISTRY_TOKEN is required"; exit 1)
 	printf '%s' "$(REGISTRY_TOKEN)" | $(DOCKER) login "$(REGISTRY)" -u "$(REGISTRY_USERNAME)" --password-stdin

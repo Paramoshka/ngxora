@@ -12,7 +12,8 @@ permissions:
   packages: write
 
 env:
-  REGISTRY: ${{ secrets.REGISTRY }}
+  REGISTRY: docker.io
+  IMAGE_REPO: paramoshka/ngxora
   REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
   REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
   TAG: ${{ github.ref_name }}
