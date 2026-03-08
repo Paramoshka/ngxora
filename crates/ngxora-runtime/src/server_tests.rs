@@ -117,7 +117,10 @@ fn select_listener_tls_prefers_named_sni() {
 
     let resolved =
         select_listener_tls(&key, &tls, Some("EXAMPLE.com")).expect("expected named identity");
-    assert_eq!(resolved, &tls_identity("/tmp/example.crt", "/tmp/example.key"));
+    assert_eq!(
+        resolved,
+        &tls_identity("/tmp/example.crt", "/tmp/example.key")
+    );
 }
 
 #[test]
@@ -138,7 +141,10 @@ fn select_listener_tls_falls_back_to_default() {
 
     let resolved =
         select_listener_tls(&key, &tls, Some("missing.example.com")).expect("expected default");
-    assert_eq!(resolved, &tls_identity("/tmp/default.crt", "/tmp/default.key"));
+    assert_eq!(
+        resolved,
+        &tls_identity("/tmp/default.crt", "/tmp/default.key")
+    );
 }
 
 #[test]

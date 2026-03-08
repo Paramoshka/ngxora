@@ -41,10 +41,7 @@ mod tests {
                     vec![],
                     vec![
                         Node::directive("listen".to_string(), vec!["80".to_string()]),
-                        Node::directive(
-                            "server_name".to_string(),
-                            vec!["example.com".to_string()],
-                        ),
+                        Node::directive("server_name".to_string(), vec!["example.com".to_string()]),
                     ],
                 )],
             )],
@@ -61,8 +58,8 @@ mod tests {
 
     #[test]
     fn resolves_include_directive() {
-        let include_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/fixtures/included.conf");
+        let include_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fixtures/included.conf");
         let include_path = include_path.to_string_lossy();
 
         let input = format!("http {{ include {}; }}", include_path);

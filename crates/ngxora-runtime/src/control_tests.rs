@@ -152,6 +152,10 @@ fn runtime_state_rejects_unknown_plugin() {
 
     assert!(!result.applied);
     assert!(!result.restart_required);
-    assert!(result.message.contains("plugin is not compiled into this binary"));
+    assert!(
+        result
+            .message
+            .contains("plugin is not compiled into this binary")
+    );
     assert_eq!(snapshot.version, "v1");
 }

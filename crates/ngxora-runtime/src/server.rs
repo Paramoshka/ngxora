@@ -5,11 +5,11 @@ use crate::upstreams::{
 use ngxora_compile::ir::{
     PemSource, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
 };
+use pingora::Result;
 use pingora::apps::HttpServerOptions;
 use pingora::listeners::ALPN;
 use pingora::listeners::tls::TlsSettings;
 use pingora::services::listening::Service;
-use pingora::Result;
 use pingora::tls::ssl::{SslVerifyMode, SslVersion};
 use pingora_proxy::{HttpProxy, ProxyHttp};
 use std::net::SocketAddr;
@@ -34,13 +34,13 @@ mod openssl_listener_tls {
     };
     use async_trait::async_trait;
     use ngxora_compile::ir::TlsIdentity;
+    use pingora::Result;
     use pingora::listeners::TlsAccept;
     use pingora::protocols::tls::TlsRef;
     use pingora::tls::ext;
     use pingora::tls::pkey::{PKey, Private};
     use pingora::tls::ssl::{NameType, SslRef};
     use pingora::tls::x509::X509;
-    use pingora::Result;
     use std::any::Any;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -247,12 +247,15 @@ fn default_listener_tls<'a>(
     key: &ListenKey,
     tls: &'a ListenerTlsConfig,
 ) -> Result<ListenerTlsConfigIdentity<'a>> {
-    tls.default.as_ref().or_else(|| tls.named.values().next()).ok_or_else(|| {
-        pingora::Error::explain(
-            pingora::ErrorType::InternalError,
-            format!("ssl listener {} has no certificate", listener_addr(key)),
-        )
-    })
+    tls.default
+        .as_ref()
+        .or_else(|| tls.named.values().next())
+        .ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                format!("ssl listener {} has no certificate", listener_addr(key)),
+            )
+        })
 }
 
 #[cfg(any(test, not(feature = "openssl")))]
@@ -385,10 +388,7 @@ fn apply_protocol_bounds(settings: &mut TlsSettings, protocols: TlsProtocolBound
 }
 
 #[cfg(feature = "openssl")]
-fn apply_client_verification(
-    settings: &mut TlsSettings,
-    tls: &ListenerTlsSettings,
-) -> Result<()> {
+fn apply_client_verification(settings: &mut TlsSettings, tls: &ListenerTlsSettings) -> Result<()> {
     match tls.verify_client {
         TlsVerifyClient::Off => settings.set_verify(SslVerifyMode::NONE),
         TlsVerifyClient::Optional => settings.set_verify(SslVerifyMode::PEER),
@@ -561,5 +561,9 @@ pub fn bind_listeners_from_router<SV>(
 where
     SV: ProxyHttp,
 {
-    bind_listeners(svc, router, Arc::new(RuntimeState::bootstrap(router.clone())))
+    bind_listeners(
+        svc,
+        router,
+        Arc::new(RuntimeState::bootstrap(router.clone())),
+    )
 }

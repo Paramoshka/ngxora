@@ -9,8 +9,8 @@ use crate::{
     consts,
     ir::{
         Http, Ir, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher,
-        PemSource, Server, Switch, TlsIdentity, TlsProtocolBounds,
-        TlsProtocolVersion, TlsVerifyClient,
+        PemSource, Server, Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion,
+        TlsVerifyClient,
     },
 };
 
@@ -222,7 +222,7 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
                     message: "ssl_client_certificate: expected exactly 1 argument".into(),
                 });
             }
-        }
+        },
 
         _ => {
             return Err(LowerErr {
@@ -273,7 +273,9 @@ fn parse_location_matcher(args: &[String]) -> Result<LocationMatcher, LowerErr> 
     }
 }
 
-fn parse_location_contents(nodes: &[Node]) -> Result<(Vec<LocationDirective>, Vec<PluginSpec>), LowerErr> {
+fn parse_location_contents(
+    nodes: &[Node],
+) -> Result<(Vec<LocationDirective>, Vec<PluginSpec>), LowerErr> {
     let mut directives: Vec<LocationDirective> = Vec::new();
     let mut plugins: Vec<PluginSpec> = Vec::new();
     for node in nodes {
@@ -313,7 +315,10 @@ fn lower_headers_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
             Node::Directive(directive) => apply_headers_directive(&mut config, directive)?,
             Node::Block(block) => {
                 return Err(LowerErr {
-                    message: format!("headers block: nested blocks are not supported: {}", block.name),
+                    message: format!(
+                        "headers block: nested blocks are not supported: {}",
+                        block.name
+                    ),
                 });
             }
         }
@@ -344,28 +349,28 @@ fn apply_headers_directive(
                 .push(parse_header_entry(&directive.args, consts::REQUEST_SET)?);
         }
         consts::REQUEST_REMOVE => {
-            config
-                .request
-                .remove
-                .push(parse_header_remove(&directive.args, consts::REQUEST_REMOVE)?);
+            config.request.remove.push(parse_header_remove(
+                &directive.args,
+                consts::REQUEST_REMOVE,
+            )?);
         }
         consts::UPSTREAM_REQUEST_ADD => {
-            config
-                .upstream_request
-                .add
-                .push(parse_header_entry(&directive.args, consts::UPSTREAM_REQUEST_ADD)?);
+            config.upstream_request.add.push(parse_header_entry(
+                &directive.args,
+                consts::UPSTREAM_REQUEST_ADD,
+            )?);
         }
         consts::UPSTREAM_REQUEST_SET => {
-            config
-                .upstream_request
-                .set
-                .push(parse_header_entry(&directive.args, consts::UPSTREAM_REQUEST_SET)?);
+            config.upstream_request.set.push(parse_header_entry(
+                &directive.args,
+                consts::UPSTREAM_REQUEST_SET,
+            )?);
         }
         consts::UPSTREAM_REQUEST_REMOVE => {
-            config
-                .upstream_request
-                .remove
-                .push(parse_header_remove(&directive.args, consts::UPSTREAM_REQUEST_REMOVE)?);
+            config.upstream_request.remove.push(parse_header_remove(
+                &directive.args,
+                consts::UPSTREAM_REQUEST_REMOVE,
+            )?);
         }
         consts::RESPONSE_ADD => {
             config
@@ -380,10 +385,10 @@ fn apply_headers_directive(
                 .push(parse_header_entry(&directive.args, consts::RESPONSE_SET)?);
         }
         consts::RESPONSE_REMOVE => {
-            config
-                .response
-                .remove
-                .push(parse_header_remove(&directive.args, consts::RESPONSE_REMOVE)?);
+            config.response.remove.push(parse_header_remove(
+                &directive.args,
+                consts::RESPONSE_REMOVE,
+            )?);
         }
         _ => {
             return Err(LowerErr {

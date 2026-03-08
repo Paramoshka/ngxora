@@ -94,9 +94,13 @@ fn resolve_nodes(
                         });
                     }
 
-                    let text = std::fs::read_to_string(&include_path).map_err(|e| IncludeError {
-                        message: format!("failed to read include {}: {e}", include_path.display()),
-                    })?;
+                    let text =
+                        std::fs::read_to_string(&include_path).map_err(|e| IncludeError {
+                            message: format!(
+                                "failed to read include {}: {e}",
+                                include_path.display()
+                            ),
+                        })?;
                     let ast = Ast::parse_config(&text)
                         .map_err(|e| IncludeError { message: e.message })?;
                     let next_dir = include_path
@@ -116,7 +120,8 @@ fn resolve_nodes(
             }
 
             Node::Block(block) => {
-                let children = resolve_nodes(&block.children, root_dir, current_dir, resolving, depth)?;
+                let children =
+                    resolve_nodes(&block.children, root_dir, current_dir, resolving, depth)?;
                 out.push(Node::block(
                     block.name.clone(),
                     block.args.clone(),

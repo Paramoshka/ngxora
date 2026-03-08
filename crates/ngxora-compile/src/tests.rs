@@ -4,8 +4,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use ngxora_plugin_api::PluginSpec;
     use ngxora_config::Ast;
+    use ngxora_plugin_api::PluginSpec;
     use serde_json::json;
     use url::Url;
 

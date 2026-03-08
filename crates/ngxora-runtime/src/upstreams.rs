@@ -231,12 +231,13 @@ impl CompiledRouter {
 
             if listen.ssl {
                 self.merge_listener_tls_settings(&listen_key, &server.tls_options)?;
-                let listener_tls = self.listener_tls.entry(listen_key).or_insert_with(|| {
-                    ListenerTlsConfig {
-                        settings: ListenerTlsSettings::from(&server.tls_options),
-                        ..ListenerTlsConfig::default()
-                    }
-                });
+                let listener_tls =
+                    self.listener_tls
+                        .entry(listen_key)
+                        .or_insert_with(|| ListenerTlsConfig {
+                            settings: ListenerTlsSettings::from(&server.tls_options),
+                            ..ListenerTlsConfig::default()
+                        });
 
                 if let Some(tls) = server.tls.as_ref() {
                     for name in &server.server_names {
@@ -441,10 +442,7 @@ fn downstream_keepalive_timeout_secs(timeout: &KeepaliveTimeout) -> Option<u64> 
 
 // Match order mirrors nginx semantics:
 // exact > longest ^~ prefix > first matching regex > longest plain prefix.
-fn select_route_target<'a>(
-    routes: &'a ServerRoutes,
-    path: &str,
-) -> Option<&'a CompiledLocation> {
+fn select_route_target<'a>(routes: &'a ServerRoutes, path: &str) -> Option<&'a CompiledLocation> {
     let mut best_prefix: Option<(&CompiledLocation, usize)> = None;
     let mut best_prefer_prefix: Option<(&CompiledLocation, usize)> = None;
 
@@ -776,7 +774,9 @@ async fn write_local_response(session: &mut Session, response: LocalResponse) ->
         session.write_response_header(Box::new(header), true).await
     } else {
         set_content_length(&mut header, response.body.len().to_string())?;
-        session.write_response_header(Box::new(header), false).await?;
+        session
+            .write_response_header(Box::new(header), false)
+            .await?;
         session.write_response_body(Some(response.body), true).await
     }
 }

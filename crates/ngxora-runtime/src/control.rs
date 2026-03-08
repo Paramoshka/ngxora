@@ -6,8 +6,8 @@ use arc_swap::ArcSwap;
 use ngxora_plugin_api::{PluginChain, empty_plugin_chain};
 use ngxora_plugin_registry::PluginRegistry;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 #[path = "control_tests.rs"]
@@ -46,6 +46,8 @@ pub struct RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
+    /// Returns the prebuilt plugin chain for a route.
+    /// Missing chains are treated as an empty plugin stack.
     pub fn plugin_chain(&self, route_id: u64) -> PluginChain {
         self.plugin_chains
             .get(&route_id)
@@ -56,25 +58,25 @@ impl RuntimeSnapshot {
 
 pub struct RuntimeState {
     current: ArcSwap<RuntimeSnapshot>,
+    // Transport/bootstrap settings cannot be changed live with Pingora listeners,
+    // so we reject snapshots that modify this fingerprint.
     bootstrap_config: RestartConfigFingerprint,
     registry: Arc<PluginRegistry>,
     generation: AtomicU64,
 }
 
 impl RuntimeState {
+    /// Creates a runtime state with the built-in plugin registry.
     pub fn new(snapshot: ConfigSnapshot) -> Self {
         Self::with_registry(snapshot, Arc::new(PluginRegistry::with_builtin_plugins()))
     }
 
+    /// Creates a runtime state with a caller-provided plugin registry.
     pub fn with_registry(snapshot: ConfigSnapshot, registry: Arc<PluginRegistry>) -> Self {
         let bootstrap_config = restart_fingerprint(&snapshot.router);
-        let initial_snapshot = Self::build_runtime_snapshot(
-            &registry,
-            snapshot.version,
-            snapshot.router,
-            1,
-        )
-        .expect("bootstrap snapshot plugin resolution failed");
+        let initial_snapshot =
+            Self::build_runtime_snapshot(&registry, snapshot.version, snapshot.router, 1)
+                .expect("bootstrap snapshot plugin resolution failed");
         Self {
             current: ArcSwap::from_pointee(initial_snapshot),
             bootstrap_config,
@@ -83,18 +85,23 @@ impl RuntimeState {
         }
     }
 
+    /// Helper for bootstrap-only setups that do not care about snapshot versioning.
     pub fn bootstrap(router: CompiledRouter) -> Self {
         Self::new(ConfigSnapshot::new("bootstrap", router))
     }
 
+    /// Returns the currently active runtime snapshot.
     pub fn snapshot(&self) -> Arc<RuntimeSnapshot> {
         self.current.load_full()
     }
 
+    /// Returns the current monotonic runtime generation.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
     }
 
+    /// Applies a new snapshot if only live-reloadable state changed.
+    /// Listener topology and bootstrap transport settings still require restart.
     pub fn apply_snapshot(&self, next: ConfigSnapshot) -> ApplyResult {
         if restart_fingerprint(&next.router) != self.bootstrap_config {
             let current = self.snapshot();
@@ -110,12 +117,11 @@ impl RuntimeState {
 
         let next_version = next.version;
         let next_router = next.router;
-        let active_generation = self.generation() + 1;
         let runtime_snapshot = match Self::build_runtime_snapshot(
             &self.registry,
             next_version.clone(),
             next_router,
-            active_generation,
+            self.generation() + 1,
         ) {
             Ok(snapshot) => snapshot,
             Err(message) => {
@@ -130,6 +136,7 @@ impl RuntimeState {
             }
         };
 
+        // The generation is only committed after plugin resolution succeeds.
         let active_generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let active_version = runtime_snapshot.version.clone();
         self.current.store(Arc::new(RuntimeSnapshot {
@@ -146,6 +153,7 @@ impl RuntimeState {
         }
     }
 
+    /// Compiles route plugin specs into executable chains and packages a runtime snapshot.
     fn build_runtime_snapshot(
         registry: &PluginRegistry,
         version: String,
@@ -169,6 +177,7 @@ pub struct InProcessControlPlane {
 }
 
 impl InProcessControlPlane {
+    /// Thin in-process wrapper used by tests and future control-plane adapters.
     pub fn new(state: Arc<RuntimeState>) -> Self {
         Self { state }
     }
@@ -200,6 +209,8 @@ struct ListenerRestartConfig {
     tls: Option<ListenerTlsSettings>,
 }
 
+/// Captures the subset of config that cannot be swapped live.
+/// Any change here means the process must keep the old snapshot until restart.
 fn restart_fingerprint(router: &CompiledRouter) -> RestartConfigFingerprint {
     let mut listeners = BTreeMap::new();
     for key in router.listeners.keys() {
@@ -224,6 +235,7 @@ fn restart_fingerprint(router: &CompiledRouter) -> RestartConfigFingerprint {
     }
 }
 
+/// Resolves all plugin specs eagerly so bad plugin config rejects the whole snapshot.
 fn build_plugin_chains(
     router: &CompiledRouter,
     registry: &PluginRegistry,
@@ -237,6 +249,7 @@ fn build_plugin_chains(
     Ok(plugin_chains)
 }
 
+/// Walks every virtual host attached to a listener and collects route-level plugin chains.
 fn collect_plugin_chains_from_vhosts(
     routes: &VirtualHostRoutes,
     registry: &PluginRegistry,
@@ -249,6 +262,8 @@ fn collect_plugin_chains_from_vhosts(
     Ok(())
 }
 
+/// A route ID is globally stable inside the compiled router, so duplicate routes
+/// reached via aliases/default host lookup share the same compiled plugin chain.
 fn collect_plugin_chains_from_server(
     routes: &ServerRoutes,
     registry: &PluginRegistry,
@@ -259,9 +274,12 @@ fn collect_plugin_chains_from_server(
             continue;
         }
 
-        let chain = registry
-            .build_chain(&location.plugins)
-            .map_err(|err| format!("failed to build plugin chain for route {}: {err}", location.route_id))?;
+        let chain = registry.build_chain(&location.plugins).map_err(|err| {
+            format!(
+                "failed to build plugin chain for route {}: {err}",
+                location.route_id
+            )
+        })?;
         plugin_chains.insert(location.route_id, chain);
     }
 

@@ -1,7 +1,7 @@
 use super::{
+    CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter, RouteTarget, ServerRoutes,
     apply_upstream_timeouts, downstream_keepalive_timeout_secs, select_route_target,
-    validate_sni_host_consistency, CompiledLocation, CompiledMatcher, CompiledRegex,
-    CompiledRouter, RouteTarget, ServerRoutes,
+    validate_sni_host_consistency,
 };
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, Server,
@@ -125,7 +125,10 @@ fn named_location_is_not_selected_for_request_path() {
 
 #[test]
 fn downstream_keepalive_timeout_maps_off_to_none() {
-    assert_eq!(downstream_keepalive_timeout_secs(&KeepaliveTimeout::Off), None);
+    assert_eq!(
+        downstream_keepalive_timeout_secs(&KeepaliveTimeout::Off),
+        None
+    );
 }
 
 #[test]

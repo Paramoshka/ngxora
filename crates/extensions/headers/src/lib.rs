@@ -1,7 +1,7 @@
 use http::{HeaderName, HeaderValue};
 use ngxora_plugin_api::{
-    HeaderMapMut, HttpPlugin, PluginBuildError, PluginError, PluginFactory, PluginFlow,
-    PluginSpec, RequestCtx, ResponseCtx, UpstreamRequestCtx,
+    HeaderMapMut, HttpPlugin, PluginBuildError, PluginError, PluginFactory, PluginFlow, PluginSpec,
+    RequestCtx, ResponseCtx, UpstreamRequestCtx,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -151,9 +151,10 @@ impl PluginFactory for HeadersPluginFactory {
         &self,
         spec: &PluginSpec,
     ) -> Result<Arc<dyn ngxora_plugin_api::HttpPlugin>, PluginBuildError> {
-        let config = serde_json::from_value::<HeadersPluginConfig>(spec.config.clone()).map_err(
-            |err| PluginBuildError::new(self.name(), format!("invalid plugin config: {err}")),
-        )?;
+        let config =
+            serde_json::from_value::<HeadersPluginConfig>(spec.config.clone()).map_err(|err| {
+                PluginBuildError::new(self.name(), format!("invalid plugin config: {err}"))
+            })?;
 
         Ok(Arc::new(HeadersPlugin {
             request: HeaderPatch::compile(self.name(), config.request)?,
