@@ -2,6 +2,8 @@ pub const HTTP: &str = "http";
 pub const SERVER: &str = "server";
 pub const LOCATION: &str = "location";
 pub const HEADERS: &str = "headers";
+pub const BASIC_AUTH: &str = "basic-auth";
+pub const BASIC_AUTH_ALIAS: &str = "basic_auth";
 
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";
@@ -30,6 +32,9 @@ pub const UPSTREAM_REQUEST_REMOVE: &str = "upstream_request_remove";
 pub const RESPONSE_ADD: &str = "response_add";
 pub const RESPONSE_SET: &str = "response_set";
 pub const RESPONSE_REMOVE: &str = "response_remove";
+pub const USERNAME: &str = "username";
+pub const PASSWORD: &str = "password";
+pub const REALM: &str = "realm";
 
 // TLS CERTS
 pub const SSL_CERTIFICATE: &str = "ssl_certificate";

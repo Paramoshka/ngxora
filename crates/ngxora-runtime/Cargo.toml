@@ -7,6 +7,7 @@ edition = "2024"
 default = ["openssl"]
 openssl = ["pingora/openssl", "pingora-proxy/openssl"]
 plugin-headers = ["ngxora-plugin-registry/plugin-headers"]
+plugin-basic-auth = ["ngxora-plugin-registry/plugin-basic-auth"]
 
 [dependencies]
 arc-swap = "1.8.2"

@@ -1292,6 +1292,17 @@ name = "ngxora-config"
 version = "0.1.0"
 
 [[package]]
+name = "ngxora-extension-basic-auth"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "http",
+ "ngxora-plugin-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ngxora-extension-headers"
 version = "0.1.0"
 dependencies = [
@@ -1315,6 +1326,7 @@ dependencies = [
 name = "ngxora-plugin-registry"
 version = "0.1.0"
 dependencies = [
+ "ngxora-extension-basic-auth",
  "ngxora-extension-headers",
  "ngxora-plugin-api",
 ]

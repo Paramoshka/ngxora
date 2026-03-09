@@ -27,6 +27,13 @@ struct HeadersPluginConfig {
 }
 
 #[derive(Debug, Default, Serialize)]
+struct BasicAuthPluginConfig {
+    username: String,
+    password: String,
+    realm: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
 struct HeaderPatchConfig {
     add: Vec<HeaderEntry>,
     set: Vec<HeaderEntry>,
@@ -299,6 +306,7 @@ fn parse_location_contents(
 fn parse_location_plugin_block(block: &Block) -> Result<PluginSpec, LowerErr> {
     match block.name.as_str() {
         consts::HEADERS => lower_headers_plugin(block),
+        consts::BASIC_AUTH | consts::BASIC_AUTH_ALIAS => lower_basic_auth_plugin(block),
         _ => Err(LowerErr {
             message: format!("unexpected inner block in location: {}", block.name),
         }),
@@ -330,6 +338,35 @@ fn lower_headers_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
     let config = serde_json::to_value(config).expect("headers plugin config serializes");
     Ok(PluginSpec {
         name: consts::HEADERS.into(),
+        config,
+    })
+}
+
+fn lower_basic_auth_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
+    if !block.args.is_empty() {
+        return Err(LowerErr {
+            message: format!("{} block: does not accept arguments", block.name),
+        });
+    }
+
+    let mut config = BasicAuthPluginConfig::default();
+    for child in &block.children {
+        match child {
+            Node::Directive(directive) => apply_basic_auth_directive(&mut config, directive)?,
+            Node::Block(nested) => {
+                return Err(LowerErr {
+                    message: format!(
+                        "basic-auth block: nested blocks are not supported: {}",
+                        nested.name
+                    ),
+                });
+            }
+        }
+    }
+
+    let config = serde_json::to_value(config).expect("basic-auth plugin config serializes");
+    Ok(PluginSpec {
+        name: consts::BASIC_AUTH.into(),
         config,
     })
 }
@@ -403,6 +440,55 @@ fn apply_headers_directive(
     Ok(())
 }
 
+fn apply_basic_auth_directive(
+    config: &mut BasicAuthPluginConfig,
+    directive: &Directive,
+) -> Result<(), LowerErr> {
+    match directive.name.as_str() {
+        consts::USERNAME => {
+            assign_basic_auth_string(
+                &mut config.username,
+                "username",
+                parse_basic_auth_single_value(
+                    &directive.args,
+                    consts::USERNAME,
+                    "expected exactly 1 argument",
+                )?,
+            )?;
+        }
+        consts::PASSWORD => {
+            assign_basic_auth_string(
+                &mut config.password,
+                "password",
+                parse_basic_auth_joined_value(
+                    &directive.args,
+                    consts::PASSWORD,
+                    "expected at least 1 argument",
+                )?,
+            )?;
+        }
+        consts::REALM => {
+            let realm = parse_basic_auth_joined_value(
+                &directive.args,
+                consts::REALM,
+                "expected at least 1 argument",
+            )?;
+            if config.realm.replace(realm).is_some() {
+                return Err(LowerErr {
+                    message: "basic-auth block: duplicate realm directive".into(),
+                });
+            }
+        }
+        _ => {
+            return Err(LowerErr {
+                message: format!("basic-auth block: unsupported directive {}", directive.name),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn parse_header_entry(args: &[String], directive: &str) -> Result<HeaderEntry, LowerErr> {
     match args {
         [] => Err(LowerErr {
@@ -415,6 +501,47 @@ fn parse_header_entry(args: &[String], directive: &str) -> Result<HeaderEntry, L
             name: name.clone(),
             value: value.join(" "),
         }),
+    }
+}
+
+fn assign_basic_auth_string(
+    slot: &mut String,
+    field: &str,
+    value: String,
+) -> Result<(), LowerErr> {
+    if !slot.is_empty() {
+        return Err(LowerErr {
+            message: format!("basic-auth block: duplicate {field} directive"),
+        });
+    }
+
+    *slot = value;
+    Ok(())
+}
+
+fn parse_basic_auth_single_value(
+    args: &[String],
+    directive: &str,
+    expected_message: &str,
+) -> Result<String, LowerErr> {
+    match args {
+        [value] => Ok(value.clone()),
+        _ => Err(LowerErr {
+            message: format!("{directive}: {expected_message}"),
+        }),
+    }
+}
+
+fn parse_basic_auth_joined_value(
+    args: &[String],
+    directive: &str,
+    expected_message: &str,
+) -> Result<String, LowerErr> {
+    match args {
+        [] => Err(LowerErr {
+            message: format!("{directive}: {expected_message}"),
+        }),
+        values => Ok(values.join(" ")),
     }
 }
 
