@@ -155,7 +155,6 @@ Near-term core roadmap:
 - `upstream` blocks with multiple backends
 
 Near-term plugin roadmap:
-- `basic_auth`
 - `cors`
 - `rate_limit`
 
