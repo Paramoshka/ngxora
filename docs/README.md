@@ -10,6 +10,7 @@ For implementation discipline on new options and plugins, see [Feature Checklist
 
 ```nginx
 http {
+    client_max_body_size 10m;
     keepalive_timeout 60s;
     keepalive_requests 1000;
     allow_connect_method_proxying off;
@@ -74,6 +75,7 @@ location /api/ {
 | `server_name` | virtual host | Live | Host routing updates without restart |
 | `ssl_certificate` / `ssl_certificate_key` | TLS identity | Live | Works for existing TLS listeners through runtime SNI cert lookup |
 | plugin config | route | Live | Only if plugin code is already compiled into the binary |
+| `client_max_body_size` | http | Live | Prechecked via `Content-Length` and enforced while streaming request body |
 | `keepalive_timeout` | http | Live | Applied per downstream session in request path |
 | `listen addr:port` | listener | Restart required | New or removed socket cannot be rebound live |
 | `listen ... ssl` | listener | Restart required | Transport stack changes |
@@ -94,6 +96,7 @@ location /api/ {
 - routing
 - upstream target selection
 - plugin chains
+- downstream request body limit
 - downstream keepalive timeout
 - SNI certificate map on already opened TLS listeners
 

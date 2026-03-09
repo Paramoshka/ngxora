@@ -21,6 +21,7 @@ fn proto_snapshot_converts_into_runtime_router() {
             keepalive_requests: 200,
             allow_connect_method_proxying: true,
             h2c: false,
+            client_max_body_size_bytes: 8 * 1024 * 1024,
         }),
         listeners: vec![proto::Listener {
             name: "edge".into(),
@@ -78,6 +79,10 @@ fn proto_snapshot_converts_into_runtime_router() {
         Some(15)
     );
     assert_eq!(runtime.router.http_options.keepalive_requests, Some(200));
+    assert_eq!(
+        runtime.router.http_options.client_max_body_size,
+        Some(8 * 1024 * 1024)
+    );
     assert!(runtime.router.http_options.tcp_nodelay);
     assert!(runtime.router.http_options.allow_connect_method_proxying);
     assert_eq!(route.matcher, CompiledMatcher::Prefix("/api".into()));
@@ -116,6 +121,14 @@ fn runtime_snapshot_converts_back_to_proto() {
             .expect("http options")
             .downstream_keepalive_timeout_seconds,
         30
+    );
+    assert_eq!(
+        proto
+            .http
+            .as_ref()
+            .expect("http options")
+            .client_max_body_size_bytes,
+        16 * 1024 * 1024
     );
     assert_eq!(proto.listeners.len(), 1);
     assert_eq!(proto.listeners[0].address, "0.0.0.0");
@@ -174,6 +187,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
             header: None,
         },
         keepalive_requests: Some(1000),
+        client_max_body_size: Some(16 * 1024 * 1024),
         tcp_nodelay: Switch::On,
         allow_connect_method_proxying: Switch::Off,
         h2c: Switch::Off,

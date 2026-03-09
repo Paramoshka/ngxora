@@ -235,6 +235,7 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
             options.downstream_keepalive_timeout_seconds,
         ),
         keepalive_requests: none_if_zero(options.keepalive_requests),
+        client_max_body_size: none_if_zero_u64(options.client_max_body_size_bytes),
         tcp_nodelay: switch_from_bool(options.tcp_nodelay),
         allow_connect_method_proxying: switch_from_bool(options.allow_connect_method_proxying),
         h2c: switch_from_bool(options.h2c),
@@ -672,6 +673,7 @@ fn proto_http_options_from_runtime(options: &HttpRuntimeOptions) -> ProtoHttpOpt
         keepalive_requests: options.keepalive_requests.unwrap_or(0),
         allow_connect_method_proxying: options.allow_connect_method_proxying,
         h2c: options.h2c,
+        client_max_body_size_bytes: options.client_max_body_size.unwrap_or(0),
     }
 }
 
@@ -779,6 +781,10 @@ fn switch_from_bool(value: bool) -> Switch {
 }
 
 fn none_if_zero(value: u32) -> Option<u32> {
+    (value > 0).then_some(value)
+}
+
+fn none_if_zero_u64(value: u64) -> Option<u64> {
     (value > 0).then_some(value)
 }
 

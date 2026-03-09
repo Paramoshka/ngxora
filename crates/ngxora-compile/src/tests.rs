@@ -41,6 +41,7 @@ http {
             }
         );
         assert_eq!(http.keepalive_requests, None);
+        assert_eq!(http.client_max_body_size, None);
         assert_eq!(http.tcp_nodelay, Switch::Off);
         assert_eq!(http.servers.len(), 1);
 
@@ -124,6 +125,7 @@ http {
 http {
   h2c on;
   keepalive_requests 1000;
+  client_max_body_size 10m;
   allow_connect_method_proxying on;
 
   server {
@@ -144,6 +146,7 @@ http {
         let http = ir.http.expect("http missing");
         assert_eq!(http.h2c, Switch::On);
         assert_eq!(http.keepalive_requests, Some(1000));
+        assert_eq!(http.client_max_body_size, Some(10 * 1024 * 1024));
         assert_eq!(http.allow_connect_method_proxying, Switch::On);
 
         let server = &http.servers[0];
@@ -222,6 +225,36 @@ http {
                 LocationDirective::ProxyWriteTimeout(Duration::from_secs(20)),
                 LocationDirective::ProxyPass(Url::parse("http://127.0.0.1:8080").unwrap()),
             ]
+        );
+    }
+
+    #[test]
+    fn from_ast_parses_client_max_body_size_off() {
+        let input = r#"
+http {
+  client_max_body_size 0;
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        assert_eq!(http.client_max_body_size, None);
+    }
+
+    #[test]
+    fn from_ast_rejects_invalid_client_max_body_size_unit() {
+        let input = r#"
+http {
+  client_max_body_size 10q;
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected client_max_body_size to fail");
+
+        assert!(
+            err.message
+                .contains("client_max_body_size: unsupported size unit `q` in `10q`")
         );
     }
 

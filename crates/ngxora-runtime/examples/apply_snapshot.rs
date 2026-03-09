@@ -85,6 +85,7 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
             keepalive_requests: 1000,
             allow_connect_method_proxying: false,
             h2c: false,
+            client_max_body_size_bytes: 10 * 1024 * 1024,
         }),
         listeners: vec![Listener {
             name: cli.listener_name.clone(),

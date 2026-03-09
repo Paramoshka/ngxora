@@ -1,6 +1,7 @@
 use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState};
 use crate::server::DownstreamTlsInfo;
 use async_trait::async_trait;
+use bytes::Bytes;
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
     LocationMatcher, PemSource, Server, TlsIdentity, TlsProtocolBounds, TlsVerifyClient,
@@ -166,6 +167,7 @@ pub struct ListenerTlsConfig {
 pub struct HttpRuntimeOptions {
     pub downstream_keepalive_timeout: Option<u64>,
     pub keepalive_requests: Option<u32>,
+    pub client_max_body_size: Option<u64>,
     pub tcp_nodelay: bool,
     pub allow_connect_method_proxying: bool,
     pub h2c: bool,
@@ -191,6 +193,7 @@ impl CompiledRouter {
                     &http.keepalive_timeout,
                 ),
                 keepalive_requests: http.keepalive_requests,
+                client_max_body_size: http.client_max_body_size,
                 tcp_nodelay: matches!(http.tcp_nodelay, ngxora_compile::ir::Switch::On),
                 allow_connect_method_proxying: matches!(
                     http.allow_connect_method_proxying,
@@ -584,6 +587,8 @@ struct SelectedRoute {
 pub struct ProxyContext {
     selected: Option<SelectedRoute>,
     plugin_state: PluginState,
+    client_max_body_size: Option<u64>,
+    received_body_bytes: u64,
 }
 
 fn header_editor_error(action: &str, name: &http::HeaderName, err: impl Display) -> PluginError {
@@ -745,12 +750,72 @@ fn normalized_peer_timeout(timeout: Option<std::time::Duration>) -> Option<std::
     }
 }
 
+fn body_too_large_error() -> Box<pingora::Error> {
+    pingora::Error::explain(
+        pingora::ErrorType::HTTPStatus(413),
+        "request body exceeds client_max_body_size",
+    )
+}
+
+fn content_length_limit_exceeded(
+    header: Option<&http::HeaderValue>,
+    limit: Option<u64>,
+) -> Option<bool> {
+    let limit = limit?;
+    let header = header?;
+    let size = header.to_str().ok()?.parse::<u64>().ok()?;
+    Some(size > limit)
+}
+
+fn update_received_body_bytes(
+    received: &mut u64,
+    body: Option<&Bytes>,
+    limit: Option<u64>,
+) -> Result<()> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let Some(body) = body else {
+        return Ok(());
+    };
+
+    let chunk_len = u64::try_from(body.len()).map_err(|_| body_too_large_error())?;
+    let next = received
+        .checked_add(chunk_len)
+        .ok_or_else(body_too_large_error)?;
+    if next > limit {
+        return Err(body_too_large_error());
+    }
+
+    *received = next;
+    Ok(())
+}
+
 // Route-level timeout directives are mapped directly to Pingora upstream peer
 // options, so they can change live with route snapshots.
 fn apply_upstream_timeouts(peer: &mut HttpPeer, timeouts: UpstreamTimeouts) {
     peer.options.connection_timeout = normalized_peer_timeout(timeouts.connect);
     peer.options.read_timeout = normalized_peer_timeout(timeouts.read);
     peer.options.write_timeout = normalized_peer_timeout(timeouts.write);
+}
+
+// Content-Length is only a fast path. Chunked and h2 bodies are enforced later
+// in request_body_filter while the downstream body stream is consumed.
+async fn restrict_client_max_body_size(
+    session: &mut Session,
+    ctx: &mut ProxyContext,
+) -> Result<bool> {
+    if content_length_limit_exceeded(
+        session.get_header(http::header::CONTENT_LENGTH),
+        ctx.client_max_body_size,
+    ) == Some(true)
+    {
+        session.set_keepalive(None);
+        session.respond_error(413).await?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 // Plugins can short-circuit the request path with a local response, but that
@@ -826,6 +891,12 @@ impl ProxyHttp for DynamicProxy {
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         let snapshot = self.state.snapshot();
         session.set_keepalive(snapshot.router.http_options.downstream_keepalive_timeout);
+        ctx.client_max_body_size = snapshot.router.http_options.client_max_body_size;
+        ctx.received_body_bytes = 0;
+
+        if restrict_client_max_body_size(session, ctx).await? {
+            return Ok(true);
+        }
 
         let Some((selected, host)) = select_runtime_route(&snapshot, session)? else {
             ctx.selected = None;
@@ -857,6 +928,20 @@ impl ProxyHttp for DynamicProxy {
 
         ctx.selected = Some(selected);
         Ok(false)
+    }
+
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        update_received_body_bytes(
+            &mut ctx.received_body_bytes,
+            body.as_ref(),
+            ctx.client_max_body_size,
+        )
     }
 
     async fn upstream_request_filter(

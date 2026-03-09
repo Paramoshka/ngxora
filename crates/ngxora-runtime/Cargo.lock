@@ -1325,6 +1325,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "bytes",
  "http",
  "hyper-util",
  "ngxora-compile",

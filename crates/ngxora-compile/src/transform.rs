@@ -93,6 +93,9 @@ fn apply_http_directive(http: &mut Http, d: &Directive) -> Result<(), LowerErr> 
         consts::KEEPALIVE_REQUESTS => {
             http.keepalive_requests = Some(parse_keepalive_requests(&d.args)?);
         }
+        consts::CLIENT_MAX_BODY_SIZE => {
+            http.client_max_body_size = parse_client_max_body_size(&d.args)?;
+        }
         consts::TCP_NODELAY => http.tcp_nodelay = get_directive_switch(d)?,
         consts::ALLOW_CONNECT_METHOD_PROXYING => {
             http.allow_connect_method_proxying = get_directive_switch(d)?
@@ -529,6 +532,21 @@ fn parse_keepalive_requests(args: &[String]) -> Result<u32, LowerErr> {
     }
 }
 
+fn parse_client_max_body_size(args: &[String]) -> Result<Option<u64>, LowerErr> {
+    match args {
+        [value] => {
+            let size = parse_size_literal(value, consts::CLIENT_MAX_BODY_SIZE)?;
+            if size == 0 { Ok(None) } else { Ok(Some(size)) }
+        }
+        [] => Err(LowerErr {
+            message: "client_max_body_size: expected 1 argument".into(),
+        }),
+        _ => Err(LowerErr {
+            message: "client_max_body_size: expected exactly 1 argument".into(),
+        }),
+    }
+}
+
 fn parse_single_duration_directive(
     args: &[String],
     directive: &str,
@@ -621,6 +639,41 @@ fn parse_duration_literal(raw: &str, directive: &str) -> Result<std::time::Durat
         message: format!("{directive}: time value `{raw}` is too large"),
     })?;
     Ok(std::time::Duration::from_millis(total_millis))
+}
+
+fn parse_size_literal(raw: &str, directive: &str) -> Result<u64, LowerErr> {
+    if raw.is_empty() {
+        return Err(LowerErr {
+            message: format!("{directive}: invalid size value `{raw}`"),
+        });
+    }
+
+    let digits_len = raw.bytes().take_while(|byte| byte.is_ascii_digit()).count();
+    if digits_len == 0 {
+        return Err(LowerErr {
+            message: format!("{directive}: invalid size value `{raw}`"),
+        });
+    }
+
+    let value = raw[..digits_len].parse::<u64>().map_err(|_| LowerErr {
+        message: format!("{directive}: invalid size value `{raw}`"),
+    })?;
+    let suffix = &raw[digits_len..];
+    let multiplier = match suffix {
+        "" => 1u64,
+        "k" | "K" => 1024,
+        "m" | "M" => 1024 * 1024,
+        "g" | "G" => 1024 * 1024 * 1024,
+        _ => {
+            return Err(LowerErr {
+                message: format!("{directive}: unsupported size unit `{suffix}` in `{raw}`"),
+            });
+        }
+    };
+
+    value.checked_mul(multiplier).ok_or_else(|| LowerErr {
+        message: format!("{directive}: size value `{raw}` is too large"),
+    })
 }
 
 fn parse_listen_directives(args: &[String]) -> Result<Listen, LowerErr> {

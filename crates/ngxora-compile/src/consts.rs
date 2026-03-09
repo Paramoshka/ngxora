@@ -10,6 +10,7 @@ pub const SERVER_NAME: &str = "server_name";
 pub const TCP_NODELAY: &str = "tcp_nodelay";
 pub const KEEPALIVE_TIMEOUT: &str = "keepalive_timeout";
 pub const KEEPALIVE_REQUESTS: &str = "keepalive_requests";
+pub const CLIENT_MAX_BODY_SIZE: &str = "client_max_body_size";
 pub const ALLOW_CONNECT_METHOD_PROXYING: &str = "allow_connect_method_proxying";
 pub const H2C: &str = "h2c";
 pub const HTTP2: &str = "http2";

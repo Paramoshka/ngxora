@@ -1,8 +1,9 @@
 use super::{
     CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter, RouteTarget, ServerRoutes,
-    apply_upstream_timeouts, downstream_keepalive_timeout_secs, select_route_target,
-    validate_sni_host_consistency,
+    apply_upstream_timeouts, content_length_limit_exceeded, downstream_keepalive_timeout_secs,
+    select_route_target, update_received_body_bytes, validate_sni_host_consistency,
 };
+use bytes::Bytes;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, Server,
     UpstreamTimeouts,
@@ -230,6 +231,61 @@ fn compiled_router_parses_proxy_timeouts() {
             write: Some(Duration::from_secs(20)),
         }
     );
+}
+
+#[test]
+fn compiled_router_maps_client_max_body_size_into_runtime_options() {
+    let mut http = Http::default();
+    http.client_max_body_size = Some(10 * 1024 * 1024);
+    http.servers.push(Server {
+        listens: vec![Listen {
+            default_server: true,
+            ..Listen::default()
+        }],
+        ..Server::default()
+    });
+
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+
+    assert_eq!(
+        router.http_options.client_max_body_size,
+        Some(10 * 1024 * 1024)
+    );
+}
+
+#[test]
+fn content_length_limit_exceeded_rejects_large_body() {
+    let header = http::HeaderValue::from_static("10485761");
+
+    assert_eq!(
+        content_length_limit_exceeded(Some(&header), Some(10 * 1024 * 1024)),
+        Some(true)
+    );
+}
+
+#[test]
+fn update_received_body_bytes_tracks_streamed_body() {
+    let mut received = 0;
+
+    update_received_body_bytes(&mut received, Some(&Bytes::from_static(b"hello")), Some(10))
+        .expect("first chunk fits");
+    update_received_body_bytes(&mut received, Some(&Bytes::from_static(b"rust")), Some(10))
+        .expect("second chunk fits");
+
+    assert_eq!(received, 9);
+}
+
+#[test]
+fn update_received_body_bytes_rejects_overflowing_stream() {
+    let mut received = 8;
+    let err = update_received_body_bytes(
+        &mut received,
+        Some(&Bytes::from_static(b"toolong")),
+        Some(10),
+    )
+    .expect_err("expected body limit to be enforced");
+
+    assert_eq!(err.etype(), &pingora::ErrorType::HTTPStatus(413));
 }
 
 #[test]

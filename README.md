@@ -51,6 +51,7 @@ docker run --rm \
 
 ```nginx
 http {
+    client_max_body_size 10m;
     keepalive_timeout 30s;
 
     server {
@@ -149,7 +150,6 @@ Current shape:
 - `plugins.cfg` + `make build-bin` for build-time plugin selection
 
 Near-term core roadmap:
-- `client_max_body_size`
 - `send_timeout`
 - `proxy_ssl_verify` and trusted upstream CA support
 - `upstream` blocks with multiple backends
