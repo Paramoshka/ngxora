@@ -603,6 +603,10 @@ struct RequestHeaderEditor<'a> {
 }
 
 impl HeaderMapMut for RequestHeaderEditor<'_> {
+    fn get(&self, name: &http::HeaderName) -> Option<&http::HeaderValue> {
+        self.inner.headers.get(name)
+    }
+
     fn add(
         &mut self,
         name: &http::HeaderName,
@@ -634,6 +638,10 @@ struct ResponseHeaderEditor<'a> {
 }
 
 impl HeaderMapMut for ResponseHeaderEditor<'_> {
+    fn get(&self, name: &http::HeaderName) -> Option<&http::HeaderValue> {
+        self.inner.headers.get(name)
+    }
+
     fn add(
         &mut self,
         name: &http::HeaderName,

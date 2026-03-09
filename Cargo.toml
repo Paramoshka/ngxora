@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["plugin-headers"]
 plugin-headers = ["ngxora-runtime/plugin-headers"]
+plugin-basic-auth = ["ngxora-runtime/plugin-basic-auth"]
 
 [dependencies]
 arc-swap = "1.8.2"

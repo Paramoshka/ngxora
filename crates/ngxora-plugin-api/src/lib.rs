@@ -65,6 +65,10 @@ impl Display for PluginBuildError {
 impl Error for PluginBuildError {}
 
 pub trait HeaderMapMut {
+    fn get(&self, _name: &HeaderName) -> Option<&HeaderValue> {
+        None
+    }
+
     fn add(&mut self, name: &HeaderName, value: HeaderValue) -> Result<(), PluginError>;
     fn set(&mut self, name: &HeaderName, value: HeaderValue) -> Result<(), PluginError>;
     fn remove(&mut self, name: &HeaderName);
