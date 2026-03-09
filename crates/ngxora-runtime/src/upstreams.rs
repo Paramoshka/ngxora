@@ -18,7 +18,7 @@ use pingora_proxy::{ProxyHttp, Session};
 use regex::{Regex, RegexBuilder};
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -570,6 +570,29 @@ fn select_server_routes<'a>(
         .or(vhosts.default.as_ref())
 }
 
+fn wildcard_listen_key(key: &ListenKey) -> ListenKey {
+    ListenKey {
+        addr: match key.addr {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        },
+        port: key.port,
+        ssl: key.ssl,
+    }
+}
+
+fn listener_routes<'a>(
+    router: &'a CompiledRouter,
+    listen_key: &ListenKey,
+) -> Option<&'a VirtualHostRoutes> {
+    router.listeners.get(listen_key).or_else(|| {
+        let wildcard = wildcard_listen_key(listen_key);
+        (wildcard != *listen_key)
+            .then_some(wildcard)
+            .and_then(|key| router.listeners.get(&key))
+    })
+}
+
 #[derive(Debug)]
 struct ResolvedLocation<'a> {
     location: &'a CompiledLocation,
@@ -676,7 +699,7 @@ fn resolve_route<'a>(
 ) -> Result<Option<ResolvedLocation<'a>>> {
     let listen_key = session_listen_key(session)?;
 
-    let Some(vhosts) = router.listeners.get(&listen_key) else {
+    let Some(vhosts) = listener_routes(router, &listen_key) else {
         return Ok(None);
     };
 
@@ -876,7 +899,9 @@ impl DynamicProxy {
     /// Retrieve routes for a specific key (Lock-free)
     pub fn get_routes(&self, key: &ListenKey) -> Option<Arc<VirtualHostRoutes>> {
         let snapshot = self.state.snapshot();
-        snapshot.router.listeners.get(key).cloned().map(Arc::new)
+        listener_routes(&snapshot.router, key)
+            .cloned()
+            .map(Arc::new)
     }
 
     /// Replace the entire routing table if listener topology stays compatible.

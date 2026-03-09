@@ -1,7 +1,8 @@
 use super::{
     CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter, RouteTarget, ServerRoutes,
-    apply_upstream_timeouts, content_length_limit_exceeded, downstream_keepalive_timeout_secs,
-    select_route_target, update_received_body_bytes, validate_sni_host_consistency,
+    VirtualHostRoutes, apply_upstream_timeouts, content_length_limit_exceeded,
+    downstream_keepalive_timeout_secs, listener_routes, select_route_target,
+    update_received_body_bytes, validate_sni_host_consistency,
 };
 use bytes::Bytes;
 use ngxora_compile::ir::{
@@ -11,6 +12,8 @@ use ngxora_compile::ir::{
 use ngxora_plugin_api::PluginSpec;
 use pingora::upstreams::peer::HttpPeer;
 use serde_json::json;
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 fn target(id: &str) -> RouteTarget {
@@ -122,6 +125,38 @@ fn named_location_is_not_selected_for_request_path() {
     };
 
     assert_eq!(selected_host(&routes, "/"), Some("prefix.example.com"));
+}
+
+#[test]
+fn wildcard_listener_routes_match_concrete_local_addr() {
+    let wildcard = super::ListenKey {
+        addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        port: 8080,
+        ssl: false,
+    };
+    let concrete = super::ListenKey {
+        addr: IpAddr::V4(Ipv4Addr::new(172, 18, 0, 10)),
+        port: 8080,
+        ssl: false,
+    };
+    let router = CompiledRouter {
+        listeners: HashMap::from([(
+            wildcard,
+            VirtualHostRoutes {
+                named: HashMap::new(),
+                default: Some(ServerRoutes {
+                    locations: vec![location(CompiledMatcher::Prefix("/".into()), "wildcard")],
+                }),
+            },
+        )]),
+        ..CompiledRouter::default()
+    };
+
+    let routes = listener_routes(&router, &concrete).expect("wildcard listener should match");
+    assert_eq!(
+        selected_host(routes.default.as_ref().expect("default routes"), "/"),
+        Some("wildcard.example.com")
+    );
 }
 
 #[test]
