@@ -86,6 +86,23 @@ Run proxy:
 cargo run -- examples/ngxora.conf
 ```
 
+## Upstream Policies
+
+For `upstream {}` blocks, `ngxora` currently supports:
+
+- `round_robin` - default policy
+- `random`
+
+Example:
+
+```nginx
+upstream app_pool {
+    policy random;
+    server 127.0.0.1:8080;
+    server 127.0.0.1:8081;
+}
+```
+
 ## Dynamic config
 
 The runtime is built around atomic snapshot apply:

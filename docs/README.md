@@ -72,12 +72,29 @@ location /api/ {
 }
 ```
 
+## Upstream Policies
+
+For `upstream {}` blocks, `ngxora` currently supports:
+
+- `round_robin` - default policy
+- `random`
+
+Example:
+
+```nginx
+upstream app_pool {
+    policy random;
+    server 127.0.0.1:8443;
+    server 127.0.0.1:9443;
+}
+```
+
 ## Reload Matrix
 
 | Option | Scope | gRPC ApplySnapshot | Notes |
 | --- | --- | --- | --- |
 | `location` / `proxy_pass` | route | Live | Applied through `RuntimeState` swap |
-| `upstream` blocks / backend sets | upstream group | Live | Rebuilds named backend pools and round-robin selection state |
+| `upstream` blocks / backend sets | upstream group | Live | Rebuilds named backend pools and current selection policy state (`round_robin`, `random`) |
 | `proxy_connect_timeout` / `proxy_read_timeout` / `proxy_write_timeout` | route | Live | Applied to `HttpPeer.options` per selected upstream route |
 | `server_name` | virtual host | Live | Host routing updates without restart |
 | `ssl_certificate` / `ssl_certificate_key` | TLS identity | Live | Works for existing TLS listeners through runtime SNI cert lookup |
