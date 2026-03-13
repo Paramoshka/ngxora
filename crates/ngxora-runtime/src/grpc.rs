@@ -8,8 +8,9 @@ use crate::upstreams::{
 };
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
-    LocationMatcher, PemSource, Server, Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion,
-    TlsVerifyClient, UpstreamTimeouts,
+    LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity,
+    TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock,
+    UpstreamSelectionPolicy, UpstreamServer, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use serde_json::Value;
@@ -38,7 +39,9 @@ use proto::{
     PemSource as ProtoPemSource, Plugin as ProtoPlugin, Regex as ProtoRegex, Route as ProtoRoute,
     RouteTimeouts as ProtoRouteTimeouts, TlsBinding as ProtoTlsBinding,
     TlsProtocolVersion as ProtoTlsProtocolVersion, TlsVerifyClient as ProtoTlsVerifyClient,
-    Upstream as ProtoUpstream, VirtualHost as ProtoVirtualHost,
+    Upstream as ProtoUpstream, UpstreamBackend as ProtoUpstreamBackend,
+    UpstreamGroup as ProtoUpstreamGroup,
+    UpstreamSelectionPolicy as ProtoUpstreamSelectionPolicy, VirtualHost as ProtoVirtualHost,
 };
 
 #[cfg(test)]
@@ -230,6 +233,7 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
     }
 
     Ok(Http {
+        upstreams: upstreams_from_proto(&snapshot.upstreams)?,
         servers,
         keepalive_timeout: keepalive_timeout_from_proto(
             options.downstream_keepalive_timeout_seconds,
@@ -240,6 +244,33 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
         allow_connect_method_proxying: switch_from_bool(options.allow_connect_method_proxying),
         h2c: switch_from_bool(options.h2c),
     })
+}
+
+fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<UpstreamBlock>, String> {
+    upstreams
+        .iter()
+        .map(|upstream| {
+            let name = upstream.name.trim();
+            if name.is_empty() {
+                return Err("upstream group name cannot be empty".into());
+            }
+
+            let servers = upstream
+                .backends
+                .iter()
+                .map(upstream_backend_from_proto)
+                .collect::<Result<Vec<_>, _>>()?;
+            if servers.is_empty() {
+                return Err(format!("upstream group `{name}` must define at least one backend"));
+            }
+
+            Ok(UpstreamBlock {
+                name: name.to_string(),
+                policy: upstream_selection_policy_from_proto(upstream.policy)?,
+                servers,
+            })
+        })
+        .collect()
 }
 
 fn listener_defs(listeners: &[ProtoListener]) -> Result<HashMap<String, ListenerDef>, String> {
@@ -317,9 +348,9 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
         }
     }
 
-    directives.push(LocationDirective::ProxyPass(upstream_url_from_proto(
-        upstream,
-    )?));
+    directives.push(LocationDirective::ProxyPass(
+        proxy_pass_target_from_proto(upstream)?,
+    ));
 
     Ok(Location {
         matcher,
@@ -329,6 +360,24 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
             .iter()
             .map(plugin_spec_from_proto)
             .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn upstream_backend_from_proto(backend: &ProtoUpstreamBackend) -> Result<UpstreamServer, String> {
+    if backend.host.trim().is_empty() {
+        return Err("upstream backend host cannot be empty".into());
+    }
+    if backend.port == 0 {
+        return Err(format!(
+            "upstream backend `{}` port must be greater than zero",
+            backend.host
+        ));
+    }
+
+    Ok(UpstreamServer {
+        host: backend.host.clone(),
+        port: u16::try_from(backend.port)
+            .map_err(|_| format!("upstream backend `{}` port is out of range", backend.host))?,
     })
 }
 
@@ -351,7 +400,26 @@ fn matcher_from_proto(value: Option<&ProtoMatch>) -> Result<LocationMatcher, Str
     }
 }
 
-fn upstream_url_from_proto(upstream: &ProtoUpstream) -> Result<Url, String> {
+fn proxy_pass_target_from_proto(upstream: &ProtoUpstream) -> Result<ProxyPassTarget, String> {
+    let tls = match upstream.scheme.as_str() {
+        "http" => false,
+        "https" => true,
+        _ => return Err(format!("unsupported upstream scheme `{}`", upstream.scheme)),
+    };
+
+    let has_direct = !upstream.host.trim().is_empty() || upstream.port != 0;
+    let has_group = !upstream.upstream_group.trim().is_empty();
+    if has_direct && has_group {
+        return Err("route upstream must set either host/port or upstream_group, not both".into());
+    }
+
+    if has_group {
+        return Ok(ProxyPassTarget::UpstreamGroup {
+            name: upstream.upstream_group.clone(),
+            tls,
+        });
+    }
+
     if upstream.host.trim().is_empty() {
         return Err("upstream host cannot be empty".into());
     }
@@ -359,12 +427,9 @@ fn upstream_url_from_proto(upstream: &ProtoUpstream) -> Result<Url, String> {
         return Err("upstream port must be greater than zero".into());
     }
 
-    let scheme = match upstream.scheme.as_str() {
-        "http" | "https" => upstream.scheme.as_str(),
-        _ => return Err(format!("unsupported upstream scheme `{}`", upstream.scheme)),
-    };
-    let raw = format!("{scheme}://{}:{}", upstream.host, upstream.port);
-    Url::parse(&raw).map_err(|err| format!("invalid upstream URL `{raw}`: {err}"))
+    let raw = format!("{}://{}:{}", upstream.scheme, upstream.host, upstream.port);
+    let url = Url::parse(&raw).map_err(|err| format!("invalid upstream URL `{raw}`: {err}"))?;
+    Ok(ProxyPassTarget::Url(url))
 }
 
 fn plugin_spec_from_proto(plugin: &ProtoPlugin) -> Result<PluginSpec, String> {
@@ -481,7 +546,31 @@ fn proto_snapshot_from_runtime(snapshot: &RuntimeSnapshot) -> Result<ProtoConfig
         )),
         listeners,
         virtual_hosts,
+        upstreams: proto_upstreams_from_runtime(&snapshot.router.upstreams),
     })
+}
+
+fn proto_upstreams_from_runtime(
+    upstreams: &HashMap<String, crate::upstreams::CompiledUpstreamGroup>,
+) -> Vec<ProtoUpstreamGroup> {
+    let mut groups = upstreams.values().cloned().collect::<Vec<_>>();
+    groups.sort_by(|left, right| left.name.cmp(&right.name));
+
+    groups
+        .into_iter()
+        .map(|group| ProtoUpstreamGroup {
+            name: group.name,
+            backends: group
+                .servers
+                .into_iter()
+                .map(|server| ProtoUpstreamBackend {
+                    host: server.host,
+                    port: u32::from(server.port),
+                })
+                .collect(),
+            policy: proto_upstream_selection_policy_from_runtime(group.policy) as i32,
+        })
+        .collect()
 }
 
 fn listener_names(keys: &[ListenKey]) -> BTreeMap<ListenKey, String> {
@@ -646,6 +735,13 @@ fn proto_upstream_from_runtime(target: &RouteTarget) -> ProtoUpstream {
             scheme: if *tls { "https" } else { "http" }.into(),
             host: host.clone(),
             port: u32::from(*port),
+            upstream_group: String::new(),
+        },
+        RouteTarget::UpstreamGroup { name, tls } => ProtoUpstream {
+            scheme: if *tls { "https" } else { "http" }.into(),
+            host: String::new(),
+            port: 0,
+            upstream_group: name.clone(),
         },
     }
 }
@@ -752,6 +848,25 @@ fn tls_verify_client_from_proto(value: i32) -> Result<TlsVerifyClient, String> {
         ProtoTlsVerifyClient::Unspecified | ProtoTlsVerifyClient::Off => Ok(TlsVerifyClient::Off),
         ProtoTlsVerifyClient::Optional => Ok(TlsVerifyClient::Optional),
         ProtoTlsVerifyClient::Required => Ok(TlsVerifyClient::Required),
+    }
+}
+
+fn upstream_selection_policy_from_proto(value: i32) -> Result<UpstreamSelectionPolicy, String> {
+    match ProtoUpstreamSelectionPolicy::try_from(value)
+        .unwrap_or(ProtoUpstreamSelectionPolicy::Unspecified)
+    {
+        ProtoUpstreamSelectionPolicy::Unspecified
+        | ProtoUpstreamSelectionPolicy::RoundRobin => Ok(UpstreamSelectionPolicy::RoundRobin),
+        ProtoUpstreamSelectionPolicy::Random => Ok(UpstreamSelectionPolicy::Random),
+    }
+}
+
+fn proto_upstream_selection_policy_from_runtime(
+    value: UpstreamSelectionPolicy,
+) -> ProtoUpstreamSelectionPolicy {
+    match value {
+        UpstreamSelectionPolicy::RoundRobin => ProtoUpstreamSelectionPolicy::RoundRobin,
+        UpstreamSelectionPolicy::Random => ProtoUpstreamSelectionPolicy::Random,
     }
 }
 

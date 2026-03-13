@@ -23,6 +23,7 @@ message ConfigSnapshot {
   HttpOptions http = 2;
   repeated Listener listeners = 3;
   repeated VirtualHost virtual_hosts = 4;
+  repeated UpstreamGroup upstreams = 5;
 }
 
 message HttpOptions {
@@ -108,6 +109,24 @@ message Upstream {
   string scheme = 1;
   string host = 2;
   uint32 port = 3;
+  string upstream_group = 4;
+}
+
+message UpstreamGroup {
+  string name = 1;
+  repeated UpstreamBackend backends = 2;
+  UpstreamSelectionPolicy policy = 3;
+}
+
+message UpstreamBackend {
+  string host = 1;
+  uint32 port = 2;
+}
+
+enum UpstreamSelectionPolicy {
+  UPSTREAM_SELECTION_POLICY_UNSPECIFIED = 0;
+  UPSTREAM_SELECTION_POLICY_ROUND_ROBIN = 1;
+  UPSTREAM_SELECTION_POLICY_RANDOM = 2;
 }
 
 enum TlsProtocolVersion {

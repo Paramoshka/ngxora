@@ -1398,6 +1398,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "bytes",
+ "futures",
  "http",
  "hyper-util",
  "ngxora-compile",

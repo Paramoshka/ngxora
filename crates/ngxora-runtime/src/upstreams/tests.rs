@@ -6,7 +6,8 @@ use super::{
 };
 use bytes::Bytes;
 use ngxora_compile::ir::{
-    Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, Server,
+    Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher,
+    ProxyPassTarget, Server, UpstreamBlock, UpstreamSelectionPolicy, UpstreamServer,
     UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
@@ -47,6 +48,7 @@ fn selected_host<'a>(routes: &'a ServerRoutes, path: &str) -> Option<&'a str> {
             target: RouteTarget::ProxyPass { host, .. },
             ..
         }) => Some(host.as_str()),
+        Some(_) => None,
         None => None,
     }
 }
@@ -211,7 +213,7 @@ fn compiled_router_rejects_invalid_location_regex() {
                     pattern: "(".into(),
                 },
                 directives: vec![LocationDirective::ProxyPass(
-                    "http://127.0.0.1:8080".parse().unwrap(),
+                    ProxyPassTarget::Url("http://127.0.0.1:8080".parse().unwrap()),
                 )],
                 plugins: Vec::new(),
             }],
@@ -238,7 +240,9 @@ fn compiled_router_parses_proxy_timeouts() {
                     LocationDirective::ProxyConnectTimeout(Duration::from_secs(2)),
                     LocationDirective::ProxyReadTimeout(Duration::from_secs(15)),
                     LocationDirective::ProxyWriteTimeout(Duration::from_secs(20)),
-                    LocationDirective::ProxyPass("http://127.0.0.1:8080".parse().unwrap()),
+                    LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                        "http://127.0.0.1:8080".parse().unwrap(),
+                    )),
                 ],
                 plugins: Vec::new(),
             }],
@@ -289,6 +293,109 @@ fn compiled_router_maps_client_max_body_size_into_runtime_options() {
 }
 
 #[test]
+fn compiled_router_maps_named_upstream_groups() {
+    let http = Http {
+        upstreams: vec![UpstreamBlock {
+            name: "backend".into(),
+            policy: UpstreamSelectionPolicy::RoundRobin,
+            servers: vec![
+                UpstreamServer {
+                    host: "127.0.0.1".into(),
+                    port: 8080,
+                },
+                UpstreamServer {
+                    host: "127.0.0.1".into(),
+                    port: 8081,
+                },
+            ],
+        }],
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/".into()),
+                directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    "http://backend".parse().unwrap(),
+                ))],
+                plugins: Vec::new(),
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+    let location = &router
+        .listeners
+        .values()
+        .next()
+        .expect("listener present")
+        .default
+        .as_ref()
+        .expect("default route present")
+        .locations[0];
+
+    assert_eq!(
+        location.target,
+        RouteTarget::UpstreamGroup {
+            name: "backend".into(),
+            tls: false,
+        }
+    );
+}
+
+#[test]
+fn runtime_upstream_group_round_robins_backends() {
+    let group = super::RuntimeUpstreamGroup::from_compiled(&super::CompiledUpstreamGroup {
+        name: "backend".into(),
+        policy: UpstreamSelectionPolicy::RoundRobin,
+        servers: vec![
+            super::CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8080,
+            },
+            super::CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8081,
+            },
+        ],
+    })
+    .expect("runtime group builds");
+
+    let first = group.select(b"").expect("first backend");
+    let second = group.select(b"").expect("second backend");
+    let third = group.select(b"").expect("third backend");
+
+    assert_eq!(first.port, 8080);
+    assert_eq!(second.port, 8081);
+    assert_eq!(third.port, 8080);
+}
+
+#[test]
+fn runtime_upstream_group_random_selects_configured_backend() {
+    let group = super::RuntimeUpstreamGroup::from_compiled(&super::CompiledUpstreamGroup {
+        name: "backend".into(),
+        policy: UpstreamSelectionPolicy::Random,
+        servers: vec![
+            super::CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8080,
+            },
+            super::CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8081,
+            },
+        ],
+    })
+    .expect("runtime group builds");
+
+    let selected = group.select(b"").expect("selected backend");
+    assert!(matches!(selected.port, 8080 | 8081));
+}
+
+#[test]
 fn content_length_limit_exceeded_rejects_large_body() {
     let header = http::HeaderValue::from_static("10485761");
 
@@ -334,7 +441,7 @@ fn compiled_router_preserves_location_plugins() {
             locations: vec![Location {
                 matcher: LocationMatcher::Prefix("/".into()),
                 directives: vec![LocationDirective::ProxyPass(
-                    "http://127.0.0.1:8080".parse().unwrap(),
+                    ProxyPassTarget::Url("http://127.0.0.1:8080".parse().unwrap()),
                 )],
                 plugins: vec![PluginSpec {
                     name: "headers".into(),

@@ -3,14 +3,13 @@ use crate::control::{ConfigSnapshot, RuntimeState};
 use crate::upstreams::{CompiledMatcher, CompiledRouter, ListenKey, RouteTarget};
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
-    Server, Switch, TlsIdentity,
+    ProxyPassTarget, Server, Switch, TlsIdentity, UpstreamBlock, UpstreamSelectionPolicy,
+    UpstreamServer,
 };
 use ngxora_plugin_api::PluginSpec;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
-use url::Url;
-
 #[test]
 fn proto_snapshot_converts_into_runtime_router() {
     let snapshot = proto::ConfigSnapshot {
@@ -32,6 +31,20 @@ fn proto_snapshot_converts_into_runtime_router() {
             http2_only: false,
             tls_options: None,
         }],
+        upstreams: vec![proto::UpstreamGroup {
+            name: "backend-pool".into(),
+            backends: vec![
+                proto::UpstreamBackend {
+                    host: "backend-1.internal".into(),
+                    port: 8080,
+                },
+                proto::UpstreamBackend {
+                    host: "backend-2.internal".into(),
+                    port: 8081,
+                },
+            ],
+            policy: proto::UpstreamSelectionPolicy::Random as i32,
+        }],
         virtual_hosts: vec![proto::VirtualHost {
             listener: "edge".into(),
             server_names: vec!["example.com".into()],
@@ -42,9 +55,10 @@ fn proto_snapshot_converts_into_runtime_router() {
                     kind: Some(proto::r#match::Kind::Prefix("/api".into())),
                 }),
                 upstream: Some(proto::Upstream {
-                    scheme: "https".into(),
-                    host: "backend.internal".into(),
-                    port: 8443,
+                    scheme: "http".into(),
+                    host: String::new(),
+                    port: 0,
+                    upstream_group: "backend-pool".into(),
                 }),
                 timeouts: Some(proto::RouteTimeouts {
                     connect_timeout_ms: 1_000,
@@ -88,11 +102,9 @@ fn proto_snapshot_converts_into_runtime_router() {
     assert_eq!(route.matcher, CompiledMatcher::Prefix("/api".into()));
     assert_eq!(
         route.target,
-        RouteTarget::ProxyPass {
-            host: "backend.internal".into(),
-            port: 8443,
-            tls: true,
-            sni: "backend.internal".into(),
+        RouteTarget::UpstreamGroup {
+            name: "backend-pool".into(),
+            tls: false,
         }
     );
     assert_eq!(
@@ -103,6 +115,10 @@ fn proto_snapshot_converts_into_runtime_router() {
     assert_eq!(route.upstream_timeouts.write, Some(Duration::from_secs(3)));
     assert_eq!(route.plugins.len(), 1);
     assert_eq!(route.plugins[0].name, "headers");
+    assert_eq!(
+        runtime.router.upstreams["backend-pool"].policy,
+        UpstreamSelectionPolicy::Random
+    );
 }
 
 #[test]
@@ -144,13 +160,37 @@ fn runtime_snapshot_converts_back_to_proto() {
     assert_eq!(vhost.routes[0].plugins.len(), 1);
     assert_eq!(vhost.routes[0].plugins[0].name, "headers");
     assert_eq!(
-        vhost.routes[0].upstream.as_ref().expect("upstream").scheme,
-        "https"
+        vhost.routes[0]
+            .upstream
+            .as_ref()
+            .expect("upstream")
+            .upstream_group,
+        "backend-pool"
+    );
+    assert_eq!(proto.upstreams.len(), 1);
+    assert_eq!(proto.upstreams[0].backends.len(), 2);
+    assert_eq!(
+        proto.upstreams[0].policy,
+        proto::UpstreamSelectionPolicy::RoundRobin as i32
     );
 }
 
 fn router_with_tls_and_plugin() -> CompiledRouter {
     let http = Http {
+        upstreams: vec![UpstreamBlock {
+            name: "backend-pool".into(),
+            policy: UpstreamSelectionPolicy::RoundRobin,
+            servers: vec![
+                UpstreamServer {
+                    host: "backend-1.internal".into(),
+                    port: 8443,
+                },
+                UpstreamServer {
+                    host: "backend-2.internal".into(),
+                    port: 9443,
+                },
+            ],
+        }],
         servers: vec![Server {
             server_names: vec!["example.com".into()],
             locations: vec![Location {
@@ -159,9 +199,10 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                     LocationDirective::ProxyConnectTimeout(Duration::from_secs(1)),
                     LocationDirective::ProxyReadTimeout(Duration::from_secs(2)),
                     LocationDirective::ProxyWriteTimeout(Duration::from_secs(3)),
-                    LocationDirective::ProxyPass(
-                        Url::parse("https://backend.internal:8443").expect("valid url"),
-                    ),
+                    LocationDirective::ProxyPass(ProxyPassTarget::UpstreamGroup {
+                        name: "backend-pool".into(),
+                        tls: true,
+                    }),
                 ],
                 plugins: vec![PluginSpec {
                     name: "headers".into(),

@@ -13,6 +13,7 @@ plugin-basic-auth = ["ngxora-plugin-registry/plugin-basic-auth"]
 arc-swap = "1.8.2"
 async-trait = "0.1.89"
 bytes = "1"
+futures = "0.3"
 http = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 ngxora-compile = { path = "../ngxora-compile" }

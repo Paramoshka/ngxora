@@ -96,6 +96,7 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
             http2_only: false,
             tls_options: None,
         }],
+        upstreams: vec![],
         virtual_hosts: vec![VirtualHost {
             listener: cli.listener_name.clone(),
             server_names: vec![cli.server_name.clone()],
@@ -111,6 +112,7 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
                     scheme: cli.upstream_scheme.clone(),
                     host: cli.upstream_host.clone(),
                     port: cli.upstream_port,
+                    upstream_group: String::new(),
                 }),
                 timeouts: Some(RouteTimeouts {
                     connect_timeout_ms: 3_000,

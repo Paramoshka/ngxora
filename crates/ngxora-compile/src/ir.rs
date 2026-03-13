@@ -15,6 +15,7 @@ pub struct Ir {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Http {
+    pub upstreams: Vec<UpstreamBlock>,
     pub servers: Vec<Server>,
     pub keepalive_timeout: KeepaliveTimeout,
     pub keepalive_requests: Option<u32>,
@@ -27,6 +28,7 @@ pub struct Http {
 impl Default for Http {
     fn default() -> Self {
         Self {
+            upstreams: Vec::new(),
             servers: Vec::new(),
             keepalive_timeout: KeepaliveTimeout::default(),
             keepalive_requests: None,
@@ -63,6 +65,26 @@ pub struct Server {
     pub listens: Vec<Listen>,
     pub tls: Option<TlsIdentity>,
     pub tls_options: DownstreamTlsOptions,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UpstreamBlock {
+    pub name: String,
+    pub policy: UpstreamSelectionPolicy,
+    pub servers: Vec<UpstreamServer>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UpstreamServer {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+pub enum UpstreamSelectionPolicy {
+    #[default]
+    RoundRobin,
+    Random,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,12 +195,18 @@ pub enum LocationMatcher {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum LocationDirective {
-    ProxyPass(Url),
+    ProxyPass(ProxyPassTarget),
     ProxyConnectTimeout(Duration),
     ProxyReadTimeout(Duration),
     ProxyWriteTimeout(Duration),
     Root(String),
     TryFiles(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ProxyPassTarget {
+    Url(Url),
+    UpstreamGroup { name: String, tls: bool },
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

@@ -10,8 +10,9 @@ mod tests {
     use url::Url;
 
     use crate::ir::{
-        Ir, KeepaliveTimeout, LocationDirective, LocationMatcher, PemSource, Switch,
-        TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
+        Ir, KeepaliveTimeout, LocationDirective, LocationMatcher, PemSource, ProxyPassTarget,
+        Switch, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
+        UpstreamSelectionPolicy,
     };
 
     #[test]
@@ -64,7 +65,7 @@ http {
         assert_eq!(
             location.directives,
             vec![LocationDirective::ProxyPass(
-                Url::parse("http://127.0.0.1:8080").unwrap()
+                ProxyPassTarget::Url(Url::parse("http://127.0.0.1:8080").unwrap())
             )]
         );
     }
@@ -223,7 +224,9 @@ http {
                 LocationDirective::ProxyConnectTimeout(Duration::from_secs(3)),
                 LocationDirective::ProxyReadTimeout(Duration::from_secs(15)),
                 LocationDirective::ProxyWriteTimeout(Duration::from_secs(20)),
-                LocationDirective::ProxyPass(Url::parse("http://127.0.0.1:8080").unwrap()),
+                LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    Url::parse("http://127.0.0.1:8080").unwrap(),
+                )),
             ]
         );
     }
@@ -310,6 +313,74 @@ http {
                 }),
             }]
         );
+    }
+
+    #[test]
+    fn from_ast_parses_upstream_blocks() {
+        let input = r#"
+http {
+  upstream backend {
+    policy random;
+    server 127.0.0.1:8080;
+    server demo-gui:80;
+  }
+
+  server {
+    listen 8080;
+    location / {
+      proxy_pass http://backend;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        assert_eq!(http.upstreams.len(), 1);
+        assert_eq!(http.upstreams[0].name, "backend");
+        assert_eq!(http.upstreams[0].policy, UpstreamSelectionPolicy::Random);
+        assert_eq!(http.upstreams[0].servers[0].host, "127.0.0.1");
+        assert_eq!(http.upstreams[0].servers[0].port, 8080);
+        assert_eq!(http.upstreams[0].servers[1].host, "demo-gui");
+        assert_eq!(http.upstreams[0].servers[1].port, 80);
+        assert_eq!(
+            http.servers[0].locations[0].directives,
+            vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                Url::parse("http://backend").unwrap(),
+            ))]
+        );
+    }
+
+    #[test]
+    fn from_ast_rejects_invalid_upstream_server() {
+        let input = r#"
+http {
+  upstream backend {
+    server demo-gui;
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected upstream server to fail");
+
+        assert!(err.message.contains("upstream server: expected host:port"));
+    }
+
+    #[test]
+    fn from_ast_rejects_invalid_upstream_policy() {
+        let input = r#"
+http {
+  upstream backend {
+    policy least_conn;
+    server 127.0.0.1:8080;
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected upstream policy to fail");
+
+        assert!(err.message.contains("unsupported upstream selection policy"));
     }
 
     #[test]

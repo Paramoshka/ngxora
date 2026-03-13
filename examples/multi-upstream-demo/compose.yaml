@@ -1,0 +1,24 @@
+services:
+  ngxora:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./ngxora.conf:/etc/ngxora/ngxora.conf:ro
+    depends_on:
+      - backend-1
+      - backend-2
+
+  backend-1:
+    image: traefik/whoami
+    hostname: backend-1
+    ports:
+      - "8081:80"
+
+  backend-2:
+    image: traefik/whoami
+    hostname: backend-2
+    ports:
+      - "8082:80"

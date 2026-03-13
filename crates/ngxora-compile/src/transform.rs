@@ -9,8 +9,9 @@ use crate::{
     consts,
     ir::{
         Http, Ir, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher,
-        PemSource, Server, Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion,
-        TlsVerifyClient,
+        PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
+        TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamSelectionPolicy,
+        UpstreamServer,
     },
 };
 
@@ -74,13 +75,16 @@ fn lower_http(block: &Block) -> Result<Http, LowerErr> {
     for children_block in &block.children {
         match children_block {
             Node::Directive(directive) => apply_http_directive(&mut http, directive)?,
-            Node::Block(block) => match block_named(children_block, consts::SERVER) {
-                // fill up server block
-                Some(b) => {
-                    let server = lower_server(b)?;
+            Node::Block(block) => match block.name.as_str() {
+                consts::SERVER => {
+                    let server = lower_server(block)?;
                     http.servers.push(server);
                 }
-                None => {
+                consts::UPSTREAM => {
+                    let upstream = lower_upstream(block)?;
+                    http.upstreams.push(upstream);
+                }
+                _ => {
                     return Err(LowerErr {
                         message: format!("Unknown block name: {:?}", block.name),
                     });
@@ -141,6 +145,44 @@ fn lower_server(block: &Block) -> Result<Server, LowerErr> {
 
     validate_server(&server)?;
     Ok(server)
+}
+
+fn lower_upstream(block: &Block) -> Result<UpstreamBlock, LowerErr> {
+    let name = match block.args.as_slice() {
+        [name] if !name.trim().is_empty() => name.clone(),
+        [] => {
+            return Err(LowerErr {
+                message: "upstream block: expected upstream name".into(),
+            });
+        }
+        _ => {
+            return Err(LowerErr {
+                message: "upstream block: expected exactly 1 argument".into(),
+            });
+        }
+    };
+
+    let mut upstream = UpstreamBlock {
+        name,
+        policy: UpstreamSelectionPolicy::RoundRobin,
+        servers: Vec::new(),
+    };
+
+    for child in &block.children {
+        match child {
+            Node::Directive(directive) => apply_upstream_directive(&mut upstream, directive)?,
+            Node::Block(nested) => {
+                return Err(LowerErr {
+                    message: format!(
+                        "upstream block: nested blocks are not supported: {}",
+                        nested.name
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(upstream)
 }
 
 fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), LowerErr> {
@@ -244,6 +286,49 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
     Ok(())
 }
 
+fn apply_upstream_directive(
+    upstream: &mut UpstreamBlock,
+    directive: &Directive,
+) -> Result<(), LowerErr> {
+    match directive.name.as_str() {
+        consts::SERVER => {
+            upstream
+                .servers
+                .push(parse_upstream_server(&directive.args)?);
+        }
+        consts::POLICY => {
+            upstream.policy = parse_upstream_policy(&directive.args)?;
+        }
+        _ => {
+            return Err(LowerErr {
+                message: format!("unsupported upstream directive: {}", directive.name),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_upstream_policy(args: &[String]) -> Result<UpstreamSelectionPolicy, LowerErr> {
+    match args {
+        [value] => match value.as_str() {
+            "round_robin" => Ok(UpstreamSelectionPolicy::RoundRobin),
+            "random" => Ok(UpstreamSelectionPolicy::Random),
+            _ => Err(LowerErr {
+                message: format!(
+                    "policy: unsupported upstream selection policy `{value}`; expected round_robin|random"
+                ),
+            }),
+        },
+        [] => Err(LowerErr {
+            message: "policy: expected 1 argument".into(),
+        }),
+        _ => Err(LowerErr {
+            message: "policy: expected exactly 1 argument".into(),
+        }),
+    }
+}
+
 fn lower_location(block: &Block) -> Result<Location, LowerErr> {
     let matcher = parse_location_matcher(&block.args)?;
     let (directives, plugins) = parse_location_contents(&block.children)?;
@@ -301,6 +386,62 @@ fn parse_location_contents(
     }
 
     Ok((directives, plugins))
+}
+
+fn parse_upstream_server(args: &[String]) -> Result<UpstreamServer, LowerErr> {
+    let raw = match args {
+        [value] => value,
+        [] => {
+            return Err(LowerErr {
+                message: "upstream server: expected host:port".into(),
+            });
+        }
+        _ => {
+            return Err(LowerErr {
+                message: "upstream server: expected exactly 1 argument".into(),
+            });
+        }
+    };
+
+    let (host, port) = split_upstream_host_port(raw).ok_or_else(|| LowerErr {
+        message: format!("upstream server: expected host:port, got `{raw}`"),
+    })?;
+    if host.is_empty() {
+        return Err(LowerErr {
+            message: format!("upstream server: missing host in `{raw}`"),
+        });
+    }
+    let port = port.parse::<u16>().map_err(|_| LowerErr {
+        message: format!("upstream server: invalid port in `{raw}`"),
+    })?;
+
+    Ok(UpstreamServer {
+        host: host.to_string(),
+        port,
+    })
+}
+
+fn split_upstream_host_port(raw: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = raw.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = &rest[..end];
+        let port = rest[end + 1..].strip_prefix(':')?;
+        if host.is_empty() || port.is_empty() || port.contains(['/', '?', '#', '@']) {
+            return None;
+        }
+        return Some((host, port));
+    }
+
+    let (host, port) = raw.rsplit_once(':')?;
+    if host.is_empty()
+        || port.is_empty()
+        || host.contains(['/', '?', '#', '@'])
+        || port.contains(['/', '?', '#', '@', ':'])
+    {
+        return None;
+    }
+
+    Some((host, port))
 }
 
 fn parse_location_plugin_block(block: &Block) -> Result<PluginSpec, LowerErr> {
@@ -564,7 +705,7 @@ fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, 
                 let parsed_url = Url::parse(raw_url).map_err(|e| LowerErr {
                     message: format!("proxy_pass: invalid URL: {:?}", e),
                 })?;
-                Ok(LocationDirective::ProxyPass(parsed_url))
+                Ok(LocationDirective::ProxyPass(ProxyPassTarget::Url(parsed_url)))
             }
             [] => Err(LowerErr {
                 message: "proxy_pass: expected URL".into(),

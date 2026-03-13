@@ -2,10 +2,11 @@ use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState}
 use crate::server::DownstreamTlsInfo;
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::FutureExt;
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
-    LocationMatcher, PemSource, Server, TlsIdentity, TlsProtocolBounds, TlsVerifyClient,
-    UpstreamTimeouts,
+    LocationMatcher, PemSource, ProxyPassTarget, Server, TlsIdentity, TlsProtocolBounds,
+    TlsVerifyClient, UpstreamBlock, UpstreamSelectionPolicy, UpstreamServer, UpstreamTimeouts,
 };
 use ngxora_plugin_api::{
     HeaderMapMut, LocalResponse, PluginError, PluginFlow, PluginSpec, PluginState, RequestCtx,
@@ -13,12 +14,14 @@ use ngxora_plugin_api::{
 };
 use pingora::Result;
 use pingora::http::{RequestHeader, ResponseHeader};
+use pingora::lb::{Backend, Backends, LoadBalancer, discovery, selection};
+use pingora::protocols::l4::socket::SocketAddr as PingoraSocketAddr;
 use pingora::upstreams::peer::HttpPeer;
 use pingora_proxy::{ProxyHttp, Session};
 use regex::{Regex, RegexBuilder};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Display;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -49,6 +52,23 @@ pub enum RouteTarget {
         tls: bool,
         sni: String,
     },
+    UpstreamGroup {
+        name: String,
+        tls: bool,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CompiledUpstreamServer {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CompiledUpstreamGroup {
+    pub name: String,
+    pub policy: UpstreamSelectionPolicy,
+    pub servers: Vec<CompiledUpstreamServer>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -176,6 +196,7 @@ pub struct HttpRuntimeOptions {
 // CompiledRouter stores the Ir representation in an optimized form.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct CompiledRouter {
+    pub upstreams: HashMap<String, CompiledUpstreamGroup>,
     pub listeners: HashMap<ListenKey, VirtualHostRoutes>,
     pub listener_protocols: HashMap<ListenKey, ListenerProtocolConfig>,
     pub listener_tls: HashMap<ListenKey, ListenerTlsConfig>,
@@ -188,6 +209,7 @@ pub type CompliedRouter = CompiledRouter;
 impl CompiledRouter {
     pub fn from_http(http: &Http) -> Result<Self, String> {
         let mut router = Self {
+            upstreams: compile_upstreams(&http.upstreams)?,
             http_options: HttpRuntimeOptions {
                 downstream_keepalive_timeout: downstream_keepalive_timeout_secs(
                     &http.keepalive_timeout,
@@ -214,7 +236,7 @@ impl CompiledRouter {
 
     fn add_server(&mut self, server: &Server, next_route_id: &mut u64) -> Result<(), String> {
         let routes = ServerRoutes {
-            locations: compile_locations(&server.locations, next_route_id)?,
+            locations: compile_locations(&server.locations, &self.upstreams, next_route_id)?,
         };
 
         for listen in &server.listens {
@@ -310,6 +332,59 @@ impl CompiledRouter {
     }
 }
 
+fn normalize_upstream_name(name: &str) -> String {
+    name.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn compile_upstream_server(server: &UpstreamServer) -> Result<CompiledUpstreamServer, String> {
+    if server.host.trim().is_empty() {
+        return Err("upstream server host cannot be empty".into());
+    }
+    if server.port == 0 {
+        return Err(format!(
+            "upstream server `{}` port must be greater than zero",
+            server.host
+        ));
+    }
+
+    Ok(CompiledUpstreamServer {
+        host: server.host.clone(),
+        port: server.port,
+    })
+}
+
+fn compile_upstreams(
+    upstreams: &[UpstreamBlock],
+) -> Result<HashMap<String, CompiledUpstreamGroup>, String> {
+    let mut compiled = HashMap::with_capacity(upstreams.len());
+
+    for upstream in upstreams {
+        let name = normalize_upstream_name(&upstream.name);
+        if name.is_empty() {
+            return Err("upstream name cannot be empty".into());
+        }
+        if upstream.servers.is_empty() {
+            return Err(format!("upstream `{}` must define at least one server", upstream.name));
+        }
+
+        let group = CompiledUpstreamGroup {
+            name: upstream.name.clone(),
+            policy: upstream.policy,
+            servers: upstream
+                .servers
+                .iter()
+                .map(compile_upstream_server)
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+
+        if compiled.insert(name.clone(), group).is_some() {
+            return Err(format!("upstream `{}` is duplicated", upstream.name));
+        }
+    }
+
+    Ok(compiled)
+}
+
 impl From<&DownstreamTlsOptions> for ListenerTlsSettings {
     fn from(value: &DownstreamTlsOptions) -> Self {
         Self {
@@ -332,6 +407,34 @@ fn proxy_pass_sni(host: &str, tls: bool) -> String {
     }
 }
 
+fn proxy_pass_tls(scheme: &str) -> Option<bool> {
+    match scheme {
+        "http" => Some(false),
+        "https" => Some(true),
+        _ => None,
+    }
+}
+
+fn upstream_group_from_url<'a>(
+    url: &url::Url,
+    upstreams: &'a HashMap<String, CompiledUpstreamGroup>,
+) -> Option<&'a CompiledUpstreamGroup> {
+    if url.port().is_some() {
+        return None;
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+    {
+        return None;
+    }
+
+    let host = normalize_upstream_name(url.host_str()?);
+    upstreams.get(&host)
+}
+
 fn set_timeout_once(
     slot: &mut Option<std::time::Duration>,
     value: std::time::Duration,
@@ -344,33 +447,67 @@ fn set_timeout_once(
     Ok(())
 }
 
-fn route_target_from_directive(directive: &LocationDirective) -> Option<RouteTarget> {
+fn route_target_from_directive(
+    directive: &LocationDirective,
+    upstreams: &HashMap<String, CompiledUpstreamGroup>,
+) -> Result<Option<RouteTarget>, String> {
     match directive {
-        LocationDirective::ProxyPass(url) => {
-            let host = url.host_str()?.to_string();
-            let port = url.port_or_known_default()?;
-            let tls = match url.scheme() {
-                "http" => false,
-                "https" => true,
-                _ => return None,
+        LocationDirective::ProxyPass(ProxyPassTarget::Url(url)) => {
+            if let Some(group) = upstream_group_from_url(url, upstreams) {
+                let tls = proxy_pass_tls(url.scheme()).ok_or_else(|| {
+                    format!("unsupported proxy_pass scheme `{}`", url.scheme())
+                })?;
+                return Ok(Some(RouteTarget::UpstreamGroup {
+                    name: group.name.clone(),
+                    tls,
+                }));
+            }
+
+            let Some(host) = url.host_str().map(ToString::to_string) else {
+                return Ok(None);
+            };
+            let Some(port) = url.port_or_known_default() else {
+                return Ok(None);
+            };
+            let tls = match proxy_pass_tls(url.scheme()) {
+                Some(value) => value,
+                None => return Ok(None),
             };
 
-            Some(RouteTarget::ProxyPass {
+            Ok(Some(RouteTarget::ProxyPass {
                 sni: proxy_pass_sni(&host, tls),
                 host,
                 port,
                 tls,
-            })
+            }))
         }
-        _ => None,
+        LocationDirective::ProxyPass(ProxyPassTarget::UpstreamGroup { name, tls }) => {
+            let normalized = normalize_upstream_name(name);
+            let group = upstreams
+                .get(&normalized)
+                .ok_or_else(|| format!("proxy_pass references unknown upstream `{name}`"))?;
+            Ok(Some(RouteTarget::UpstreamGroup {
+                name: group.name.clone(),
+                tls: *tls,
+            }))
+        }
+        _ => Ok(None),
     }
 }
 
-fn route_target(location: &Location) -> Option<RouteTarget> {
+fn route_target(
+    location: &Location,
+    upstreams: &HashMap<String, CompiledUpstreamGroup>,
+) -> Result<Option<RouteTarget>, String> {
     location
         .directives
         .iter()
-        .find_map(route_target_from_directive)
+        .find_map(|directive| match route_target_from_directive(directive, upstreams) {
+            Ok(Some(target)) => Some(Ok(target)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .transpose()
 }
 
 fn compile_upstream_timeouts(location: &Location) -> Result<UpstreamTimeouts, String> {
@@ -396,9 +533,10 @@ fn compile_upstream_timeouts(location: &Location) -> Result<UpstreamTimeouts, St
 
 fn compile_location(
     location: &Location,
+    upstreams: &HashMap<String, CompiledUpstreamGroup>,
     next_route_id: &mut u64,
 ) -> Result<Option<CompiledLocation>, String> {
-    let Some(target) = route_target(location) else {
+    let Some(target) = route_target(location, upstreams)? else {
         return Ok(None);
     };
 
@@ -417,11 +555,12 @@ fn compile_location(
 // also happens here, so broken snapshots fail before they are applied.
 fn compile_locations(
     locations: &[Location],
+    upstreams: &HashMap<String, CompiledUpstreamGroup>,
     next_route_id: &mut u64,
 ) -> Result<Vec<CompiledLocation>, String> {
     locations
         .iter()
-        .map(|location| compile_location(location, next_route_id))
+        .map(|location| compile_location(location, upstreams, next_route_id))
         .filter_map(|result| match result {
             Ok(Some(location)) => Some(Ok(location)),
             Ok(None) => None,
@@ -599,9 +738,115 @@ struct ResolvedLocation<'a> {
     host: Option<String>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct SelectedPeer {
+    host: String,
+    port: u16,
+    tls: bool,
+    sni: String,
+}
+
+pub struct RuntimeUpstreamGroup {
+    selector: RuntimeUpstreamSelector,
+    max_iterations: usize,
+}
+
+enum RuntimeUpstreamSelector {
+    RoundRobin(LoadBalancer<selection::RoundRobin>),
+    Random(LoadBalancer<selection::Random>),
+}
+
+fn synthetic_backends(servers: &[CompiledUpstreamServer]) -> Result<BTreeSet<Backend>, String> {
+    servers
+        .iter()
+        .enumerate()
+        .map(|(index, server)| {
+            let mut ext = http::Extensions::new();
+            ext.insert(server.clone());
+
+            Ok(Backend {
+                addr: PingoraSocketAddr::Inet(synthetic_backend_addr(index)),
+                weight: 1,
+                ext,
+            })
+        })
+        .collect()
+}
+
+fn synthetic_backend_addr(index: usize) -> SocketAddr {
+    let index = u64::try_from(index).unwrap_or(u64::MAX);
+    let ip = Ipv6Addr::new(
+        0xfd00,
+        0,
+        0,
+        0,
+        ((index >> 32) & 0xffff) as u16,
+        ((index >> 16) & 0xffff) as u16,
+        (index & 0xffff) as u16,
+        1,
+    );
+
+    SocketAddr::V6(SocketAddrV6::new(ip, 1, 0, 0))
+}
+
+fn build_load_balancer<S>(backends: BTreeSet<Backend>) -> Result<LoadBalancer<S>, String>
+where
+    S: selection::BackendSelection + 'static,
+    S::Iter: selection::BackendIter,
+{
+    let discovery = discovery::Static::new(backends);
+    let backends = Backends::new(discovery);
+    let lb = LoadBalancer::from_backends(backends);
+    lb.update()
+        .now_or_never()
+        .ok_or_else(|| "static upstream update unexpectedly blocked".to_string())?
+        .map_err(|err| format!("failed to initialize upstream load balancer: {err}"))?;
+    Ok(lb)
+}
+
+impl RuntimeUpstreamSelector {
+    fn select(&self, key: &[u8], max_iterations: usize) -> Option<Backend> {
+        match self {
+            Self::RoundRobin(lb) => lb.select(key, max_iterations),
+            Self::Random(lb) => lb.select(key, max_iterations),
+        }
+    }
+}
+
+impl RuntimeUpstreamGroup {
+    pub(crate) fn from_compiled(group: &CompiledUpstreamGroup) -> Result<Self, String> {
+        if group.servers.is_empty() {
+            return Err(format!(
+                "upstream `{}` must define at least one server",
+                group.name
+            ));
+        }
+
+        let backends = synthetic_backends(&group.servers)?;
+        let selector = match group.policy {
+            UpstreamSelectionPolicy::RoundRobin => {
+                RuntimeUpstreamSelector::RoundRobin(build_load_balancer(backends)?)
+            }
+            UpstreamSelectionPolicy::Random => {
+                RuntimeUpstreamSelector::Random(build_load_balancer(backends)?)
+            }
+        };
+
+        Ok(Self {
+            selector,
+            max_iterations: group.servers.len(),
+        })
+    }
+
+    fn select(&self, key: &[u8]) -> Option<CompiledUpstreamServer> {
+        let backend = self.selector.select(key, self.max_iterations)?;
+        backend.ext.get::<CompiledUpstreamServer>().cloned()
+    }
+}
+
 #[derive(Clone)]
 struct SelectedRoute {
-    target: RouteTarget,
+    peer: SelectedPeer,
     upstream_timeouts: UpstreamTimeouts,
     plugins: ngxora_plugin_api::PluginChain,
 }
@@ -722,12 +967,52 @@ fn resolve_route<'a>(
 }
 
 impl SelectedRoute {
-    fn from_resolved(snapshot: &RuntimeSnapshot, resolved: &ResolvedLocation<'_>) -> Self {
-        Self {
-            target: resolved.location.target.clone(),
+    fn from_resolved(
+        snapshot: &RuntimeSnapshot,
+        resolved: &ResolvedLocation<'_>,
+    ) -> Result<Self> {
+        let peer = match &resolved.location.target {
+            RouteTarget::ProxyPass {
+                host,
+                port,
+                tls,
+                sni,
+            } => SelectedPeer {
+                host: host.clone(),
+                port: *port,
+                tls: *tls,
+                sni: sni.clone(),
+            },
+            RouteTarget::UpstreamGroup { name, tls } => {
+                let group = snapshot
+                    .upstream_group(name)
+                    .ok_or_else(|| {
+                        pingora::Error::explain(
+                            pingora::ErrorType::InternalError,
+                            format!("compiled upstream group `{name}` is missing at runtime"),
+                        )
+                    })?;
+                let backend = group.select(b"").ok_or_else(|| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::HTTPStatus(503),
+                        format!("upstream `{name}` has no available backends"),
+                    )
+                })?;
+
+                SelectedPeer {
+                    sni: proxy_pass_sni(&backend.host, *tls),
+                    host: backend.host,
+                    port: backend.port,
+                    tls: *tls,
+                }
+            }
+        };
+
+        Ok(Self {
+            peer,
             upstream_timeouts: resolved.location.upstream_timeouts,
             plugins: snapshot.plugin_chain(resolved.location.route_id),
-        }
+        })
     }
 }
 
@@ -739,10 +1024,7 @@ fn select_runtime_route(
         return Ok(None);
     };
 
-    Ok(Some((
-        SelectedRoute::from_resolved(snapshot, &resolved),
-        resolved.host,
-    )))
+    Ok(Some((SelectedRoute::from_resolved(snapshot, &resolved)?, resolved.host)))
 }
 
 fn respond_from_plugin_flow(flow: PluginFlow, stage: &str) -> Result<()> {
@@ -1064,18 +1346,12 @@ impl ProxyHttp for DynamicProxy {
             selected
         };
 
-        let peer = match &selected.target {
-            RouteTarget::ProxyPass {
-                host,
-                port,
-                tls,
-                sni,
-            } => {
-                let mut peer = HttpPeer::new((host.as_str(), *port), *tls, sni.clone());
-                apply_upstream_timeouts(&mut peer, selected.upstream_timeouts);
-                peer
-            }
-        };
+        let mut peer = HttpPeer::new(
+            (selected.peer.host.as_str(), selected.peer.port),
+            selected.peer.tls,
+            selected.peer.sni.clone(),
+        );
+        apply_upstream_timeouts(&mut peer, selected.upstream_timeouts);
 
         Ok(Box::new(peer))
     }

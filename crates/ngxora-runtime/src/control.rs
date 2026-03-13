@@ -1,6 +1,6 @@
 use crate::upstreams::{
-    CompiledRouter, ListenKey, ListenerProtocolConfig, ListenerTlsSettings, ServerRoutes,
-    VirtualHostRoutes,
+    CompiledRouter, ListenKey, ListenerProtocolConfig, ListenerTlsSettings, RuntimeUpstreamGroup,
+    ServerRoutes, VirtualHostRoutes,
 };
 use arc_swap::ArcSwap;
 use ngxora_plugin_api::{PluginChain, empty_plugin_chain};
@@ -43,6 +43,7 @@ pub struct RuntimeSnapshot {
     pub version: String,
     pub router: CompiledRouter,
     plugin_chains: HashMap<u64, PluginChain>,
+    upstream_groups: HashMap<String, Arc<RuntimeUpstreamGroup>>,
 }
 
 impl RuntimeSnapshot {
@@ -53,6 +54,11 @@ impl RuntimeSnapshot {
             .get(&route_id)
             .cloned()
             .unwrap_or_else(empty_plugin_chain)
+    }
+
+    pub fn upstream_group(&self, name: &str) -> Option<&Arc<RuntimeUpstreamGroup>> {
+        self.upstream_groups
+            .get(&name.trim_end_matches('.').to_ascii_lowercase())
     }
 }
 
@@ -161,12 +167,14 @@ impl RuntimeState {
         generation: u64,
     ) -> Result<RuntimeSnapshot, String> {
         let plugin_chains = build_plugin_chains(&router, registry)?;
+        let upstream_groups = build_runtime_upstream_groups(&router)?;
 
         Ok(RuntimeSnapshot {
             generation,
             version,
             router,
             plugin_chains,
+            upstream_groups,
         })
     }
 }
@@ -247,6 +255,19 @@ fn build_plugin_chains(
     }
 
     Ok(plugin_chains)
+}
+
+fn build_runtime_upstream_groups(
+    router: &CompiledRouter,
+) -> Result<HashMap<String, Arc<RuntimeUpstreamGroup>>, String> {
+    router
+        .upstreams
+        .iter()
+        .map(|(name, group)| {
+            RuntimeUpstreamGroup::from_compiled(group)
+                .map(|group| (name.clone(), Arc::new(group)))
+        })
+        .collect()
 }
 
 /// Walks every virtual host attached to a listener and collects route-level plugin chains.

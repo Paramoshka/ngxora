@@ -54,6 +54,12 @@ http {
     client_max_body_size 10m;
     keepalive_timeout 30s;
 
+    upstream app_pool {
+        # Optional: policy random;
+        server 127.0.0.1:8080;
+        server 127.0.0.1:8081;
+    }
+
     server {
         listen 8080 default_server;
         server_name localhost;
@@ -62,7 +68,7 @@ http {
             headers {
                 response_add X-Proxy ngxora;
             }
-            proxy_pass http://example.com;
+            proxy_pass http://app_pool;
         }
     }
 }
@@ -152,7 +158,6 @@ Current shape:
 Near-term core roadmap:
 - `send_timeout`
 - `proxy_ssl_verify` and trusted upstream CA support
-- `upstream` blocks with multiple backends
 
 Near-term plugin roadmap:
 - `cors`
