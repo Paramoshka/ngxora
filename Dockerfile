@@ -12,15 +12,14 @@ COPY . .
 RUN cargo build --release --bin ngxora ${CARGO_BUILD_FLAGS}
 RUN ./target/release/ngxora --check /app/examples/ngxora.conf
 
-FROM debian:bookworm-slim
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+# Keep the runtime layer free of apt/dpkg userland packages so image scans only
+# cover the libraries we actually need to run the proxy.
+FROM gcr.io/distroless/cc-debian12
 
 WORKDIR /etc/ngxora
 
 COPY --from=builder /app/target/release/ngxora /usr/local/bin/ngxora
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY examples/ngxora.conf /etc/ngxora/ngxora.conf
 
 EXPOSE 8080
