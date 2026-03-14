@@ -1,8 +1,9 @@
 use crate::upstreams::{
-    CompiledRouter, ListenKey, ListenerProtocolConfig, ListenerTlsSettings, RuntimeUpstreamGroup,
-    ServerRoutes, VirtualHostRoutes,
+    CompiledRouter, ListenKey, ListenerProtocolConfig, ListenerTlsSettings, RuntimeTrustedCa,
+    RuntimeUpstreamGroup, ServerRoutes, VirtualHostRoutes, build_runtime_trusted_cas,
 };
 use arc_swap::ArcSwap;
+use ngxora_compile::ir::PemSource;
 use ngxora_plugin_api::{PluginChain, empty_plugin_chain};
 use ngxora_plugin_registry::PluginRegistry;
 use std::collections::{BTreeMap, HashMap};
@@ -44,6 +45,7 @@ pub struct RuntimeSnapshot {
     pub router: CompiledRouter,
     plugin_chains: HashMap<u64, PluginChain>,
     upstream_groups: HashMap<String, Arc<RuntimeUpstreamGroup>>,
+    trusted_cas: HashMap<PemSource, RuntimeTrustedCa>,
 }
 
 impl RuntimeSnapshot {
@@ -59,6 +61,10 @@ impl RuntimeSnapshot {
     pub fn upstream_group(&self, name: &str) -> Option<&Arc<RuntimeUpstreamGroup>> {
         self.upstream_groups
             .get(&name.trim_end_matches('.').to_ascii_lowercase())
+    }
+
+    pub fn trusted_ca(&self, source: &PemSource) -> Option<RuntimeTrustedCa> {
+        self.trusted_cas.get(source).cloned()
     }
 }
 
@@ -168,6 +174,7 @@ impl RuntimeState {
     ) -> Result<RuntimeSnapshot, String> {
         let plugin_chains = build_plugin_chains(&router, registry)?;
         let upstream_groups = build_runtime_upstream_groups(&router)?;
+        let trusted_cas = build_runtime_trusted_cas(&router)?;
 
         Ok(RuntimeSnapshot {
             generation,
@@ -175,6 +182,7 @@ impl RuntimeState {
             router,
             plugin_chains,
             upstream_groups,
+            trusted_cas,
         })
     }
 }

@@ -119,6 +119,7 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
                     read_timeout_ms: 15_000,
                     write_timeout_ms: 15_000,
                 }),
+                tls_options: None,
                 plugins: vec![Plugin {
                     name: "headers".into(),
                     json_config: r#"{"response":{"add":[["x-proxy","ngxora"]]}}"#.into(),

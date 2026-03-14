@@ -102,7 +102,7 @@ impl Default for TlsIdentity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PemSource {
     Path(PathBuf),
     InlinePem(String),
@@ -181,6 +181,12 @@ pub struct UpstreamTimeouts {
     pub write: Option<Duration>,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+pub struct UpstreamSslOptions {
+    pub verify_cert: Switch,
+    pub trusted_certificate: Option<PemSource>,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum LocationMatcher {
     Prefix(String), // `location /api/ {}`
@@ -199,6 +205,8 @@ pub enum LocationDirective {
     ProxyConnectTimeout(Duration),
     ProxyReadTimeout(Duration),
     ProxyWriteTimeout(Duration),
+    ProxySslVerify(Switch),
+    ProxySslTrustedCertificate(PemSource),
     Root(String),
     TryFiles(String),
 }
@@ -213,4 +221,10 @@ pub enum ProxyPassTarget {
 pub enum Switch {
     On,
     Off,
+}
+
+impl Default for Switch {
+    fn default() -> Self {
+        Switch::On
+    }
 }

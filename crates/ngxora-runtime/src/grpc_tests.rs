@@ -10,6 +10,30 @@ use ngxora_plugin_api::PluginSpec;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
+
+const TRUSTED_UPSTREAM_CA_PATH: &str = "/etc/ngxora/upstreams/ca.pem";
+const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIDXTCCAkWgAwIBAgIJAOIvDiVb18eVMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
+BAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX
+aWRnaXRzIFB0eSBMdGQwHhcNMTYwODE0MTY1NjExWhcNMjYwODEyMTY1NjExWjBF
+MQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50
+ZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
+CgKCAQEArVHWFn52Lbl1l59exduZntVSZyDYpzDND+S2LUcO6fRBWhV/1Kzox+2G
+ZptbuMGmfI3iAnb0CFT4uC3kBkQQlXonGATSVyaFTFR+jq/lc0SP+9Bd7SBXieIV
+eIXlY1TvlwIvj3Ntw9zX+scTA4SXxH6M0rKv9gTOub2vCMSHeF16X8DQr4XsZuQr
+7Cp7j1I4aqOJyap5JTl5ijmG8cnu0n+8UcRlBzy99dLWJG0AfI3VRJdWpGTNVZ92
+aFff3RpK3F/WI2gp3qV1ynRAKuvmncGC3LDvYfcc2dgsc1N6Ffq8GIrkgRob6eBc
+klDHp1d023Lwre+VaVDSo1//Y72UFwIDAQABo1AwTjAdBgNVHQ4EFgQUbNOlA6sN
+XyzJjYqciKeId7g3/ZowHwYDVR0jBBgwFoAUbNOlA6sNXyzJjYqciKeId7g3/Zow
+DAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVVaR5QWLZIRR4Dw6TSBn
+BQiLpBSXN6oAxdDw6n4PtwW6CzydaA+creiK6LfwEsiifUfQe9f+T+TBSpdIYtMv
+Z2H2tjlFX8VrjUFvPrvn5c28CuLI0foBgY8XGSkR2YMYzWw2jPEq3Th/KM5Catn3
+AFm3bGKWMtGPR4v+90chEN0jzaAmJYRrVUh9vea27bOCn31Nse6XXQPmSI6Gyncy
+OAPUsvPClF3IjeL1tmBotWqSGn1cYxLo+Lwjk22A9h6vjcNQRyZF2VLVvtwYrNU3
+mwJ6GCLsLHpwW/yjyvn8iEltnJvByM/eeRnfXV6WDObyiZsE/n6DxIRJodQzFqy9
+GA==
+-----END CERTIFICATE-----
+";
 #[test]
 fn proto_snapshot_converts_into_runtime_router() {
     let snapshot = proto::ConfigSnapshot {
@@ -65,6 +89,14 @@ fn proto_snapshot_converts_into_runtime_router() {
                     read_timeout_ms: 2_000,
                     write_timeout_ms: 3_000,
                 }),
+                tls_options: Some(proto::UpstreamTlsOptions {
+                    verify: proto::Switch::Off as i32,
+                    trusted_certificate: Some(proto::PemSource {
+                        source: Some(proto::pem_source::Source::Path(
+                            TRUSTED_UPSTREAM_CA_PATH.into(),
+                        )),
+                    }),
+                }),
                 plugins: vec![proto::Plugin {
                     name: "headers".into(),
                     json_config: r#"{"response":{"add":[["x-proxy","ngxora"]]}}"#.into(),
@@ -113,6 +145,11 @@ fn proto_snapshot_converts_into_runtime_router() {
     );
     assert_eq!(route.upstream_timeouts.read, Some(Duration::from_secs(2)));
     assert_eq!(route.upstream_timeouts.write, Some(Duration::from_secs(3)));
+    assert_eq!(route.upstream_ssl_options.verify_cert, Switch::Off);
+    assert_eq!(
+        route.upstream_ssl_options.trusted_certificate,
+        Some(PemSource::Path(TRUSTED_UPSTREAM_CA_PATH.into()))
+    );
     assert_eq!(route.plugins.len(), 1);
     assert_eq!(route.plugins[0].name, "headers");
     assert_eq!(
@@ -161,6 +198,24 @@ fn runtime_snapshot_converts_back_to_proto() {
     assert_eq!(vhost.routes[0].plugins[0].name, "headers");
     assert_eq!(
         vhost.routes[0]
+            .tls_options
+            .as_ref()
+            .expect("route tls options")
+            .verify,
+        proto::Switch::Off as i32
+    );
+    assert_eq!(
+        vhost.routes[0]
+            .tls_options
+            .as_ref()
+            .and_then(|options| options.trusted_certificate.as_ref())
+            .and_then(|source| source.source.as_ref()),
+        Some(&proto::pem_source::Source::InlinePem(
+            TEST_CA_PEM.into(),
+        ))
+    );
+    assert_eq!(
+        vhost.routes[0]
             .upstream
             .as_ref()
             .expect("upstream")
@@ -199,6 +254,10 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                     LocationDirective::ProxyConnectTimeout(Duration::from_secs(1)),
                     LocationDirective::ProxyReadTimeout(Duration::from_secs(2)),
                     LocationDirective::ProxyWriteTimeout(Duration::from_secs(3)),
+                    LocationDirective::ProxySslVerify(Switch::Off),
+                    LocationDirective::ProxySslTrustedCertificate(PemSource::InlinePem(
+                        TEST_CA_PEM.into(),
+                    )),
                     LocationDirective::ProxyPass(ProxyPassTarget::UpstreamGroup {
                         name: "backend-pool".into(),
                         tls: true,

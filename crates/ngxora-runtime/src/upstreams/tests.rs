@@ -1,14 +1,14 @@
 use super::{
     CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter, RouteTarget, ServerRoutes,
-    VirtualHostRoutes, apply_upstream_timeouts, content_length_limit_exceeded,
-    downstream_keepalive_timeout_secs, listener_routes, select_route_target,
-    update_received_body_bytes, validate_sni_host_consistency,
+    VirtualHostRoutes, apply_upstream_ssl_options, apply_upstream_timeouts,
+    content_length_limit_exceeded, downstream_keepalive_timeout_secs, listener_routes,
+    select_route_target, update_received_body_bytes, validate_sni_host_consistency,
 };
 use bytes::Bytes;
 use ngxora_compile::ir::{
-    Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher,
-    ProxyPassTarget, Server, UpstreamBlock, UpstreamSelectionPolicy, UpstreamServer,
-    UpstreamTimeouts,
+    Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
+    ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamSelectionPolicy, UpstreamServer,
+    UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use pingora::upstreams::peer::HttpPeer;
@@ -16,6 +16,30 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
+
+#[cfg(feature = "openssl")]
+const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIDXTCCAkWgAwIBAgIJAOIvDiVb18eVMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
+BAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX
+aWRnaXRzIFB0eSBMdGQwHhcNMTYwODE0MTY1NjExWhcNMjYwODEyMTY1NjExWjBF
+MQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50
+ZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
+CgKCAQEArVHWFn52Lbl1l59exduZntVSZyDYpzDND+S2LUcO6fRBWhV/1Kzox+2G
+ZptbuMGmfI3iAnb0CFT4uC3kBkQQlXonGATSVyaFTFR+jq/lc0SP+9Bd7SBXieIV
+eIXlY1TvlwIvj3Ntw9zX+scTA4SXxH6M0rKv9gTOub2vCMSHeF16X8DQr4XsZuQr
+7Cp7j1I4aqOJyap5JTl5ijmG8cnu0n+8UcRlBzy99dLWJG0AfI3VRJdWpGTNVZ92
+aFff3RpK3F/WI2gp3qV1ynRAKuvmncGC3LDvYfcc2dgsc1N6Ffq8GIrkgRob6eBc
+klDHp1d023Lwre+VaVDSo1//Y72UFwIDAQABo1AwTjAdBgNVHQ4EFgQUbNOlA6sN
+XyzJjYqciKeId7g3/ZowHwYDVR0jBBgwFoAUbNOlA6sNXyzJjYqciKeId7g3/Zow
+DAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVVaR5QWLZIRR4Dw6TSBn
+BQiLpBSXN6oAxdDw6n4PtwW6CzydaA+creiK6LfwEsiifUfQe9f+T+TBSpdIYtMv
+Z2H2tjlFX8VrjUFvPrvn5c28CuLI0foBgY8XGSkR2YMYzWw2jPEq3Th/KM5Catn3
+AFm3bGKWMtGPR4v+90chEN0jzaAmJYRrVUh9vea27bOCn31Nse6XXQPmSI6Gyncy
+OAPUsvPClF3IjeL1tmBotWqSGn1cYxLo+Lwjk22A9h6vjcNQRyZF2VLVvtwYrNU3
+mwJ6GCLsLHpwW/yjyvn8iEltnJvByM/eeRnfXV6WDObyiZsE/n6DxIRJodQzFqy9
+GA==
+-----END CERTIFICATE-----
+";
 
 fn target(id: &str) -> RouteTarget {
     RouteTarget::ProxyPass {
@@ -32,6 +56,7 @@ fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
         matcher,
         target: target(id),
         upstream_timeouts: UpstreamTimeouts::default(),
+        upstream_ssl_options: UpstreamSslOptions::default(),
         plugins: Vec::<PluginSpec>::new(),
     }
 }
@@ -270,6 +295,113 @@ fn compiled_router_parses_proxy_timeouts() {
             write: Some(Duration::from_secs(20)),
         }
     );
+}
+
+#[test]
+fn compiled_router_parses_proxy_ssl_options() {
+    let trusted_certificate = PemSource::Path("/etc/ssl/upstreams/ca.pem".into());
+    let http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/".into()),
+                directives: vec![
+                    LocationDirective::ProxySslVerify(Switch::Off),
+                    LocationDirective::ProxySslTrustedCertificate(trusted_certificate.clone()),
+                    LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                        "https://127.0.0.1:8443".parse().unwrap(),
+                    )),
+                ],
+                plugins: Vec::new(),
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+    let location = &router
+        .listeners
+        .values()
+        .next()
+        .expect("listener present")
+        .default
+        .as_ref()
+        .expect("default route present")
+        .locations[0];
+
+    assert_eq!(
+        location.upstream_ssl_options,
+        UpstreamSslOptions {
+            verify_cert: Switch::Off,
+            trusted_certificate: Some(trusted_certificate),
+        }
+    );
+}
+
+#[test]
+fn apply_upstream_ssl_options_disables_verification() {
+    let mut peer = HttpPeer::new(("127.0.0.1", 8443), true, String::new());
+
+    apply_upstream_ssl_options(
+        &mut peer,
+        &UpstreamSslOptions {
+            verify_cert: Switch::Off,
+            trusted_certificate: None,
+        },
+        None,
+    );
+
+    assert!(!peer.options.verify_cert);
+    assert!(!peer.options.verify_hostname);
+    assert!(peer.options.ca.is_none());
+}
+
+#[cfg(feature = "openssl")]
+#[test]
+fn apply_upstream_ssl_options_sets_trusted_ca() {
+    let source = PemSource::InlinePem(TEST_CA_PEM.into());
+    let http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/".into()),
+                directives: vec![
+                    LocationDirective::ProxySslTrustedCertificate(source.clone()),
+                    LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                        "https://127.0.0.1:8443".parse().unwrap(),
+                    )),
+                ],
+                plugins: Vec::new(),
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+    let trusted_cas = super::build_runtime_trusted_cas(&router).expect("trusted ca builds");
+    let trusted_ca = trusted_cas.get(&source).expect("trusted ca cached");
+    let mut peer = HttpPeer::new(("127.0.0.1", 8443), true, String::new());
+
+    apply_upstream_ssl_options(
+        &mut peer,
+        &UpstreamSslOptions {
+            verify_cert: Switch::On,
+            trusted_certificate: Some(source),
+        },
+        Some(trusted_ca),
+    );
+
+    assert!(peer.options.verify_cert);
+    assert!(peer.options.verify_hostname);
+    assert!(peer.options.ca.is_some());
 }
 
 #[test]

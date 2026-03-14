@@ -86,22 +86,7 @@ Run proxy:
 cargo run -- examples/ngxora.conf
 ```
 
-## Upstream Policies
-
-For `upstream {}` blocks, `ngxora` currently supports:
-
-- `round_robin` - default policy
-- `random`
-
-Example:
-
-```nginx
-upstream app_pool {
-    policy random;
-    server 127.0.0.1:8080;
-    server 127.0.0.1:8081;
-}
-```
+Supported directives, upstream policies, and built-in plugin config are documented in [Config Options](./docs/config-options.md).
 
 ## Dynamic config
 
@@ -169,12 +154,8 @@ Plugins are compiled in, not loaded through unstable runtime ABI tricks.
 Current shape:
 - plugin API crate
 - plugin registry with feature-gated registration
-- `headers` extension as the first simple plugin
+- built-in `headers` and `basic-auth` extensions
 - `plugins.cfg` + `make build-bin` for build-time plugin selection
-
-Near-term core roadmap:
-- `send_timeout`
-- `proxy_ssl_verify` and trusted upstream CA support
 
 Near-term plugin roadmap:
 - `cors`
@@ -186,7 +167,9 @@ Later plugin roadmap:
 - `cache`
 - `ext_authz`
 
-Text config can now attach the built-in `headers` plugin inside a `location` block:
+Text config syntax for built-in location plugins is documented in [Config Options](./docs/config-options.md).
+
+Example `headers` usage:
 
 ```nginx
 location /api/ {

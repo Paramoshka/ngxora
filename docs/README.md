@@ -4,6 +4,8 @@
 
 The table below describes `gRPC ApplySnapshot` behavior for the current runtime model.
 
+For supported directives, upstream policies, and built-in plugin syntax, see [Config Options](./config-options.md).
+
 For implementation discipline on new options and plugins, see [Feature Checklist](/home/ivan/projects/pet/ngxora/docs/feature-checklist.md).
 
 ## Downstream Config
@@ -48,47 +50,6 @@ http {
 }
 ```
 
-## Headers Plugin In Text Config
-
-The built-in `headers` plugin can be attached directly inside a `location` block.
-
-```nginx
-location /api/ {
-    headers {
-        request_add X-Env dev;
-        request_set X-Route api;
-        request_remove X-Debug;
-
-        upstream_request_add X-From-Proxy ngxora;
-        upstream_request_set X-Upstream-Route api;
-        upstream_request_remove X-Legacy;
-
-        response_add X-Proxy ngxora;
-        response_set Cache-Control no-store;
-        response_remove X-Powered-By;
-    }
-
-    proxy_pass http://127.0.0.1:8080;
-}
-```
-
-## Upstream Policies
-
-For `upstream {}` blocks, `ngxora` currently supports:
-
-- `round_robin` - default policy
-- `random`
-
-Example:
-
-```nginx
-upstream app_pool {
-    policy random;
-    server 127.0.0.1:8443;
-    server 127.0.0.1:9443;
-}
-```
-
 ## Reload Matrix
 
 | Option | Scope | gRPC ApplySnapshot | Notes |
@@ -96,6 +57,8 @@ upstream app_pool {
 | `location` / `proxy_pass` | route | Live | Applied through `RuntimeState` swap |
 | `upstream` blocks / backend sets | upstream group | Live | Rebuilds named backend pools and current selection policy state (`round_robin`, `random`) |
 | `proxy_connect_timeout` / `proxy_read_timeout` / `proxy_write_timeout` | route | Live | Applied to `HttpPeer.options` per selected upstream route |
+| `proxy_ssl_verify` | route | Live | Applied to upstream certificate and hostname verification flags per selected route |
+| `proxy_ssl_trusted_certificate` | route | Live | Custom upstream CA bundle is loaded per snapshot and attached to the selected upstream peer |
 | `server_name` | virtual host | Live | Host routing updates without restart |
 | `ssl_certificate` / `ssl_certificate_key` | TLS identity | Live | Works for existing TLS listeners through runtime SNI cert lookup |
 | plugin config | route | Live | Only if plugin code is already compiled into the binary |
@@ -119,6 +82,7 @@ upstream app_pool {
 
 - routing
 - upstream target selection
+- upstream TLS verification policy and trusted CA bundle
 - plugin chains
 - downstream request body limit
 - downstream keepalive timeout

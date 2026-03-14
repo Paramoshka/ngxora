@@ -723,6 +723,23 @@ fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, 
         consts::PROXY_WRITE_TIMEOUT => Ok(LocationDirective::ProxyWriteTimeout(
             parse_single_duration_directive(&directive.args, consts::PROXY_WRITE_TIMEOUT)?,
         )),
+        consts::PROXY_SSL_VERIFY => Ok(LocationDirective::ProxySslVerify(
+            get_directive_switch(directive)?,
+        )),
+        consts::PROXY_SSL_TRUSTED_CERTIFICATE => match directive.args.as_slice() {
+            [path] => {
+                let ps = PemSource::new(std::slice::from_ref(path), false).map_err(|_| LowerErr {
+                    message: "proxy_ssl_trusted_certificate: invalid certificate source".into(),
+                })?;
+                Ok(LocationDirective::ProxySslTrustedCertificate(ps))
+            }
+            [] => Err(LowerErr {
+                message: "proxy_ssl_trusted_certificate: expected 1 argument".into(),
+            }),
+            _ => Err(LowerErr {
+                message: "proxy_ssl_trusted_certificate: expected exactly 1 argument".into(),
+            }),
+        },
 
         _ => Err(LowerErr {
             message: format!("unknown directive in location: {}", directive.name),

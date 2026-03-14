@@ -5,8 +5,9 @@ use bytes::Bytes;
 use futures::FutureExt;
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
-    LocationMatcher, PemSource, ProxyPassTarget, Server, TlsIdentity, TlsProtocolBounds,
-    TlsVerifyClient, UpstreamBlock, UpstreamSelectionPolicy, UpstreamServer, UpstreamTimeouts,
+    LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
+    TlsVerifyClient, UpstreamBlock, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
+    UpstreamTimeouts,
 };
 use ngxora_plugin_api::{
     HeaderMapMut, LocalResponse, PluginError, PluginFlow, PluginSpec, PluginState, RequestCtx,
@@ -15,6 +16,7 @@ use ngxora_plugin_api::{
 use pingora::Result;
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::lb::{Backend, Backends, LoadBalancer, discovery, selection};
+use pingora::protocols::tls::CaType;
 use pingora::protocols::l4::socket::SocketAddr as PingoraSocketAddr;
 use pingora::upstreams::peer::HttpPeer;
 use pingora_proxy::{ProxyHttp, Session};
@@ -23,6 +25,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
+#[cfg(feature = "openssl")]
+use pingora::tls::x509::X509;
 
 #[cfg(test)]
 mod tests;
@@ -142,6 +146,7 @@ pub struct CompiledLocation {
     pub matcher: CompiledMatcher,
     pub target: RouteTarget,
     pub upstream_timeouts: UpstreamTimeouts,
+    pub upstream_ssl_options: UpstreamSslOptions,
     pub plugins: Vec<PluginSpec>,
 }
 
@@ -531,6 +536,24 @@ fn compile_upstream_timeouts(location: &Location) -> Result<UpstreamTimeouts, St
     Ok(timeouts)
 }
 
+fn compile_upstream_ssl_options(location: &Location) -> Result<UpstreamSslOptions, String> {
+    let mut options = UpstreamSslOptions::default();
+
+    for directive in &location.directives {
+        match directive {
+            LocationDirective::ProxySslVerify(switch) => {
+                options.verify_cert = *switch;
+            }
+            LocationDirective::ProxySslTrustedCertificate(pem_source) => {
+                options.trusted_certificate = Some(pem_source.clone());
+            }
+            _ => {}
+        }
+    }
+
+    Ok(options)
+}
+
 fn compile_location(
     location: &Location,
     upstreams: &HashMap<String, CompiledUpstreamGroup>,
@@ -545,6 +568,7 @@ fn compile_location(
         matcher: CompiledMatcher::try_from(&location.matcher)?,
         target,
         upstream_timeouts: compile_upstream_timeouts(location)?,
+        upstream_ssl_options: compile_upstream_ssl_options(location)?,
         plugins: location.plugins.clone(),
     };
     *next_route_id += 1;
@@ -746,6 +770,8 @@ struct SelectedPeer {
     sni: String,
 }
 
+pub(crate) type RuntimeTrustedCa = Arc<CaType>;
+
 pub struct RuntimeUpstreamGroup {
     selector: RuntimeUpstreamSelector,
     max_iterations: usize,
@@ -848,6 +874,8 @@ impl RuntimeUpstreamGroup {
 struct SelectedRoute {
     peer: SelectedPeer,
     upstream_timeouts: UpstreamTimeouts,
+    upstream_ssl_options: UpstreamSslOptions,
+    upstream_trusted_ca: Option<RuntimeTrustedCa>,
     plugins: ngxora_plugin_api::PluginChain,
 }
 
@@ -1011,6 +1039,21 @@ impl SelectedRoute {
         Ok(Self {
             peer,
             upstream_timeouts: resolved.location.upstream_timeouts,
+            upstream_ssl_options: resolved.location.upstream_ssl_options.clone(),
+            upstream_trusted_ca: resolved
+                .location
+                .upstream_ssl_options
+                .trusted_certificate
+                .as_ref()
+                .map(|source| {
+                    snapshot.trusted_ca(source).ok_or_else(|| {
+                        pingora::Error::explain(
+                            pingora::ErrorType::InternalError,
+                            "compiled trusted upstream CA is missing at runtime",
+                        )
+                    })
+                })
+                .transpose()?,
             plugins: snapshot.plugin_chain(resolved.location.route_id),
         })
     }
@@ -1110,6 +1153,92 @@ fn apply_upstream_timeouts(peer: &mut HttpPeer, timeouts: UpstreamTimeouts) {
     peer.options.connection_timeout = normalized_peer_timeout(timeouts.connect);
     peer.options.read_timeout = normalized_peer_timeout(timeouts.read);
     peer.options.write_timeout = normalized_peer_timeout(timeouts.write);
+}
+
+// Apply SSL options from location directives to Pingora peer options.
+fn apply_upstream_ssl_options(
+    peer: &mut HttpPeer,
+    options: &UpstreamSslOptions,
+    trusted_ca: Option<&RuntimeTrustedCa>,
+) {
+    match options.verify_cert {
+        Switch::On => {
+            peer.options.verify_cert = true;
+            peer.options.verify_hostname = true;
+        }
+        Switch::Off => {
+            peer.options.verify_cert = false;
+            peer.options.verify_hostname = false;
+        }
+    }
+
+    peer.options.ca = trusted_ca.cloned();
+}
+
+pub(crate) fn build_runtime_trusted_cas(
+    router: &CompiledRouter,
+) -> Result<HashMap<PemSource, RuntimeTrustedCa>, String> {
+    let mut trusted_cas = HashMap::new();
+
+    for routes in router.listeners.values() {
+        collect_trusted_cas_from_vhosts(routes, &mut trusted_cas)?;
+    }
+
+    Ok(trusted_cas)
+}
+
+fn collect_trusted_cas_from_vhosts(
+    routes: &VirtualHostRoutes,
+    trusted_cas: &mut HashMap<PemSource, RuntimeTrustedCa>,
+) -> Result<(), String> {
+    for server_routes in routes.named.values().chain(routes.default.iter()) {
+        collect_trusted_cas_from_server(server_routes, trusted_cas)?;
+    }
+
+    Ok(())
+}
+
+fn collect_trusted_cas_from_server(
+    routes: &ServerRoutes,
+    trusted_cas: &mut HashMap<PemSource, RuntimeTrustedCa>,
+) -> Result<(), String> {
+    for location in &routes.locations {
+        let Some(source) = location.upstream_ssl_options.trusted_certificate.as_ref() else {
+            continue;
+        };
+        if trusted_cas.contains_key(source) {
+            continue;
+        }
+
+        trusted_cas.insert(source.clone(), load_runtime_trusted_ca(source)?);
+    }
+
+    Ok(())
+}
+
+fn read_pem_source(source: &PemSource, label: &str) -> Result<Vec<u8>, String> {
+    match source {
+        PemSource::Path(path) => std::fs::read(path)
+            .map_err(|err| format!("failed to read {label} `{}`: {err}", path.display())),
+        PemSource::InlinePem(pem) => Ok(pem.as_bytes().to_vec()),
+    }
+}
+
+#[cfg(feature = "openssl")]
+fn load_runtime_trusted_ca(source: &PemSource) -> Result<RuntimeTrustedCa, String> {
+    let pem = read_pem_source(source, "proxy_ssl_trusted_certificate")?;
+    let certs = X509::stack_from_pem(&pem)
+        .map_err(|err| format!("failed to parse proxy_ssl_trusted_certificate: {err}"))?;
+    if certs.is_empty() {
+        return Err("proxy_ssl_trusted_certificate does not contain any certificates".into());
+    }
+
+    Ok(Arc::new(certs.into_boxed_slice()))
+}
+
+#[cfg(not(feature = "openssl"))]
+fn load_runtime_trusted_ca(_source: &PemSource) -> Result<RuntimeTrustedCa, String> {
+    Err("proxy_ssl_trusted_certificate requires build with feature `openssl`".into())
 }
 
 // Content-Length is only a fast path. Chunked and h2 bodies are enforced later
@@ -1352,6 +1481,11 @@ impl ProxyHttp for DynamicProxy {
             selected.peer.sni.clone(),
         );
         apply_upstream_timeouts(&mut peer, selected.upstream_timeouts);
+        apply_upstream_ssl_options(
+            &mut peer,
+            &selected.upstream_ssl_options,
+            selected.upstream_trusted_ca.as_ref(),
+        );
 
         Ok(Box::new(peer))
     }

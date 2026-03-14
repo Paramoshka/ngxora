@@ -232,6 +232,39 @@ http {
     }
 
     #[test]
+    fn from_ast_parses_proxy_ssl_options() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location /api/ {
+      proxy_ssl_verify off;
+      proxy_ssl_trusted_certificate /etc/ssl/upstreams/ca.pem;
+      proxy_pass https://127.0.0.1:8443;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let location = &http.servers[0].locations[0];
+        assert_eq!(
+            location.directives,
+            vec![
+                LocationDirective::ProxySslVerify(Switch::Off),
+                LocationDirective::ProxySslTrustedCertificate(PemSource::Path(PathBuf::from(
+                    "/etc/ssl/upstreams/ca.pem",
+                ))),
+                LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    Url::parse("https://127.0.0.1:8443").unwrap(),
+                )),
+            ]
+        );
+    }
+
+    #[test]
     fn from_ast_parses_client_max_body_size_off() {
         let input = r#"
 http {

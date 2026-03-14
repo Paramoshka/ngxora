@@ -77,12 +77,18 @@ message Route {
   Upstream upstream = 2;
   RouteTimeouts timeouts = 3;
   repeated Plugin plugins = 4;
+  UpstreamTlsOptions tls_options = 5;
 }
 
 message RouteTimeouts {
   uint64 connect_timeout_ms = 1;
   uint64 read_timeout_ms = 2;
   uint64 write_timeout_ms = 3;
+}
+
+message UpstreamTlsOptions {
+  Switch verify = 1;
+  PemSource trusted_certificate = 2;
 }
 
 message Plugin {
@@ -141,4 +147,10 @@ enum TlsVerifyClient {
   TLS_VERIFY_CLIENT_OFF = 1;
   TLS_VERIFY_CLIENT_OPTIONAL = 2;
   TLS_VERIFY_CLIENT_REQUIRED = 3;
+}
+
+enum Switch {
+  SWITCH_UNSPECIFIED = 0;
+  SWITCH_ON = 1;
+  SWITCH_OFF = 2;
 }

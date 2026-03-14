@@ -9,8 +9,8 @@ use crate::upstreams::{
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
     LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity,
-    TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock,
-    UpstreamSelectionPolicy, UpstreamServer, UpstreamTimeouts,
+    TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamSelectionPolicy,
+    UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use serde_json::Value;
@@ -37,10 +37,10 @@ use proto::{
     GetSnapshotRequest as ProtoGetSnapshotRequest, HttpOptions as ProtoHttpOptions,
     Listener as ProtoListener, ListenerTlsOptions as ProtoListenerTlsOptions, Match as ProtoMatch,
     PemSource as ProtoPemSource, Plugin as ProtoPlugin, Regex as ProtoRegex, Route as ProtoRoute,
-    RouteTimeouts as ProtoRouteTimeouts, TlsBinding as ProtoTlsBinding,
+    RouteTimeouts as ProtoRouteTimeouts, Switch as ProtoSwitch, TlsBinding as ProtoTlsBinding,
     TlsProtocolVersion as ProtoTlsProtocolVersion, TlsVerifyClient as ProtoTlsVerifyClient,
     Upstream as ProtoUpstream, UpstreamBackend as ProtoUpstreamBackend,
-    UpstreamGroup as ProtoUpstreamGroup,
+    UpstreamGroup as ProtoUpstreamGroup, UpstreamTlsOptions as ProtoUpstreamTlsOptions,
     UpstreamSelectionPolicy as ProtoUpstreamSelectionPolicy, VirtualHost as ProtoVirtualHost,
 };
 
@@ -334,7 +334,7 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
         .upstream
         .as_ref()
         .ok_or_else(|| "route upstream is required".to_string())?;
-    let mut directives = Vec::with_capacity(4);
+    let mut directives = Vec::with_capacity(6);
 
     if let Some(timeouts) = route.timeouts.as_ref() {
         if let Some(duration) = duration_from_millis(timeouts.connect_timeout_ms) {
@@ -345,6 +345,15 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
         }
         if let Some(duration) = duration_from_millis(timeouts.write_timeout_ms) {
             directives.push(LocationDirective::ProxyWriteTimeout(duration));
+        }
+    }
+
+    if let Some(tls_options) = upstream_tls_options_from_proto(route.tls_options.as_ref())? {
+        directives.push(LocationDirective::ProxySslVerify(tls_options.verify_cert));
+        if let Some(trusted_certificate) = tls_options.trusted_certificate {
+            directives.push(LocationDirective::ProxySslTrustedCertificate(
+                trusted_certificate,
+            ));
         }
     }
 
@@ -503,6 +512,25 @@ fn pem_source_from_proto(value: Option<&ProtoPemSource>, field: &str) -> Result<
         proto::pem_source::Source::Path(path) => Ok(PemSource::Path(path.into())),
         proto::pem_source::Source::InlinePem(pem) => Ok(PemSource::InlinePem(pem.clone())),
     }
+}
+
+fn upstream_tls_options_from_proto(
+    value: Option<&ProtoUpstreamTlsOptions>,
+) -> Result<Option<UpstreamSslOptions>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    Ok(Some(UpstreamSslOptions {
+        verify_cert: switch_from_proto(value.verify),
+        trusted_certificate: value
+            .trusted_certificate
+            .as_ref()
+            .map(|source| {
+                pem_source_from_proto(Some(source), "route upstream trusted certificate")
+            })
+            .transpose()?,
+    }))
 }
 
 fn proto_snapshot_from_runtime(snapshot: &RuntimeSnapshot) -> Result<ProtoConfigSnapshot, String> {
@@ -709,6 +737,9 @@ fn proto_route_from_runtime(route: &CompiledLocation) -> Result<ProtoRoute, Stri
             .iter()
             .map(proto_plugin_from_runtime)
             .collect::<Result<Vec<_>, _>>()?,
+        tls_options: Some(proto_upstream_tls_options_from_runtime(
+            &route.upstream_ssl_options,
+        )),
     })
 }
 
@@ -751,6 +782,16 @@ fn proto_timeouts_from_runtime(timeouts: &UpstreamTimeouts) -> ProtoRouteTimeout
         connect_timeout_ms: duration_to_millis(timeouts.connect),
         read_timeout_ms: duration_to_millis(timeouts.read),
         write_timeout_ms: duration_to_millis(timeouts.write),
+    }
+}
+
+fn proto_upstream_tls_options_from_runtime(value: &UpstreamSslOptions) -> ProtoUpstreamTlsOptions {
+    ProtoUpstreamTlsOptions {
+        verify: proto_switch_from_runtime(value.verify_cert) as i32,
+        trusted_certificate: value
+            .trusted_certificate
+            .as_ref()
+            .map(proto_pem_source_from_runtime),
     }
 }
 
@@ -851,6 +892,13 @@ fn tls_verify_client_from_proto(value: i32) -> Result<TlsVerifyClient, String> {
     }
 }
 
+fn switch_from_proto(value: i32) -> Switch {
+    match ProtoSwitch::try_from(value).unwrap_or(ProtoSwitch::Unspecified) {
+        ProtoSwitch::Unspecified | ProtoSwitch::On => Switch::On,
+        ProtoSwitch::Off => Switch::Off,
+    }
+}
+
 fn upstream_selection_policy_from_proto(value: i32) -> Result<UpstreamSelectionPolicy, String> {
     match ProtoUpstreamSelectionPolicy::try_from(value)
         .unwrap_or(ProtoUpstreamSelectionPolicy::Unspecified)
@@ -893,6 +941,13 @@ fn duration_to_millis(duration: Option<Duration>) -> u64 {
 
 fn switch_from_bool(value: bool) -> Switch {
     if value { Switch::On } else { Switch::Off }
+}
+
+fn proto_switch_from_runtime(value: Switch) -> ProtoSwitch {
+    match value {
+        Switch::On => ProtoSwitch::On,
+        Switch::Off => ProtoSwitch::Off,
+    }
 }
 
 fn none_if_zero(value: u32) -> Option<u32> {

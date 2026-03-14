@@ -15,7 +15,7 @@ If a feature is meant to be supported from both file config and gRPC snapshots, 
 
 ## Core Option Checklist
 
-Use this for options like `send_timeout`, `client_max_body_size`, `proxy_ssl_verify`, or upstream behavior flags.
+Use this for options like `proxy_write_timeout`, `client_max_body_size`, `proxy_ssl_verify`, or upstream behavior flags.
 
 1. Add parser constants and syntax support in the text config layer.
 2. Add a typed field in IR, not a raw string.
