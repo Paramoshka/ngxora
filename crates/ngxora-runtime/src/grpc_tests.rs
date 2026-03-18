@@ -3,8 +3,8 @@ use crate::control::{ConfigSnapshot, RuntimeState};
 use crate::upstreams::{CompiledMatcher, CompiledRouter, ListenKey, RouteTarget};
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
-    ProxyPassTarget, Server, Switch, TlsIdentity, UpstreamBlock, UpstreamSelectionPolicy,
-    UpstreamServer,
+    ProxyPassTarget, Server, Switch, TlsIdentity, UpstreamBlock, UpstreamHealthCheck,
+    UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer,
 };
 use ngxora_plugin_api::PluginSpec;
 use serde_json::json;
@@ -68,6 +68,19 @@ fn proto_snapshot_converts_into_runtime_router() {
                 },
             ],
             policy: proto::UpstreamSelectionPolicy::Random as i32,
+            health_check: Some(proto::UpstreamHealthCheck {
+                kind: Some(proto::upstream_health_check::Kind::Http(
+                    proto::UpstreamHttpHealthCheck {
+                        host: "backend.internal".into(),
+                        path: "/readyz".into(),
+                        use_tls: true,
+                    },
+                )),
+                timeout_ms: 2_000,
+                interval_ms: 10_000,
+                consecutive_success: 2,
+                consecutive_failure: 3,
+            }),
         }],
         virtual_hosts: vec![proto::VirtualHost {
             listener: "edge".into(),
@@ -156,6 +169,20 @@ fn proto_snapshot_converts_into_runtime_router() {
         runtime.router.upstreams["backend-pool"].policy,
         UpstreamSelectionPolicy::Random
     );
+    assert_eq!(
+        runtime.router.upstreams["backend-pool"].health_check,
+        Some(crate::upstreams::CompiledHealthCheck {
+            check_type: crate::upstreams::HealthCheckType::Http {
+                host: "backend.internal".into(),
+                path: "/readyz".into(),
+                use_tls: true,
+            },
+            timeout: Duration::from_secs(2),
+            interval: Duration::from_secs(10),
+            consecutive_success: 2,
+            consecutive_failure: 3,
+        })
+    );
 }
 
 #[test]
@@ -228,6 +255,22 @@ fn runtime_snapshot_converts_back_to_proto() {
         proto.upstreams[0].policy,
         proto::UpstreamSelectionPolicy::RoundRobin as i32
     );
+    assert_eq!(
+        proto.upstreams[0]
+            .health_check
+            .as_ref()
+            .and_then(|health_check| health_check.kind.as_ref()),
+        Some(&proto::upstream_health_check::Kind::Tcp(
+            proto::UpstreamTcpHealthCheck {}
+        ))
+    );
+    assert_eq!(
+        proto.upstreams[0]
+            .health_check
+            .as_ref()
+            .map(|health_check| health_check.interval_ms),
+        Some(5_000)
+    );
 }
 
 fn router_with_tls_and_plugin() -> CompiledRouter {
@@ -245,6 +288,13 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                     port: 9443,
                 },
             ],
+            health_check: Some(UpstreamHealthCheck {
+                check_type: UpstreamHealthCheckType::Tcp,
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_secs(5),
+                consecutive_success: 1,
+                consecutive_failure: 2,
+            }),
         }],
         servers: vec![Server {
             server_names: vec!["example.com".into()],

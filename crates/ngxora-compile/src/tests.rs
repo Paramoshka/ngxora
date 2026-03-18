@@ -11,7 +11,7 @@ mod tests {
 
     use crate::ir::{
         Ir, KeepaliveTimeout, LocationDirective, LocationMatcher, PemSource, ProxyPassTarget,
-        Switch, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
+        Switch, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamHealthCheckType,
         UpstreamSelectionPolicy,
     };
 
@@ -377,12 +377,55 @@ http {
         assert_eq!(http.upstreams[0].servers[0].port, 8080);
         assert_eq!(http.upstreams[0].servers[1].host, "demo-gui");
         assert_eq!(http.upstreams[0].servers[1].port, 80);
+        assert!(http.upstreams[0].health_check.is_none());
         assert_eq!(
             http.servers[0].locations[0].directives,
             vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
                 Url::parse("http://backend").unwrap(),
             ))]
         );
+    }
+
+    #[test]
+    fn from_ast_parses_upstream_http_health_check_block() {
+        let input = r#"
+http {
+  upstream backend {
+    server 127.0.0.1:8080;
+
+    health_check {
+      type http;
+      host backend.internal;
+      path /readyz;
+      use_tls on;
+      timeout 2s;
+      interval 10s;
+      consecutive_success 2;
+      consecutive_failure 3;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let health_check = http.upstreams[0]
+            .health_check
+            .as_ref()
+            .expect("health check present");
+        assert_eq!(
+            health_check.check_type,
+            UpstreamHealthCheckType::Http {
+                host: "backend.internal".into(),
+                path: "/readyz".into(),
+                use_tls: true,
+            }
+        );
+        assert_eq!(health_check.timeout, Duration::from_secs(2));
+        assert_eq!(health_check.interval, Duration::from_secs(10));
+        assert_eq!(health_check.consecutive_success, 2);
+        assert_eq!(health_check.consecutive_failure, 3);
     }
 
     #[test]

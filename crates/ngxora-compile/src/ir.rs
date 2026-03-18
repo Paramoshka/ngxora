@@ -72,6 +72,7 @@ pub struct UpstreamBlock {
     pub name: String,
     pub policy: UpstreamSelectionPolicy,
     pub servers: Vec<UpstreamServer>,
+    pub health_check: Option<UpstreamHealthCheck>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -85,6 +86,25 @@ pub enum UpstreamSelectionPolicy {
     #[default]
     RoundRobin,
     Random,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum UpstreamHealthCheckType {
+    Tcp,
+    Http {
+        host: String,
+        path: String,
+        use_tls: bool,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UpstreamHealthCheck {
+    pub check_type: UpstreamHealthCheckType,
+    pub timeout: Duration,
+    pub interval: Duration,
+    pub consecutive_success: usize,
+    pub consecutive_failure: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -30,6 +30,17 @@ upstream app_pool {
     policy random;
     server 127.0.0.1:8080;
     server 127.0.0.1:8081;
+
+    health_check {
+        type http;
+        host app.internal;
+        path /readyz;
+        use_tls off;
+        timeout 1s;
+        interval 5s;
+        consecutive_success 1;
+        consecutive_failure 2;
+    }
 }
 ```
 
@@ -39,11 +50,42 @@ Supported directives:
   Adds a static backend to the upstream group.
 - `policy round_robin|random;`
   Selects backend balancing policy. Default is `round_robin`.
+- `health_check { ... }`
+  Configures active backend health checks for the upstream group.
 
 Supported policies:
 
 - `round_robin` - default policy
 - `random`
+
+`health_check {}` directives:
+
+- `type tcp|http;`
+  Selects check protocol. Default is `tcp`.
+- `timeout <duration>;`
+  Per-check connect/read timeout. Default is `1s`.
+- `interval <duration>;`
+  Period between checks. Default is `5s`.
+- `consecutive_success <count>;`
+  Number of successful checks required to mark a backend healthy. Default is `1`.
+- `consecutive_failure <count>;`
+  Number of failed checks required to mark a backend unhealthy. Default is `1`.
+- `host <value>;`
+  Required for `type http;`. Used as HTTP `Host` header and TLS SNI when `use_tls on;`.
+  It does not select the backend address; backend connection still uses the `server <host>:<port>;` entries from the upstream pool.
+- `path <value>;`
+  HTTP check path. Default is `/`.
+- `use_tls on|off;`
+  Enables HTTPS health checks for `type http;`. Default is `off`.
+
+Notes:
+
+- `health_check` is configured per `upstream {}` block, not per `location {}`.
+- Runtime scheduling is driven by the configured `interval`.
+- gRPC snapshots expose the same shape under `UpstreamGroup.health_check`.
+- For plain HTTP backends that do not route by virtual host, `host localhost;` is usually sufficient.
+- For backends that depend on virtual host routing, set `host` to the hostname the application expects.
+- For HTTPS health checks, `host` should match the backend certificate name because it is also used as TLS SNI.
 
 ## Server And Listener Options
 

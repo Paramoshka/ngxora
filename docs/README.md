@@ -55,7 +55,7 @@ http {
 | Option | Scope | gRPC ApplySnapshot | Notes |
 | --- | --- | --- | --- |
 | `location` / `proxy_pass` | route | Live | Applied through `RuntimeState` swap |
-| `upstream` blocks / backend sets | upstream group | Live | Rebuilds named backend pools and current selection policy state (`round_robin`, `random`) |
+| `upstream` blocks / backend sets | upstream group | Live | Rebuilds named backend pools, current selection policy state (`round_robin`, `random`), and configured upstream health checks |
 | `proxy_connect_timeout` / `proxy_read_timeout` / `proxy_write_timeout` | route | Live | Applied to `HttpPeer.options` per selected upstream route |
 | `proxy_ssl_verify` | route | Live | Applied to upstream certificate and hostname verification flags per selected route |
 | `proxy_ssl_trusted_certificate` | route | Live | Custom upstream CA bundle is loaded per snapshot and attached to the selected upstream peer |

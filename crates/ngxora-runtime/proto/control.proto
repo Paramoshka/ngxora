@@ -122,11 +122,31 @@ message UpstreamGroup {
   string name = 1;
   repeated UpstreamBackend backends = 2;
   UpstreamSelectionPolicy policy = 3;
+  UpstreamHealthCheck health_check = 4;
 }
 
 message UpstreamBackend {
   string host = 1;
   uint32 port = 2;
+}
+
+message UpstreamHealthCheck {
+  oneof kind {
+    UpstreamTcpHealthCheck tcp = 1;
+    UpstreamHttpHealthCheck http = 2;
+  }
+  uint64 timeout_ms = 3;
+  uint64 interval_ms = 4;
+  uint32 consecutive_success = 5;
+  uint32 consecutive_failure = 6;
+}
+
+message UpstreamTcpHealthCheck {}
+
+message UpstreamHttpHealthCheck {
+  string host = 1;
+  string path = 2;
+  bool use_tls = 3;
 }
 
 enum UpstreamSelectionPolicy {

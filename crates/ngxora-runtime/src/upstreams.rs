@@ -6,15 +6,17 @@ use futures::FutureExt;
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
     LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
-    TlsVerifyClient, UpstreamBlock, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
-    UpstreamTimeouts,
+    TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType,
+    UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::{
     HeaderMapMut, LocalResponse, PluginError, PluginFlow, PluginSpec, PluginState, RequestCtx,
     ResponseCtx, UpstreamRequestCtx,
 };
 use pingora::Result;
+use pingora::connectors::{TransportConnector, http::Connector as HttpConnector};
 use pingora::http::{RequestHeader, ResponseHeader};
+use pingora::lb::health_check::HealthCheck;
 use pingora::lb::{Backend, Backends, LoadBalancer, discovery, selection};
 use pingora::protocols::tls::CaType;
 use pingora::protocols::l4::socket::SocketAddr as PingoraSocketAddr;
@@ -23,8 +25,10 @@ use pingora_proxy::{ProxyHttp, Session};
 use regex::{Regex, RegexBuilder};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Display;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
-use std::sync::Arc;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::time::Instant;
 #[cfg(feature = "openssl")]
 use pingora::tls::x509::X509;
 
@@ -68,11 +72,235 @@ pub struct CompiledUpstreamServer {
     pub port: u16,
 }
 
+impl Display for CompiledUpstreamServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.host, self.port)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum HealthCheckType {
+    Tcp,
+    Http {
+        host: String,
+        path: String,
+        use_tls: bool,
+    },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CompiledHealthCheck {
+    pub check_type: HealthCheckType,
+    pub timeout: Duration,
+    pub interval: Duration,
+    pub consecutive_success: usize,
+    pub consecutive_failure: usize,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CompiledUpstreamGroup {
     pub name: String,
     pub policy: UpstreamSelectionPolicy,
     pub servers: Vec<CompiledUpstreamServer>,
+    pub health_check: Option<CompiledHealthCheck>,
+}
+
+impl CompiledHealthCheck {
+    pub fn build(&self) -> Result<Box<dyn HealthCheck + Send + Sync + 'static>, String> {
+        match &self.check_type {
+            HealthCheckType::Tcp => Ok(Box::new(NgxoraHealthCheck::Tcp(
+                NgxoraTcpHealthCheck {
+                    consecutive_success: self.consecutive_success,
+                    consecutive_failure: self.consecutive_failure,
+                    timeout: self.timeout,
+                    connector: TransportConnector::new(None),
+                },
+            ))),
+            HealthCheckType::Http { host, path, use_tls } => {
+                let uri = path
+                    .parse::<http::Uri>()
+                    .map_err(|err| format!("invalid health_check path `{path}`: {err}"))?;
+                let mut request =
+                    RequestHeader::build("GET", path.as_bytes(), None).map_err(|err| {
+                        format!("failed to build health_check request for `{path}`: {err}")
+                    })?;
+                request
+                    .set_uri(uri);
+                request
+                    .insert_header("Host", host.as_str())
+                    .map_err(|err| format!("failed to build health_check host header: {err}"))?;
+
+                Ok(Box::new(NgxoraHealthCheck::Http(NgxoraHttpHealthCheck {
+                    consecutive_success: self.consecutive_success,
+                    consecutive_failure: self.consecutive_failure,
+                    timeout: self.timeout,
+                    host: host.clone(),
+                    use_tls: *use_tls,
+                    request,
+                    connector: HttpConnector::new(None),
+                })))
+            }
+        }
+    }
+}
+
+struct NgxoraTcpHealthCheck {
+    consecutive_success: usize,
+    consecutive_failure: usize,
+    timeout: Duration,
+    connector: TransportConnector,
+}
+
+struct NgxoraHttpHealthCheck {
+    consecutive_success: usize,
+    consecutive_failure: usize,
+    timeout: Duration,
+    host: String,
+    use_tls: bool,
+    request: RequestHeader,
+    connector: HttpConnector<()>,
+}
+
+enum NgxoraHealthCheck {
+    Tcp(NgxoraTcpHealthCheck),
+    Http(NgxoraHttpHealthCheck),
+}
+
+fn backend_health_server(target: &Backend) -> pingora::Result<&CompiledUpstreamServer> {
+    target.ext.get::<CompiledUpstreamServer>().ok_or_else(|| {
+        pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            "health check backend is missing compiled upstream metadata",
+        )
+    })
+}
+
+fn resolve_health_check_addr(server: &CompiledUpstreamServer) -> pingora::Result<SocketAddr> {
+    (server.host.as_str(), server.port)
+        .to_socket_addrs()
+        .map_err(|err| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                format!(
+                    "failed to resolve upstream `{}` for health check: {err}",
+                    server
+                ),
+            )
+        })?
+        .next()
+        .ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                format!("upstream `{server}` did not resolve to any address"),
+            )
+        })
+}
+
+impl NgxoraTcpHealthCheck {
+    async fn check_backend(&self, target: &Backend) -> pingora::Result<()> {
+        let server = backend_health_server(target)?;
+        let addr = resolve_health_check_addr(server)?;
+        let mut peer = HttpPeer::new(addr, false, String::new());
+        peer.options.connection_timeout = Some(self.timeout);
+        self.connector.get_stream(&peer).await.map(|_| ())
+    }
+
+    fn backend_summary(&self, target: &Backend) -> String {
+        backend_health_server(target)
+            .map(ToString::to_string)
+            .unwrap_or_else(|_| format!("{target:?}"))
+    }
+}
+
+impl NgxoraHttpHealthCheck {
+    async fn check_backend(&self, target: &Backend) -> pingora::Result<()> {
+        let server = backend_health_server(target)?;
+        let addr = resolve_health_check_addr(server)?;
+        let sni = if self.use_tls {
+            self.host.clone()
+        } else {
+            String::new()
+        };
+        let mut peer = HttpPeer::new(addr, self.use_tls, sni);
+        peer.options.connection_timeout = Some(self.timeout);
+        peer.options.read_timeout = Some(self.timeout);
+
+        let (mut session, _) = self.connector.get_http_session(&peer).await?;
+        session.write_request_header(Box::new(self.request.clone())).await?;
+        session.finish_request_body().await?;
+        session.set_read_timeout(Some(self.timeout));
+        session.read_response_header().await?;
+
+        let response = session.response_header().ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                "health check response header is missing after read",
+            )
+        })?;
+        if response.status != 200 {
+            return Err(pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                format!(
+                    "http health check to {} returned status {}",
+                    server, response.status
+                ),
+            ));
+        }
+
+        while session.read_response_body().await?.is_some() {}
+
+        Ok(())
+    }
+
+    fn backend_summary(&self, target: &Backend) -> String {
+        backend_health_server(target)
+            .map(|server| {
+                format!(
+                    "{} via {}://{}{}",
+                    server,
+                    if self.use_tls { "https" } else { "http" },
+                    self.host,
+                    self.request.uri
+                )
+            })
+            .unwrap_or_else(|_| format!("{target:?}"))
+    }
+}
+
+#[async_trait]
+impl HealthCheck for NgxoraHealthCheck {
+    fn health_threshold(&self, success: bool) -> usize {
+        match self {
+            Self::Tcp(check) => {
+                if success {
+                    check.consecutive_success
+                } else {
+                    check.consecutive_failure
+                }
+            }
+            Self::Http(check) => {
+                if success {
+                    check.consecutive_success
+                } else {
+                    check.consecutive_failure
+                }
+            }
+        }
+    }
+
+    async fn check(&self, target: &Backend) -> pingora::Result<()> {
+        match self {
+            Self::Tcp(check) => check.check_backend(target).await,
+            Self::Http(check) => check.check_backend(target).await,
+        }
+    }
+
+    fn backend_summary(&self, target: &Backend) -> String {
+        match self {
+            Self::Tcp(check) => check.backend_summary(target),
+            Self::Http(check) => check.backend_summary(target),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -358,6 +586,57 @@ fn compile_upstream_server(server: &UpstreamServer) -> Result<CompiledUpstreamSe
     })
 }
 
+fn compile_upstream_health_check(
+    health_check: &UpstreamHealthCheck,
+) -> Result<CompiledHealthCheck, String> {
+    if health_check.timeout.is_zero() {
+        return Err("health_check timeout must be greater than zero".into());
+    }
+    if health_check.interval.is_zero() {
+        return Err("health_check interval must be greater than zero".into());
+    }
+    if health_check.consecutive_success == 0 {
+        return Err("health_check consecutive_success must be greater than zero".into());
+    }
+    if health_check.consecutive_failure == 0 {
+        return Err("health_check consecutive_failure must be greater than zero".into());
+    }
+
+    let check_type = match &health_check.check_type {
+        UpstreamHealthCheckType::Tcp => HealthCheckType::Tcp,
+        UpstreamHealthCheckType::Http {
+            host,
+            path,
+            use_tls,
+        } => {
+            if host.trim().is_empty() {
+                return Err("health_check http host cannot be empty".into());
+            }
+            let uri = path
+                .parse::<http::Uri>()
+                .map_err(|err| format!("invalid health_check path `{path}`: {err}"))?;
+            if uri.scheme().is_some() || uri.authority().is_some() || !path.starts_with('/') {
+                return Err(format!(
+                    "health_check path `{path}` must be an origin-form path starting with `/`"
+                ));
+            }
+            HealthCheckType::Http {
+                host: host.clone(),
+                path: path.clone(),
+                use_tls: *use_tls,
+            }
+        }
+    };
+
+    Ok(CompiledHealthCheck {
+        check_type,
+        timeout: health_check.timeout,
+        interval: health_check.interval,
+        consecutive_success: health_check.consecutive_success,
+        consecutive_failure: health_check.consecutive_failure,
+    })
+}
+
 fn compile_upstreams(
     upstreams: &[UpstreamBlock],
 ) -> Result<HashMap<String, CompiledUpstreamGroup>, String> {
@@ -380,6 +659,11 @@ fn compile_upstreams(
                 .iter()
                 .map(compile_upstream_server)
                 .collect::<Result<Vec<_>, _>>()?,
+            health_check: upstream
+                .health_check
+                .as_ref()
+                .map(compile_upstream_health_check)
+                .transpose()?,
         };
 
         if compiled.insert(name.clone(), group).is_some() {
@@ -775,11 +1059,17 @@ pub(crate) type RuntimeTrustedCa = Arc<CaType>;
 pub struct RuntimeUpstreamGroup {
     selector: RuntimeUpstreamSelector,
     max_iterations: usize,
+    health_check: Option<RuntimeHealthCheckSchedule>,
 }
 
 enum RuntimeUpstreamSelector {
     RoundRobin(LoadBalancer<selection::RoundRobin>),
     Random(LoadBalancer<selection::Random>),
+}
+
+struct RuntimeHealthCheckSchedule {
+    interval: Duration,
+    next_run_at: Mutex<Instant>,
 }
 
 fn synthetic_backends(servers: &[CompiledUpstreamServer]) -> Result<BTreeSet<Backend>, String> {
@@ -815,14 +1105,20 @@ fn synthetic_backend_addr(index: usize) -> SocketAddr {
     SocketAddr::V6(SocketAddrV6::new(ip, 1, 0, 0))
 }
 
-fn build_load_balancer<S>(backends: BTreeSet<Backend>) -> Result<LoadBalancer<S>, String>
+fn build_load_balancer<S>(
+    backends: BTreeSet<Backend>,
+    health_check: Option<&CompiledHealthCheck>,
+) -> Result<LoadBalancer<S>, String>
 where
     S: selection::BackendSelection + 'static,
     S::Iter: selection::BackendIter,
 {
     let discovery = discovery::Static::new(backends);
     let backends = Backends::new(discovery);
-    let lb = LoadBalancer::from_backends(backends);
+    let mut lb = LoadBalancer::from_backends(backends);
+    if let Some(health_check) = health_check {
+        lb.set_health_check(health_check.build()?);
+    }
     lb.update()
         .now_or_never()
         .ok_or_else(|| "static upstream update unexpectedly blocked".to_string())?
@@ -835,6 +1131,13 @@ impl RuntimeUpstreamSelector {
         match self {
             Self::RoundRobin(lb) => lb.select(key, max_iterations),
             Self::Random(lb) => lb.select(key, max_iterations),
+        }
+    }
+
+    async fn run_health_check(&self) {
+        match self {
+            Self::RoundRobin(lb) => lb.backends().run_health_check(false).await,
+            Self::Random(lb) => lb.backends().run_health_check(false).await,
         }
     }
 }
@@ -851,22 +1154,46 @@ impl RuntimeUpstreamGroup {
         let backends = synthetic_backends(&group.servers)?;
         let selector = match group.policy {
             UpstreamSelectionPolicy::RoundRobin => {
-                RuntimeUpstreamSelector::RoundRobin(build_load_balancer(backends)?)
+                RuntimeUpstreamSelector::RoundRobin(build_load_balancer(
+                    backends,
+                    group.health_check.as_ref(),
+                )?)
             }
             UpstreamSelectionPolicy::Random => {
-                RuntimeUpstreamSelector::Random(build_load_balancer(backends)?)
+                RuntimeUpstreamSelector::Random(build_load_balancer(
+                    backends,
+                    group.health_check.as_ref(),
+                )?)
             }
         };
 
         Ok(Self {
             selector,
             max_iterations: group.servers.len(),
+            health_check: group.health_check.as_ref().map(|health_check| RuntimeHealthCheckSchedule {
+                interval: health_check.interval,
+                next_run_at: Mutex::new(Instant::now()),
+            }),
         })
     }
 
     fn select(&self, key: &[u8]) -> Option<CompiledUpstreamServer> {
         let backend = self.selector.select(key, self.max_iterations)?;
         backend.ext.get::<CompiledUpstreamServer>().cloned()
+    }
+
+    pub(crate) async fn run_due_health_check(&self, now: Instant) -> Option<Instant> {
+        let schedule = self.health_check.as_ref()?;
+        let next_run_at = {
+            let mut next_run_at = schedule.next_run_at.lock().expect("health check lock poisoned");
+            if *next_run_at > now {
+                return Some(*next_run_at);
+            }
+            *next_run_at = now + schedule.interval;
+            *next_run_at
+        };
+        self.selector.run_health_check().await;
+        Some(next_run_at)
     }
 }
 

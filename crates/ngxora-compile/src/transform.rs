@@ -10,8 +10,8 @@ use crate::{
     ir::{
         Http, Ir, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher,
         PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
-        TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamSelectionPolicy,
-        UpstreamServer,
+        TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
+        UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer,
     },
 };
 
@@ -166,19 +166,30 @@ fn lower_upstream(block: &Block) -> Result<UpstreamBlock, LowerErr> {
         name,
         policy: UpstreamSelectionPolicy::RoundRobin,
         servers: Vec::new(),
+        health_check: None,
     };
 
     for child in &block.children {
         match child {
             Node::Directive(directive) => apply_upstream_directive(&mut upstream, directive)?,
-            Node::Block(nested) => {
-                return Err(LowerErr {
-                    message: format!(
-                        "upstream block: nested blocks are not supported: {}",
-                        nested.name
-                    ),
-                });
-            }
+            Node::Block(nested) => match nested.name.as_str() {
+                consts::HEALTH_CHECK => {
+                    if upstream.health_check.is_some() {
+                        return Err(LowerErr {
+                            message: "upstream block: health_check block is duplicated".into(),
+                        });
+                    }
+                    upstream.health_check = Some(lower_upstream_health_check(nested)?);
+                }
+                _ => {
+                    return Err(LowerErr {
+                        message: format!(
+                            "upstream block: nested blocks are not supported: {}",
+                            nested.name
+                        ),
+                    });
+                }
+            },
         }
     }
 
@@ -309,6 +320,164 @@ fn apply_upstream_directive(
     Ok(())
 }
 
+#[derive(Default)]
+struct UpstreamHealthCheckDraft {
+    check_type: Option<UpstreamHealthCheckKind>,
+    timeout: Option<std::time::Duration>,
+    interval: Option<std::time::Duration>,
+    consecutive_success: Option<usize>,
+    consecutive_failure: Option<usize>,
+    host: Option<String>,
+    path: Option<String>,
+    use_tls: Option<bool>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum UpstreamHealthCheckKind {
+    Tcp,
+    Http,
+}
+
+fn lower_upstream_health_check(block: &Block) -> Result<UpstreamHealthCheck, LowerErr> {
+    if !block.args.is_empty() {
+        return Err(LowerErr {
+            message: "health_check block: does not accept arguments".into(),
+        });
+    }
+
+    let mut draft = UpstreamHealthCheckDraft::default();
+    for child in &block.children {
+        match child {
+            Node::Directive(directive) => {
+                apply_upstream_health_check_directive(&mut draft, directive)?
+            }
+            Node::Block(nested) => {
+                return Err(LowerErr {
+                    message: format!(
+                        "health_check block: nested blocks are not supported: {}",
+                        nested.name
+                    ),
+                });
+            }
+        }
+    }
+
+    let check_type = match draft.check_type.unwrap_or(UpstreamHealthCheckKind::Tcp) {
+        UpstreamHealthCheckKind::Tcp => {
+            if draft.host.is_some() || draft.path.is_some() || draft.use_tls.is_some() {
+                return Err(LowerErr {
+                    message:
+                        "health_check: host/path/use_tls are only supported for type http".into(),
+                });
+            }
+            UpstreamHealthCheckType::Tcp
+        }
+        UpstreamHealthCheckKind::Http => {
+            let host = draft.host.ok_or_else(|| LowerErr {
+                message: "health_check: host is required for type http".into(),
+            })?;
+            let path = draft.path.unwrap_or_else(|| "/".into());
+            if path.is_empty() {
+                return Err(LowerErr {
+                    message: "health_check: path cannot be empty".into(),
+                });
+            }
+            UpstreamHealthCheckType::Http {
+                host,
+                path,
+                use_tls: draft.use_tls.unwrap_or(false),
+            }
+        }
+    };
+
+    Ok(UpstreamHealthCheck {
+        check_type,
+        timeout: draft.timeout.unwrap_or_else(|| std::time::Duration::from_secs(1)),
+        interval: draft
+            .interval
+            .unwrap_or_else(|| std::time::Duration::from_secs(5)),
+        consecutive_success: draft.consecutive_success.unwrap_or(1),
+        consecutive_failure: draft.consecutive_failure.unwrap_or(1),
+    })
+}
+
+fn apply_upstream_health_check_directive(
+    draft: &mut UpstreamHealthCheckDraft,
+    directive: &Directive,
+) -> Result<(), LowerErr> {
+    match directive.name.as_str() {
+        consts::TYPE => {
+            let value = parse_exactly_one_argument(&directive.args, "health_check type")?;
+            let kind = match value.as_str() {
+                "tcp" => UpstreamHealthCheckKind::Tcp,
+                "http" => UpstreamHealthCheckKind::Http,
+                _ => {
+                    return Err(LowerErr {
+                        message: format!(
+                            "health_check type: unsupported value `{value}`; expected tcp|http"
+                        ),
+                    });
+                }
+            };
+            set_once(&mut draft.check_type, kind, "health_check type")?;
+        }
+        consts::TIMEOUT => {
+            let value = parse_single_duration_directive(&directive.args, "health_check timeout")?;
+            ensure_non_zero_duration(value, "health_check timeout")?;
+            set_once(&mut draft.timeout, value, "health_check timeout")?;
+        }
+        consts::INTERVAL => {
+            let value =
+                parse_single_duration_directive(&directive.args, "health_check interval")?;
+            ensure_non_zero_duration(value, "health_check interval")?;
+            set_once(&mut draft.interval, value, "health_check interval")?;
+        }
+        consts::CONSECUTIVE_SUCCESS => {
+            let value = parse_positive_usize(&directive.args, "health_check consecutive_success")?;
+            set_once(
+                &mut draft.consecutive_success,
+                value,
+                "health_check consecutive_success",
+            )?;
+        }
+        consts::CONSECUTIVE_FAILURE => {
+            let value = parse_positive_usize(&directive.args, "health_check consecutive_failure")?;
+            set_once(
+                &mut draft.consecutive_failure,
+                value,
+                "health_check consecutive_failure",
+            )?;
+        }
+        consts::HOST => {
+            let value = parse_exactly_one_argument(&directive.args, "health_check host")?;
+            if value.trim().is_empty() {
+                return Err(LowerErr {
+                    message: "health_check host: value cannot be empty".into(),
+                });
+            }
+            set_once(&mut draft.host, value, "health_check host")?;
+        }
+        consts::PATH => {
+            let value = parse_exactly_one_argument(&directive.args, "health_check path")?;
+            set_once(&mut draft.path, value, "health_check path")?;
+        }
+        consts::USE_TLS => {
+            let value = matches!(get_directive_switch(directive)?, Switch::On);
+            set_once(&mut draft.use_tls, value, "health_check use_tls")?;
+        }
+        _ => {
+            return Err(LowerErr {
+                message: format!(
+                    "unsupported health_check directive: {}",
+                    directive.name
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn parse_upstream_policy(args: &[String]) -> Result<UpstreamSelectionPolicy, LowerErr> {
     match args {
         [value] => match value.as_str() {
@@ -327,6 +496,49 @@ fn parse_upstream_policy(args: &[String]) -> Result<UpstreamSelectionPolicy, Low
             message: "policy: expected exactly 1 argument".into(),
         }),
     }
+}
+
+fn parse_exactly_one_argument(args: &[String], directive: &str) -> Result<String, LowerErr> {
+    match args {
+        [value] => Ok(value.clone()),
+        [] => Err(LowerErr {
+            message: format!("{directive}: expected 1 argument"),
+        }),
+        _ => Err(LowerErr {
+            message: format!("{directive}: expected exactly 1 argument"),
+        }),
+    }
+}
+
+fn parse_positive_usize(args: &[String], directive: &str) -> Result<usize, LowerErr> {
+    let value = parse_exactly_one_argument(args, directive)?;
+    let parsed = value.parse::<usize>().map_err(|_| LowerErr {
+        message: format!("{directive}: invalid integer `{value}`"),
+    })?;
+    if parsed == 0 {
+        return Err(LowerErr {
+            message: format!("{directive}: value must be greater than zero"),
+        });
+    }
+    Ok(parsed)
+}
+
+fn ensure_non_zero_duration(value: std::time::Duration, directive: &str) -> Result<(), LowerErr> {
+    if value.is_zero() {
+        return Err(LowerErr {
+            message: format!("{directive}: value must be greater than zero"),
+        });
+    }
+    Ok(())
+}
+
+fn set_once<T>(slot: &mut Option<T>, value: T, directive: &str) -> Result<(), LowerErr> {
+    if slot.replace(value).is_some() {
+        return Err(LowerErr {
+            message: format!("{directive}: duplicated directive"),
+        });
+    }
+    Ok(())
 }
 
 fn lower_location(block: &Block) -> Result<Location, LowerErr> {

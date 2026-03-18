@@ -1,5 +1,6 @@
 use super::{
-    CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter, RouteTarget, ServerRoutes,
+    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter,
+    CompiledUpstreamGroup, CompiledUpstreamServer, HealthCheckType, RouteTarget, ServerRoutes,
     VirtualHostRoutes, apply_upstream_ssl_options, apply_upstream_timeouts,
     content_length_limit_exceeded, downstream_keepalive_timeout_secs, listener_routes,
     select_route_target, update_received_body_bytes, validate_sni_host_consistency,
@@ -7,8 +8,9 @@ use super::{
 use bytes::Bytes;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
-    ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamSelectionPolicy, UpstreamServer,
-    UpstreamSslOptions, UpstreamTimeouts,
+    ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamHealthCheck,
+    UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
+    UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use pingora::upstreams::peer::HttpPeer;
@@ -440,6 +442,7 @@ fn compiled_router_maps_named_upstream_groups() {
                     port: 8081,
                 },
             ],
+            health_check: None,
         }],
         servers: vec![Server {
             listens: vec![Listen {
@@ -480,19 +483,20 @@ fn compiled_router_maps_named_upstream_groups() {
 
 #[test]
 fn runtime_upstream_group_round_robins_backends() {
-    let group = super::RuntimeUpstreamGroup::from_compiled(&super::CompiledUpstreamGroup {
+    let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
         servers: vec![
-            super::CompiledUpstreamServer {
+            CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 8080,
             },
-            super::CompiledUpstreamServer {
+            CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 8081,
             },
         ],
+        health_check: None,
     })
     .expect("runtime group builds");
 
@@ -507,24 +511,135 @@ fn runtime_upstream_group_round_robins_backends() {
 
 #[test]
 fn runtime_upstream_group_random_selects_configured_backend() {
-    let group = super::RuntimeUpstreamGroup::from_compiled(&super::CompiledUpstreamGroup {
+    let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::Random,
         servers: vec![
-            super::CompiledUpstreamServer {
+            CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 8080,
             },
-            super::CompiledUpstreamServer {
+            CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 8081,
             },
         ],
+        health_check: None,
     })
     .expect("runtime group builds");
 
     let selected = group.select(b"").expect("selected backend");
     assert!(matches!(selected.port, 8080 | 8081));
+}
+
+#[test]
+fn compiled_router_maps_upstream_health_check() {
+    let http = Http {
+        upstreams: vec![UpstreamBlock {
+            name: "backend".into(),
+            policy: UpstreamSelectionPolicy::RoundRobin,
+            servers: vec![UpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8080,
+            }],
+            health_check: Some(UpstreamHealthCheck {
+                check_type: UpstreamHealthCheckType::Http {
+                    host: "backend.internal".into(),
+                    path: "/readyz".into(),
+                    use_tls: true,
+                },
+                timeout: Duration::from_secs(2),
+                interval: Duration::from_secs(10),
+                consecutive_success: 2,
+                consecutive_failure: 3,
+            }),
+        }],
+        ..Http::default()
+    };
+
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+    assert_eq!(
+        router.upstreams["backend"].health_check,
+        Some(CompiledHealthCheck {
+            check_type: HealthCheckType::Http {
+                host: "backend.internal".into(),
+                path: "/readyz".into(),
+                use_tls: true,
+            },
+            timeout: Duration::from_secs(2),
+            interval: Duration::from_secs(10),
+            consecutive_success: 2,
+            consecutive_failure: 3,
+        })
+    );
+}
+
+#[tokio::test]
+async fn runtime_upstream_group_tcp_health_check_marks_unreachable_backends_unhealthy() {
+    let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        name: "backend".into(),
+        policy: UpstreamSelectionPolicy::RoundRobin,
+        servers: vec![
+            CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 1,
+            },
+            CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 2,
+            },
+        ],
+        health_check: Some(CompiledHealthCheck {
+            check_type: HealthCheckType::Tcp,
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_secs(5),
+            consecutive_success: 1,
+            consecutive_failure: 1,
+        }),
+    })
+    .expect("runtime group builds");
+
+    group
+        .run_due_health_check(tokio::time::Instant::now())
+        .await
+        .expect("scheduled health check");
+    assert!(group.select(b"").is_none());
+}
+
+#[tokio::test]
+async fn runtime_upstream_group_http_health_check_marks_unreachable_backends_unhealthy() {
+    let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        name: "backend".into(),
+        policy: UpstreamSelectionPolicy::RoundRobin,
+        servers: vec![
+            CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 1,
+            },
+            CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 2,
+            },
+        ],
+        health_check: Some(CompiledHealthCheck {
+            check_type: HealthCheckType::Http {
+                host: "backend.internal".into(),
+                path: "/readyz".into(),
+                use_tls: false,
+            },
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_secs(5),
+            consecutive_success: 1,
+            consecutive_failure: 1,
+        }),
+    })
+    .expect("runtime group builds");
+
+    group
+        .run_due_health_check(tokio::time::Instant::now())
+        .await
+        .expect("scheduled health check");
+    assert!(group.select(b"").is_none());
 }
 
 #[test]

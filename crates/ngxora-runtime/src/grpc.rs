@@ -9,8 +9,9 @@ use crate::upstreams::{
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
     LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity,
-    TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamSelectionPolicy,
-    UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
+    TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
+    UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
+    UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use serde_json::Value;
@@ -40,8 +41,11 @@ use proto::{
     RouteTimeouts as ProtoRouteTimeouts, Switch as ProtoSwitch, TlsBinding as ProtoTlsBinding,
     TlsProtocolVersion as ProtoTlsProtocolVersion, TlsVerifyClient as ProtoTlsVerifyClient,
     Upstream as ProtoUpstream, UpstreamBackend as ProtoUpstreamBackend,
-    UpstreamGroup as ProtoUpstreamGroup, UpstreamTlsOptions as ProtoUpstreamTlsOptions,
-    UpstreamSelectionPolicy as ProtoUpstreamSelectionPolicy, VirtualHost as ProtoVirtualHost,
+    UpstreamGroup as ProtoUpstreamGroup, UpstreamHealthCheck as ProtoUpstreamHealthCheck,
+    UpstreamHttpHealthCheck as ProtoUpstreamHttpHealthCheck,
+    UpstreamSelectionPolicy as ProtoUpstreamSelectionPolicy,
+    UpstreamTcpHealthCheck as ProtoUpstreamTcpHealthCheck,
+    UpstreamTlsOptions as ProtoUpstreamTlsOptions, VirtualHost as ProtoVirtualHost,
 };
 
 #[cfg(test)]
@@ -268,6 +272,11 @@ fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<Upstream
                 name: name.to_string(),
                 policy: upstream_selection_policy_from_proto(upstream.policy)?,
                 servers,
+                health_check: upstream
+                    .health_check
+                    .as_ref()
+                    .map(upstream_health_check_from_proto)
+                    .transpose()?,
             })
         })
         .collect()
@@ -387,6 +396,54 @@ fn upstream_backend_from_proto(backend: &ProtoUpstreamBackend) -> Result<Upstrea
         host: backend.host.clone(),
         port: u16::try_from(backend.port)
             .map_err(|_| format!("upstream backend `{}` port is out of range", backend.host))?,
+    })
+}
+
+fn upstream_health_check_from_proto(
+    health_check: &ProtoUpstreamHealthCheck,
+) -> Result<UpstreamHealthCheck, String> {
+    let kind = health_check
+        .kind
+        .as_ref()
+        .ok_or_else(|| "upstream health_check kind is required".to_string())?;
+    let timeout = duration_from_millis(health_check.timeout_ms)
+        .ok_or_else(|| "upstream health_check timeout must be greater than zero".to_string())?;
+    let interval = duration_from_millis(health_check.interval_ms)
+        .ok_or_else(|| "upstream health_check interval must be greater than zero".to_string())?;
+    let consecutive_success = usize::try_from(health_check.consecutive_success)
+        .map_err(|_| "upstream health_check consecutive_success is out of range".to_string())?;
+    let consecutive_failure = usize::try_from(health_check.consecutive_failure)
+        .map_err(|_| "upstream health_check consecutive_failure is out of range".to_string())?;
+    if consecutive_success == 0 {
+        return Err("upstream health_check consecutive_success must be greater than zero".into());
+    }
+    if consecutive_failure == 0 {
+        return Err("upstream health_check consecutive_failure must be greater than zero".into());
+    }
+
+    let check_type = match kind {
+        proto::upstream_health_check::Kind::Tcp(_) => UpstreamHealthCheckType::Tcp,
+        proto::upstream_health_check::Kind::Http(http) => {
+            if http.host.trim().is_empty() {
+                return Err("upstream health_check http host cannot be empty".into());
+            }
+            if http.path.is_empty() {
+                return Err("upstream health_check http path cannot be empty".into());
+            }
+            UpstreamHealthCheckType::Http {
+                host: http.host.clone(),
+                path: http.path.clone(),
+                use_tls: http.use_tls,
+            }
+        }
+    };
+
+    Ok(UpstreamHealthCheck {
+        check_type,
+        timeout,
+        interval,
+        consecutive_success,
+        consecutive_failure,
     })
 }
 
@@ -597,8 +654,39 @@ fn proto_upstreams_from_runtime(
                 })
                 .collect(),
             policy: proto_upstream_selection_policy_from_runtime(group.policy) as i32,
+            health_check: group
+                .health_check
+                .as_ref()
+                .map(proto_upstream_health_check_from_runtime),
         })
         .collect()
+}
+
+fn proto_upstream_health_check_from_runtime(
+    value: &crate::upstreams::CompiledHealthCheck,
+) -> ProtoUpstreamHealthCheck {
+    let kind = match &value.check_type {
+        crate::upstreams::HealthCheckType::Tcp => {
+            proto::upstream_health_check::Kind::Tcp(ProtoUpstreamTcpHealthCheck {})
+        }
+        crate::upstreams::HealthCheckType::Http {
+            host,
+            path,
+            use_tls,
+        } => proto::upstream_health_check::Kind::Http(ProtoUpstreamHttpHealthCheck {
+            host: host.clone(),
+            path: path.clone(),
+            use_tls: *use_tls,
+        }),
+    };
+
+    ProtoUpstreamHealthCheck {
+        kind: Some(kind),
+        timeout_ms: value.timeout.as_millis().try_into().unwrap_or(u64::MAX),
+        interval_ms: value.interval.as_millis().try_into().unwrap_or(u64::MAX),
+        consecutive_success: value.consecutive_success.try_into().unwrap_or(u32::MAX),
+        consecutive_failure: value.consecutive_failure.try_into().unwrap_or(u32::MAX),
+    }
 }
 
 fn listener_names(keys: &[ListenKey]) -> BTreeMap<ListenKey, String> {

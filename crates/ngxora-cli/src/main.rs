@@ -1,11 +1,14 @@
 use ngxora_compile::ir::Ir;
 use ngxora_config::{Ast, include::IncludeResolver};
-use ngxora_runtime::control::{ConfigSnapshot, InProcessControlPlane, RuntimeState};
+use ngxora_runtime::control::{
+    ConfigSnapshot, InProcessControlPlane, RuntimeState, RuntimeUpstreamHealthChecks,
+};
 use ngxora_runtime::grpc::{spawn_control_plane, spawn_control_plane_uds};
 use ngxora_runtime::server::bind_listeners_from_state;
 use ngxora_runtime::upstreams::{CompiledRouter, DynamicProxy};
 use pingora::server::Server;
 use pingora::server::configuration::Opt;
+use pingora::services::background::background_service;
 use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -67,6 +70,10 @@ fn run(cli: CliArgs) -> Result<(), String> {
         &server.configuration,
         DynamicProxy::new(Arc::clone(control.state())),
     );
+    let upstream_health_checks = background_service(
+        "upstream health checks",
+        RuntimeUpstreamHealthChecks::new(Arc::clone(&state)),
+    );
     bind_listeners_from_state(&mut proxy, Arc::clone(control.state()))
         .map_err(|err| format!("failed to bind listeners from config: {err}"))?;
 
@@ -87,6 +94,7 @@ fn run(cli: CliArgs) -> Result<(), String> {
     }
 
     server.add_service(proxy);
+    server.add_service(upstream_health_checks);
     server.run_forever();
 }
 

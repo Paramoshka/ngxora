@@ -9,6 +9,15 @@ pub const BASIC_AUTH_ALIAS: &str = "basic_auth";
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";
 pub const POLICY: &str = "policy";
+pub const HEALTH_CHECK: &str = "health_check";
+pub const TYPE: &str = "type";
+pub const TIMEOUT: &str = "timeout";
+pub const INTERVAL: &str = "interval";
+pub const CONSECUTIVE_SUCCESS: &str = "consecutive_success";
+pub const CONSECUTIVE_FAILURE: &str = "consecutive_failure";
+pub const HOST: &str = "host";
+pub const PATH: &str = "path";
+pub const USE_TLS: &str = "use_tls";
 
 // Inner directives in blocs
 pub const TCP_NODELAY: &str = "tcp_nodelay";
