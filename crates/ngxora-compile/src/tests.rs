@@ -64,9 +64,9 @@ http {
         assert_eq!(location.matcher, LocationMatcher::Prefix("/".to_string()));
         assert_eq!(
             location.directives,
-            vec![LocationDirective::ProxyPass(
-                ProxyPassTarget::Url(Url::parse("http://127.0.0.1:8080").unwrap())
-            )]
+            vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                Url::parse("http://127.0.0.1:8080").unwrap()
+            ))]
         );
     }
 
@@ -456,7 +456,10 @@ http {
         let ast = Ast::parse_config(input).unwrap();
         let err = Ir::from_ast(&ast).expect_err("expected upstream policy to fail");
 
-        assert!(err.message.contains("unsupported upstream selection policy"));
+        assert!(
+            err.message
+                .contains("unsupported upstream selection policy")
+        );
     }
 
     #[test]

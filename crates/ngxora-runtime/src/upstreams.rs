@@ -18,8 +18,10 @@ use pingora::connectors::{TransportConnector, http::Connector as HttpConnector};
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::lb::health_check::HealthCheck;
 use pingora::lb::{Backend, Backends, LoadBalancer, discovery, selection};
-use pingora::protocols::tls::CaType;
 use pingora::protocols::l4::socket::SocketAddr as PingoraSocketAddr;
+use pingora::protocols::tls::CaType;
+#[cfg(feature = "openssl")]
+use pingora::tls::x509::X509;
 use pingora::upstreams::peer::HttpPeer;
 use pingora_proxy::{ProxyHttp, Session};
 use regex::{Regex, RegexBuilder};
@@ -29,8 +31,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAdd
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
-#[cfg(feature = "openssl")]
-use pingora::tls::x509::X509;
 
 #[cfg(test)]
 mod tests;
@@ -108,15 +108,17 @@ pub struct CompiledUpstreamGroup {
 impl CompiledHealthCheck {
     pub fn build(&self) -> Result<Box<dyn HealthCheck + Send + Sync + 'static>, String> {
         match &self.check_type {
-            HealthCheckType::Tcp => Ok(Box::new(NgxoraHealthCheck::Tcp(
-                NgxoraTcpHealthCheck {
-                    consecutive_success: self.consecutive_success,
-                    consecutive_failure: self.consecutive_failure,
-                    timeout: self.timeout,
-                    connector: TransportConnector::new(None),
-                },
-            ))),
-            HealthCheckType::Http { host, path, use_tls } => {
+            HealthCheckType::Tcp => Ok(Box::new(NgxoraHealthCheck::Tcp(NgxoraTcpHealthCheck {
+                consecutive_success: self.consecutive_success,
+                consecutive_failure: self.consecutive_failure,
+                timeout: self.timeout,
+                connector: TransportConnector::new(None),
+            }))),
+            HealthCheckType::Http {
+                host,
+                path,
+                use_tls,
+            } => {
                 let uri = path
                     .parse::<http::Uri>()
                     .map_err(|err| format!("invalid health_check path `{path}`: {err}"))?;
@@ -124,8 +126,7 @@ impl CompiledHealthCheck {
                     RequestHeader::build("GET", path.as_bytes(), None).map_err(|err| {
                         format!("failed to build health_check request for `{path}`: {err}")
                     })?;
-                request
-                    .set_uri(uri);
+                request.set_uri(uri);
                 request
                     .insert_header("Host", host.as_str())
                     .map_err(|err| format!("failed to build health_check host header: {err}"))?;
@@ -226,7 +227,9 @@ impl NgxoraHttpHealthCheck {
         peer.options.read_timeout = Some(self.timeout);
 
         let (mut session, _) = self.connector.get_http_session(&peer).await?;
-        session.write_request_header(Box::new(self.request.clone())).await?;
+        session
+            .write_request_header(Box::new(self.request.clone()))
+            .await?;
         session.finish_request_body().await?;
         session.set_read_timeout(Some(self.timeout));
         session.read_response_header().await?;
@@ -648,7 +651,10 @@ fn compile_upstreams(
             return Err("upstream name cannot be empty".into());
         }
         if upstream.servers.is_empty() {
-            return Err(format!("upstream `{}` must define at least one server", upstream.name));
+            return Err(format!(
+                "upstream `{}` must define at least one server",
+                upstream.name
+            ));
         }
 
         let group = CompiledUpstreamGroup {
@@ -743,9 +749,8 @@ fn route_target_from_directive(
     match directive {
         LocationDirective::ProxyPass(ProxyPassTarget::Url(url)) => {
             if let Some(group) = upstream_group_from_url(url, upstreams) {
-                let tls = proxy_pass_tls(url.scheme()).ok_or_else(|| {
-                    format!("unsupported proxy_pass scheme `{}`", url.scheme())
-                })?;
+                let tls = proxy_pass_tls(url.scheme())
+                    .ok_or_else(|| format!("unsupported proxy_pass scheme `{}`", url.scheme()))?;
                 return Ok(Some(RouteTarget::UpstreamGroup {
                     name: group.name.clone(),
                     tls,
@@ -791,11 +796,13 @@ fn route_target(
     location
         .directives
         .iter()
-        .find_map(|directive| match route_target_from_directive(directive, upstreams) {
-            Ok(Some(target)) => Some(Ok(target)),
-            Ok(None) => None,
-            Err(err) => Some(Err(err)),
-        })
+        .find_map(
+            |directive| match route_target_from_directive(directive, upstreams) {
+                Ok(Some(target)) => Some(Ok(target)),
+                Ok(None) => None,
+                Err(err) => Some(Err(err)),
+            },
+        )
         .transpose()
 }
 
@@ -1153,26 +1160,22 @@ impl RuntimeUpstreamGroup {
 
         let backends = synthetic_backends(&group.servers)?;
         let selector = match group.policy {
-            UpstreamSelectionPolicy::RoundRobin => {
-                RuntimeUpstreamSelector::RoundRobin(build_load_balancer(
-                    backends,
-                    group.health_check.as_ref(),
-                )?)
-            }
-            UpstreamSelectionPolicy::Random => {
-                RuntimeUpstreamSelector::Random(build_load_balancer(
-                    backends,
-                    group.health_check.as_ref(),
-                )?)
-            }
+            UpstreamSelectionPolicy::RoundRobin => RuntimeUpstreamSelector::RoundRobin(
+                build_load_balancer(backends, group.health_check.as_ref())?,
+            ),
+            UpstreamSelectionPolicy::Random => RuntimeUpstreamSelector::Random(
+                build_load_balancer(backends, group.health_check.as_ref())?,
+            ),
         };
 
         Ok(Self {
             selector,
             max_iterations: group.servers.len(),
-            health_check: group.health_check.as_ref().map(|health_check| RuntimeHealthCheckSchedule {
-                interval: health_check.interval,
-                next_run_at: Mutex::new(Instant::now()),
+            health_check: group.health_check.as_ref().map(|health_check| {
+                RuntimeHealthCheckSchedule {
+                    interval: health_check.interval,
+                    next_run_at: Mutex::new(Instant::now()),
+                }
             }),
         })
     }
@@ -1185,7 +1188,10 @@ impl RuntimeUpstreamGroup {
     pub(crate) async fn run_due_health_check(&self, now: Instant) -> Option<Instant> {
         let schedule = self.health_check.as_ref()?;
         let next_run_at = {
-            let mut next_run_at = schedule.next_run_at.lock().expect("health check lock poisoned");
+            let mut next_run_at = schedule
+                .next_run_at
+                .lock()
+                .expect("health check lock poisoned");
             if *next_run_at > now {
                 return Some(*next_run_at);
             }
@@ -1322,10 +1328,7 @@ fn resolve_route<'a>(
 }
 
 impl SelectedRoute {
-    fn from_resolved(
-        snapshot: &RuntimeSnapshot,
-        resolved: &ResolvedLocation<'_>,
-    ) -> Result<Self> {
+    fn from_resolved(snapshot: &RuntimeSnapshot, resolved: &ResolvedLocation<'_>) -> Result<Self> {
         let peer = match &resolved.location.target {
             RouteTarget::ProxyPass {
                 host,
@@ -1339,14 +1342,12 @@ impl SelectedRoute {
                 sni: sni.clone(),
             },
             RouteTarget::UpstreamGroup { name, tls } => {
-                let group = snapshot
-                    .upstream_group(name)
-                    .ok_or_else(|| {
-                        pingora::Error::explain(
-                            pingora::ErrorType::InternalError,
-                            format!("compiled upstream group `{name}` is missing at runtime"),
-                        )
-                    })?;
+                let group = snapshot.upstream_group(name).ok_or_else(|| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::InternalError,
+                        format!("compiled upstream group `{name}` is missing at runtime"),
+                    )
+                })?;
                 let backend = group.select(b"").ok_or_else(|| {
                     pingora::Error::explain(
                         pingora::ErrorType::HTTPStatus(503),
@@ -1394,7 +1395,10 @@ fn select_runtime_route(
         return Ok(None);
     };
 
-    Ok(Some((SelectedRoute::from_resolved(snapshot, &resolved)?, resolved.host)))
+    Ok(Some((
+        SelectedRoute::from_resolved(snapshot, &resolved)?,
+        resolved.host,
+    )))
 }
 
 fn respond_from_plugin_flow(flow: PluginFlow, stage: &str) -> Result<()> {
@@ -1703,11 +1707,18 @@ impl ProxyHttp for DynamicProxy {
 
     async fn request_body_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         body: &mut Option<Bytes>,
         _end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // Classic WebSocket upgrades switch the downstream body stream into a
+        // raw upgraded tunnel after the 101 response. That traffic must not be
+        // counted against HTTP request body limits.
+        if session.was_upgraded() {
+            return Ok(());
+        }
+
         update_received_body_bytes(
             &mut ctx.received_body_bytes,
             body.as_ref(),

@@ -366,8 +366,8 @@ fn lower_upstream_health_check(block: &Block) -> Result<UpstreamHealthCheck, Low
         UpstreamHealthCheckKind::Tcp => {
             if draft.host.is_some() || draft.path.is_some() || draft.use_tls.is_some() {
                 return Err(LowerErr {
-                    message:
-                        "health_check: host/path/use_tls are only supported for type http".into(),
+                    message: "health_check: host/path/use_tls are only supported for type http"
+                        .into(),
                 });
             }
             UpstreamHealthCheckType::Tcp
@@ -392,7 +392,9 @@ fn lower_upstream_health_check(block: &Block) -> Result<UpstreamHealthCheck, Low
 
     Ok(UpstreamHealthCheck {
         check_type,
-        timeout: draft.timeout.unwrap_or_else(|| std::time::Duration::from_secs(1)),
+        timeout: draft
+            .timeout
+            .unwrap_or_else(|| std::time::Duration::from_secs(1)),
         interval: draft
             .interval
             .unwrap_or_else(|| std::time::Duration::from_secs(5)),
@@ -427,8 +429,7 @@ fn apply_upstream_health_check_directive(
             set_once(&mut draft.timeout, value, "health_check timeout")?;
         }
         consts::INTERVAL => {
-            let value =
-                parse_single_duration_directive(&directive.args, "health_check interval")?;
+            let value = parse_single_duration_directive(&directive.args, "health_check interval")?;
             ensure_non_zero_duration(value, "health_check interval")?;
             set_once(&mut draft.interval, value, "health_check interval")?;
         }
@@ -467,10 +468,7 @@ fn apply_upstream_health_check_directive(
         }
         _ => {
             return Err(LowerErr {
-                message: format!(
-                    "unsupported health_check directive: {}",
-                    directive.name
-                ),
+                message: format!("unsupported health_check directive: {}", directive.name),
             });
         }
     }
@@ -857,11 +855,7 @@ fn parse_header_entry(args: &[String], directive: &str) -> Result<HeaderEntry, L
     }
 }
 
-fn assign_basic_auth_string(
-    slot: &mut String,
-    field: &str,
-    value: String,
-) -> Result<(), LowerErr> {
+fn assign_basic_auth_string(slot: &mut String, field: &str, value: String) -> Result<(), LowerErr> {
     if !slot.is_empty() {
         return Err(LowerErr {
             message: format!("basic-auth block: duplicate {field} directive"),
@@ -917,7 +911,9 @@ fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, 
                 let parsed_url = Url::parse(raw_url).map_err(|e| LowerErr {
                     message: format!("proxy_pass: invalid URL: {:?}", e),
                 })?;
-                Ok(LocationDirective::ProxyPass(ProxyPassTarget::Url(parsed_url)))
+                Ok(LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    parsed_url,
+                )))
             }
             [] => Err(LowerErr {
                 message: "proxy_pass: expected URL".into(),
@@ -935,14 +931,15 @@ fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, 
         consts::PROXY_WRITE_TIMEOUT => Ok(LocationDirective::ProxyWriteTimeout(
             parse_single_duration_directive(&directive.args, consts::PROXY_WRITE_TIMEOUT)?,
         )),
-        consts::PROXY_SSL_VERIFY => Ok(LocationDirective::ProxySslVerify(
-            get_directive_switch(directive)?,
-        )),
+        consts::PROXY_SSL_VERIFY => Ok(LocationDirective::ProxySslVerify(get_directive_switch(
+            directive,
+        )?)),
         consts::PROXY_SSL_TRUSTED_CERTIFICATE => match directive.args.as_slice() {
             [path] => {
-                let ps = PemSource::new(std::slice::from_ref(path), false).map_err(|_| LowerErr {
-                    message: "proxy_ssl_trusted_certificate: invalid certificate source".into(),
-                })?;
+                let ps =
+                    PemSource::new(std::slice::from_ref(path), false).map_err(|_| LowerErr {
+                        message: "proxy_ssl_trusted_certificate: invalid certificate source".into(),
+                    })?;
                 Ok(LocationDirective::ProxySslTrustedCertificate(ps))
             }
             [] => Err(LowerErr {

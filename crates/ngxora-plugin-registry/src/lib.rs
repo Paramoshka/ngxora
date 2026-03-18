@@ -40,6 +40,7 @@ impl PluginRegistry {
     }
 }
 
+#[allow(unused_variables)]
 pub fn register_builtin_plugins(registry: &mut PluginRegistry) {
     #[cfg(feature = "plugin-headers")]
     registry.register(Arc::new(ngxora_extension_headers::HeadersPluginFactory));

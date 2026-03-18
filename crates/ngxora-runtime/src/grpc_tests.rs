@@ -7,7 +7,6 @@ use ngxora_compile::ir::{
     UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer,
 };
 use ngxora_plugin_api::PluginSpec;
-use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
@@ -221,8 +220,13 @@ fn runtime_snapshot_converts_back_to_proto() {
     assert!(vhost.default_server);
     assert!(vhost.tls.is_some());
     assert_eq!(vhost.routes.len(), 1);
-    assert_eq!(vhost.routes[0].plugins.len(), 1);
-    assert_eq!(vhost.routes[0].plugins[0].name, "headers");
+    #[cfg(feature = "plugin-headers")]
+    {
+        assert_eq!(vhost.routes[0].plugins.len(), 1);
+        assert_eq!(vhost.routes[0].plugins[0].name, "headers");
+    }
+    #[cfg(not(feature = "plugin-headers"))]
+    assert!(vhost.routes[0].plugins.is_empty());
     assert_eq!(
         vhost.routes[0]
             .tls_options
@@ -237,9 +241,7 @@ fn runtime_snapshot_converts_back_to_proto() {
             .as_ref()
             .and_then(|options| options.trusted_certificate.as_ref())
             .and_then(|source| source.source.as_ref()),
-        Some(&proto::pem_source::Source::InlinePem(
-            TEST_CA_PEM.into(),
-        ))
+        Some(&proto::pem_source::Source::InlinePem(TEST_CA_PEM.into(),))
     );
     assert_eq!(
         vhost.routes[0]
@@ -271,6 +273,21 @@ fn runtime_snapshot_converts_back_to_proto() {
             .map(|health_check| health_check.interval_ms),
         Some(5_000)
     );
+}
+
+fn test_route_plugins() -> Vec<PluginSpec> {
+    #[cfg(feature = "plugin-headers")]
+    {
+        return vec![PluginSpec {
+            name: "headers".into(),
+            config: serde_json::json!({"response":{"add":[["x-proxy","ngxora"]]}}),
+        }];
+    }
+
+    #[cfg(not(feature = "plugin-headers"))]
+    {
+        Vec::new()
+    }
 }
 
 fn router_with_tls_and_plugin() -> CompiledRouter {
@@ -313,10 +330,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                         tls: true,
                     }),
                 ],
-                plugins: vec![PluginSpec {
-                    name: "headers".into(),
-                    config: json!({"response":{"add":[["x-proxy","ngxora"]]}}),
-                }],
+                plugins: test_route_plugins(),
             }],
             listens: vec![Listen {
                 addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),

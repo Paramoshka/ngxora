@@ -341,8 +341,7 @@ fn build_runtime_upstream_groups(
         .upstreams
         .iter()
         .map(|(name, group)| {
-            RuntimeUpstreamGroup::from_compiled(group)
-                .map(|group| (name.clone(), Arc::new(group)))
+            RuntimeUpstreamGroup::from_compiled(group).map(|group| (name.clone(), Arc::new(group)))
         })
         .collect()
 }

@@ -88,6 +88,24 @@ cargo run -- examples/ngxora.conf
 
 Supported directives, upstream policies, and built-in plugin config are documented in [Config Options](./docs/config-options.md).
 
+## WebSocket proxying
+
+Classic HTTP/1.1 WebSocket proxying works with plain `proxy_pass`; `ngxora` does not require extra `Upgrade` or `Connection` rewrite directives for the common case.
+
+```nginx
+location /ws/ {
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 1h;
+    proxy_write_timeout 1h;
+    proxy_pass http://127.0.0.1:7001;
+}
+```
+
+Notes:
+
+- use long enough `proxy_read_timeout` / `proxy_write_timeout` for idle WebSocket sessions
+- do not use `listen ... http2_only` for classic WebSocket endpoints, because the Upgrade handshake is HTTP/1.1
+
 ## Dynamic config
 
 The runtime is built around atomic snapshot apply:
@@ -200,6 +218,7 @@ make build-bin
 It leans on Pingora for the data plane:
 
 - HTTP/1.1 and HTTP/2 proxying
+- classic WebSocket proxying over HTTP/1.1 upgrade
 - connection reuse and pooling
 - TLS termination and upstream TLS
 - efficient async request handling

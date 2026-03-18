@@ -8,8 +8,8 @@ use crate::upstreams::{
 };
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
-    LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity,
-    TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
+    LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
+    TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
     UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
     UpstreamTimeouts,
 };
@@ -265,7 +265,9 @@ fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<Upstream
                 .map(upstream_backend_from_proto)
                 .collect::<Result<Vec<_>, _>>()?;
             if servers.is_empty() {
-                return Err(format!("upstream group `{name}` must define at least one backend"));
+                return Err(format!(
+                    "upstream group `{name}` must define at least one backend"
+                ));
             }
 
             Ok(UpstreamBlock {
@@ -366,9 +368,9 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
         }
     }
 
-    directives.push(LocationDirective::ProxyPass(
-        proxy_pass_target_from_proto(upstream)?,
-    ));
+    directives.push(LocationDirective::ProxyPass(proxy_pass_target_from_proto(
+        upstream,
+    )?));
 
     Ok(Location {
         matcher,
@@ -583,9 +585,7 @@ fn upstream_tls_options_from_proto(
         trusted_certificate: value
             .trusted_certificate
             .as_ref()
-            .map(|source| {
-                pem_source_from_proto(Some(source), "route upstream trusted certificate")
-            })
+            .map(|source| pem_source_from_proto(Some(source), "route upstream trusted certificate"))
             .transpose()?,
     }))
 }
@@ -991,8 +991,9 @@ fn upstream_selection_policy_from_proto(value: i32) -> Result<UpstreamSelectionP
     match ProtoUpstreamSelectionPolicy::try_from(value)
         .unwrap_or(ProtoUpstreamSelectionPolicy::Unspecified)
     {
-        ProtoUpstreamSelectionPolicy::Unspecified
-        | ProtoUpstreamSelectionPolicy::RoundRobin => Ok(UpstreamSelectionPolicy::RoundRobin),
+        ProtoUpstreamSelectionPolicy::Unspecified | ProtoUpstreamSelectionPolicy::RoundRobin => {
+            Ok(UpstreamSelectionPolicy::RoundRobin)
+        }
         ProtoUpstreamSelectionPolicy::Random => Ok(UpstreamSelectionPolicy::Random),
     }
 }

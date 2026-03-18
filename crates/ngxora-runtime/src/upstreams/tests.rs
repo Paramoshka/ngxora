@@ -8,16 +8,18 @@ use super::{
 use bytes::Bytes;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
-    ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamHealthCheck,
-    UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
-    UpstreamTimeouts,
+    ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType,
+    UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
+use pingora::http::ResponseHeader;
 use pingora::upstreams::peer::HttpPeer;
+use pingora_proxy::{ProxyHttp, Session};
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
+use tokio::io::{AsyncWriteExt, duplex};
 
 #[cfg(feature = "openssl")]
 const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
@@ -239,9 +241,9 @@ fn compiled_router_rejects_invalid_location_regex() {
                     case_insensitive: false,
                     pattern: "(".into(),
                 },
-                directives: vec![LocationDirective::ProxyPass(
-                    ProxyPassTarget::Url("http://127.0.0.1:8080".parse().unwrap()),
-                )],
+                directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    "http://127.0.0.1:8080".parse().unwrap(),
+                ))],
                 plugins: Vec::new(),
             }],
             ..Server::default()
@@ -677,6 +679,44 @@ fn update_received_body_bytes_rejects_overflowing_stream() {
     assert_eq!(err.etype(), &pingora::ErrorType::HTTPStatus(413));
 }
 
+#[tokio::test]
+async fn request_body_filter_ignores_upgraded_websocket_stream() {
+    let (mut client, server) = duplex(1024);
+    client
+        .write_all(
+            b"GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n",
+        )
+        .await
+        .expect("write upgrade request");
+
+    let mut session = Session::new_h1(Box::new(server));
+    session.read_request().await.expect("read request");
+
+    let mut switching_protocols =
+        ResponseHeader::build(http::StatusCode::SWITCHING_PROTOCOLS, None)
+            .expect("build 101 response");
+    switching_protocols.set_version(http::Version::HTTP_11);
+    session
+        .write_response_header(Box::new(switching_protocols), false)
+        .await
+        .expect("write 101 response");
+    assert!(session.was_upgraded());
+
+    let proxy = super::DynamicProxy::from_router(CompiledRouter::default());
+    let mut ctx = super::ProxyContext {
+        client_max_body_size: Some(1),
+        ..Default::default()
+    };
+    let mut body = Some(Bytes::from_static(b"hello"));
+
+    ProxyHttp::request_body_filter(&proxy, &mut session, &mut body, false, &mut ctx)
+        .await
+        .expect("upgraded body should bypass http body limits");
+
+    assert_eq!(body, Some(Bytes::from_static(b"hello")));
+    assert_eq!(ctx.received_body_bytes, 0);
+}
+
 #[test]
 fn compiled_router_preserves_location_plugins() {
     let http = Http {
@@ -687,9 +727,9 @@ fn compiled_router_preserves_location_plugins() {
             }],
             locations: vec![Location {
                 matcher: LocationMatcher::Prefix("/".into()),
-                directives: vec![LocationDirective::ProxyPass(
-                    ProxyPassTarget::Url("http://127.0.0.1:8080".parse().unwrap()),
-                )],
+                directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    "http://127.0.0.1:8080".parse().unwrap(),
+                ))],
                 plugins: vec![PluginSpec {
                     name: "headers".into(),
                     config: json!({

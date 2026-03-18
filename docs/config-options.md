@@ -142,6 +142,9 @@ Notes:
 
 - `proxy_ssl_trusted_certificate` currently requires an `openssl` build.
 - There is no separate `send_timeout` directive today; upstream timeouts are modeled as `connect`, `read`, and `write`.
+- Classic HTTP/1.1 WebSocket proxying works with plain `proxy_pass`; no extra `Upgrade` or `Connection` rewrite is required.
+- For long-lived WebSocket tunnels, set `proxy_read_timeout` and `proxy_write_timeout` high enough for your workload.
+- Do not use `listen ... http2_only` for classic WebSocket endpoints; the Upgrade handshake is an HTTP/1.1 flow.
 
 Example:
 
@@ -162,6 +165,17 @@ Disable upstream verification only for local or disposable environments:
 location /lab/ {
     proxy_ssl_verify off;
     proxy_pass https://127.0.0.1:9443;
+}
+```
+
+WebSocket example:
+
+```nginx
+location /ws/ {
+    proxy_connect_timeout 3s;
+    proxy_read_timeout 1h;
+    proxy_write_timeout 1h;
+    proxy_pass http://127.0.0.1:7001;
 }
 ```
 
