@@ -78,6 +78,7 @@ message Route {
   RouteTimeouts timeouts = 3;
   repeated Plugin plugins = 4;
   UpstreamTlsOptions tls_options = 5;
+  UpstreamHttpProtocol upstream_protocol = 6;
 }
 
 message RouteTimeouts {
@@ -153,6 +154,13 @@ enum UpstreamSelectionPolicy {
   UPSTREAM_SELECTION_POLICY_UNSPECIFIED = 0;
   UPSTREAM_SELECTION_POLICY_ROUND_ROBIN = 1;
   UPSTREAM_SELECTION_POLICY_RANDOM = 2;
+}
+
+enum UpstreamHttpProtocol {
+  UPSTREAM_HTTP_PROTOCOL_UNSPECIFIED = 0;
+  UPSTREAM_HTTP_PROTOCOL_H1 = 1;
+  UPSTREAM_HTTP_PROTOCOL_H2 = 2;
+  UPSTREAM_HTTP_PROTOCOL_H2C = 3;
 }
 
 enum TlsProtocolVersion {

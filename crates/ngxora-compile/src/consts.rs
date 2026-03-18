@@ -34,6 +34,7 @@ pub const PROXY_PASS: &str = "proxy_pass";
 pub const PROXY_CONNECT_TIMEOUT: &str = "proxy_connect_timeout";
 pub const PROXY_READ_TIMEOUT: &str = "proxy_read_timeout";
 pub const PROXY_WRITE_TIMEOUT: &str = "proxy_write_timeout";
+pub const PROXY_UPSTREAM_PROTOCOL: &str = "proxy_upstream_protocol";
 pub const PROXY_SSL_VERIFY: &str = "proxy_ssl_verify";
 pub const PROXY_SSL_TRUSTED_CERTIFICATE: &str = "proxy_ssl_trusted_certificate";
 pub const REQUEST_ADD: &str = "request_add";

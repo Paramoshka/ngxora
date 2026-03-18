@@ -1,15 +1,17 @@
 use super::{
     CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter,
     CompiledUpstreamGroup, CompiledUpstreamServer, HealthCheckType, RouteTarget, ServerRoutes,
-    VirtualHostRoutes, apply_upstream_ssl_options, apply_upstream_timeouts,
-    content_length_limit_exceeded, downstream_keepalive_timeout_secs, listener_routes,
-    select_route_target, update_received_body_bytes, validate_sni_host_consistency,
+    VirtualHostRoutes, apply_upstream_http_protocol, apply_upstream_ssl_options,
+    apply_upstream_timeouts, content_length_limit_exceeded, downstream_keepalive_timeout_secs,
+    listener_routes, select_route_target, update_received_body_bytes,
+    validate_sni_host_consistency,
 };
 use bytes::Bytes;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
     ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType,
-    UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
+    UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
+    UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use pingora::http::ResponseHeader;
@@ -60,6 +62,7 @@ fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
         matcher,
         target: target(id),
         upstream_timeouts: UpstreamTimeouts::default(),
+        upstream_protocol: None,
         upstream_ssl_options: UpstreamSslOptions::default(),
         plugins: Vec::<PluginSpec>::new(),
     }
@@ -344,6 +347,97 @@ fn compiled_router_parses_proxy_ssl_options() {
             trusted_certificate: Some(trusted_certificate),
         }
     );
+}
+
+#[test]
+fn compiled_router_parses_proxy_upstream_protocol() {
+    let http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/grpc".into()),
+                directives: vec![
+                    LocationDirective::ProxyUpstreamProtocol(UpstreamHttpProtocol::H2c),
+                    LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                        "http://127.0.0.1:50051".parse().unwrap(),
+                    )),
+                ],
+                plugins: Vec::new(),
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+    let location = &router
+        .listeners
+        .values()
+        .next()
+        .expect("listener present")
+        .default
+        .as_ref()
+        .expect("default route present")
+        .locations[0];
+
+    assert_eq!(location.upstream_protocol, Some(UpstreamHttpProtocol::H2c));
+}
+
+#[test]
+fn compiled_router_rejects_h2_without_tls_upstream() {
+    let http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/grpc".into()),
+                directives: vec![
+                    LocationDirective::ProxyUpstreamProtocol(UpstreamHttpProtocol::H2),
+                    LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                        "http://127.0.0.1:50051".parse().unwrap(),
+                    )),
+                ],
+                plugins: Vec::new(),
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let err = CompiledRouter::from_http(&http).expect_err("expected h2/http mismatch");
+    assert!(err.contains("proxy_upstream_protocol h2 requires TLS upstream"));
+}
+
+#[test]
+fn compiled_router_rejects_h2c_with_tls_upstream() {
+    let http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/grpc".into()),
+                directives: vec![
+                    LocationDirective::ProxyUpstreamProtocol(UpstreamHttpProtocol::H2c),
+                    LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                        "https://127.0.0.1:50051".parse().unwrap(),
+                    )),
+                ],
+                plugins: Vec::new(),
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let err = CompiledRouter::from_http(&http).expect_err("expected h2c/https mismatch");
+    assert!(err.contains("proxy_upstream_protocol h2c requires plaintext upstream"));
 }
 
 #[test]
@@ -775,4 +869,17 @@ fn apply_upstream_timeouts_maps_zero_to_none() {
     assert_eq!(peer.options.connection_timeout, None);
     assert_eq!(peer.options.read_timeout, Some(Duration::from_secs(10)));
     assert_eq!(peer.options.write_timeout, Some(Duration::from_secs(5)));
+}
+
+#[test]
+fn apply_upstream_http_protocol_sets_peer_http_version() {
+    let mut peer = HttpPeer::new(("127.0.0.1", 50051), true, String::new());
+
+    apply_upstream_http_protocol(&mut peer, Some(UpstreamHttpProtocol::H2));
+    assert_eq!(peer.options.alpn.get_min_http_version(), 2);
+    assert_eq!(peer.options.alpn.get_max_http_version(), 2);
+
+    apply_upstream_http_protocol(&mut peer, Some(UpstreamHttpProtocol::H1));
+    assert_eq!(peer.options.alpn.get_min_http_version(), 1);
+    assert_eq!(peer.options.alpn.get_max_http_version(), 1);
 }

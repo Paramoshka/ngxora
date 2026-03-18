@@ -11,7 +11,7 @@ use crate::{
         Http, Ir, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher,
         PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
         TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
-        UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer,
+        UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
     },
 };
 
@@ -904,6 +904,25 @@ fn parse_header_remove(args: &[String], directive: &str) -> Result<String, Lower
     }
 }
 
+fn parse_proxy_upstream_protocol(args: &[String]) -> Result<UpstreamHttpProtocol, LowerErr> {
+    match args {
+        [value] => match value.as_str() {
+            "h1" => Ok(UpstreamHttpProtocol::H1),
+            "h2" => Ok(UpstreamHttpProtocol::H2),
+            "h2c" => Ok(UpstreamHttpProtocol::H2c),
+            _ => Err(LowerErr {
+                message: "proxy_upstream_protocol: expected h1|h2|h2c".into(),
+            }),
+        },
+        [] => Err(LowerErr {
+            message: "proxy_upstream_protocol: expected h1|h2|h2c".into(),
+        }),
+        _ => Err(LowerErr {
+            message: "proxy_upstream_protocol: expected exactly 1 argument".into(),
+        }),
+    }
+}
+
 fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, LowerErr> {
     match directive.name.as_str() {
         consts::PROXY_PASS => match directive.args.as_slice() {
@@ -930,6 +949,9 @@ fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, 
         )),
         consts::PROXY_WRITE_TIMEOUT => Ok(LocationDirective::ProxyWriteTimeout(
             parse_single_duration_directive(&directive.args, consts::PROXY_WRITE_TIMEOUT)?,
+        )),
+        consts::PROXY_UPSTREAM_PROTOCOL => Ok(LocationDirective::ProxyUpstreamProtocol(
+            parse_proxy_upstream_protocol(&directive.args)?,
         )),
         consts::PROXY_SSL_VERIFY => Ok(LocationDirective::ProxySslVerify(get_directive_switch(
             directive,

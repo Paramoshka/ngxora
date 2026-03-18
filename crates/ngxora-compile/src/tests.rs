@@ -12,7 +12,7 @@ mod tests {
     use crate::ir::{
         Ir, KeepaliveTimeout, LocationDirective, LocationMatcher, PemSource, ProxyPassTarget,
         Switch, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamHealthCheckType,
-        UpstreamSelectionPolicy,
+        UpstreamHttpProtocol, UpstreamSelectionPolicy,
     };
 
     #[test]
@@ -226,6 +226,35 @@ http {
                 LocationDirective::ProxyWriteTimeout(Duration::from_secs(20)),
                 LocationDirective::ProxyPass(ProxyPassTarget::Url(
                     Url::parse("http://127.0.0.1:8080").unwrap(),
+                )),
+            ]
+        );
+    }
+
+    #[test]
+    fn from_ast_parses_proxy_upstream_protocol() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location /grpc/ {
+      proxy_upstream_protocol h2c;
+      proxy_pass http://127.0.0.1:50051;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let location = &http.servers[0].locations[0];
+        assert_eq!(
+            location.directives,
+            vec![
+                LocationDirective::ProxyUpstreamProtocol(UpstreamHttpProtocol::H2c),
+                LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    Url::parse("http://127.0.0.1:50051").unwrap(),
                 )),
             ]
         );

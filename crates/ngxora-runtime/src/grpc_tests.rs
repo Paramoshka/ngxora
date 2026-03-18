@@ -4,7 +4,7 @@ use crate::upstreams::{CompiledMatcher, CompiledRouter, ListenKey, RouteTarget};
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
     ProxyPassTarget, Server, Switch, TlsIdentity, UpstreamBlock, UpstreamHealthCheck,
-    UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer,
+    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
 };
 use ngxora_plugin_api::PluginSpec;
 use std::net::{IpAddr, Ipv4Addr};
@@ -109,6 +109,7 @@ fn proto_snapshot_converts_into_runtime_router() {
                         )),
                     }),
                 }),
+                upstream_protocol: proto::UpstreamHttpProtocol::H2c as i32,
                 plugins: vec![proto::Plugin {
                     name: "headers".into(),
                     json_config: r#"{"response":{"add":[["x-proxy","ngxora"]]}}"#.into(),
@@ -157,6 +158,7 @@ fn proto_snapshot_converts_into_runtime_router() {
     );
     assert_eq!(route.upstream_timeouts.read, Some(Duration::from_secs(2)));
     assert_eq!(route.upstream_timeouts.write, Some(Duration::from_secs(3)));
+    assert_eq!(route.upstream_protocol, Some(UpstreamHttpProtocol::H2c));
     assert_eq!(route.upstream_ssl_options.verify_cert, Switch::Off);
     assert_eq!(
         route.upstream_ssl_options.trusted_certificate,
@@ -251,6 +253,10 @@ fn runtime_snapshot_converts_back_to_proto() {
             .upstream_group,
         "backend-pool"
     );
+    assert_eq!(
+        vhost.routes[0].upstream_protocol,
+        proto::UpstreamHttpProtocol::H2 as i32
+    );
     assert_eq!(proto.upstreams.len(), 1);
     assert_eq!(proto.upstreams[0].backends.len(), 2);
     assert_eq!(
@@ -325,6 +331,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                     LocationDirective::ProxySslTrustedCertificate(PemSource::InlinePem(
                         TEST_CA_PEM.into(),
                     )),
+                    LocationDirective::ProxyUpstreamProtocol(UpstreamHttpProtocol::H2),
                     LocationDirective::ProxyPass(ProxyPassTarget::UpstreamGroup {
                         name: "backend-pool".into(),
                         tls: true,

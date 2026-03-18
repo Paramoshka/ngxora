@@ -10,8 +10,8 @@ use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
     LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
     TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
-    UpstreamHealthCheckType, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
-    UpstreamTimeouts,
+    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
+    UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use serde_json::Value;
@@ -43,6 +43,7 @@ use proto::{
     Upstream as ProtoUpstream, UpstreamBackend as ProtoUpstreamBackend,
     UpstreamGroup as ProtoUpstreamGroup, UpstreamHealthCheck as ProtoUpstreamHealthCheck,
     UpstreamHttpHealthCheck as ProtoUpstreamHttpHealthCheck,
+    UpstreamHttpProtocol as ProtoUpstreamHttpProtocol,
     UpstreamSelectionPolicy as ProtoUpstreamSelectionPolicy,
     UpstreamTcpHealthCheck as ProtoUpstreamTcpHealthCheck,
     UpstreamTlsOptions as ProtoUpstreamTlsOptions, VirtualHost as ProtoVirtualHost,
@@ -345,7 +346,7 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
         .upstream
         .as_ref()
         .ok_or_else(|| "route upstream is required".to_string())?;
-    let mut directives = Vec::with_capacity(6);
+    let mut directives = Vec::with_capacity(7);
 
     if let Some(timeouts) = route.timeouts.as_ref() {
         if let Some(duration) = duration_from_millis(timeouts.connect_timeout_ms) {
@@ -366,6 +367,10 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
                 trusted_certificate,
             ));
         }
+    }
+
+    if let Some(protocol) = upstream_http_protocol_from_proto(route.upstream_protocol)? {
+        directives.push(LocationDirective::ProxyUpstreamProtocol(protocol));
     }
 
     directives.push(LocationDirective::ProxyPass(proxy_pass_target_from_proto(
@@ -516,6 +521,17 @@ fn plugin_spec_from_proto(plugin: &ProtoPlugin) -> Result<PluginSpec, String> {
         name: plugin.name.clone(),
         config,
     })
+}
+
+fn upstream_http_protocol_from_proto(value: i32) -> Result<Option<UpstreamHttpProtocol>, String> {
+    match ProtoUpstreamHttpProtocol::try_from(value)
+        .map_err(|_| format!("unknown upstream HTTP protocol value `{value}`"))?
+    {
+        ProtoUpstreamHttpProtocol::Unspecified => Ok(None),
+        ProtoUpstreamHttpProtocol::H1 => Ok(Some(UpstreamHttpProtocol::H1)),
+        ProtoUpstreamHttpProtocol::H2 => Ok(Some(UpstreamHttpProtocol::H2)),
+        ProtoUpstreamHttpProtocol::H2c => Ok(Some(UpstreamHttpProtocol::H2c)),
+    }
 }
 
 fn tls_identity_from_proto(value: &ProtoTlsBinding) -> Result<TlsIdentity, String> {
@@ -828,6 +844,8 @@ fn proto_route_from_runtime(route: &CompiledLocation) -> Result<ProtoRoute, Stri
         tls_options: Some(proto_upstream_tls_options_from_runtime(
             &route.upstream_ssl_options,
         )),
+        upstream_protocol: proto_upstream_http_protocol_from_runtime(route.upstream_protocol)
+            as i32,
     })
 }
 
@@ -862,6 +880,17 @@ fn proto_upstream_from_runtime(target: &RouteTarget) -> ProtoUpstream {
             port: 0,
             upstream_group: name.clone(),
         },
+    }
+}
+
+fn proto_upstream_http_protocol_from_runtime(
+    value: Option<UpstreamHttpProtocol>,
+) -> ProtoUpstreamHttpProtocol {
+    match value {
+        None => ProtoUpstreamHttpProtocol::Unspecified,
+        Some(UpstreamHttpProtocol::H1) => ProtoUpstreamHttpProtocol::H1,
+        Some(UpstreamHttpProtocol::H2) => ProtoUpstreamHttpProtocol::H2,
+        Some(UpstreamHttpProtocol::H2c) => ProtoUpstreamHttpProtocol::H2c,
     }
 }
 

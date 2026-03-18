@@ -133,6 +133,7 @@ Supported location directives:
 - `proxy_connect_timeout <duration>;`
 - `proxy_read_timeout <duration>;`
 - `proxy_write_timeout <duration>;`
+- `proxy_upstream_protocol h1|h2|h2c;`
 - `proxy_ssl_verify on|off;`
   `off` disables both upstream certificate and hostname verification.
 - `proxy_ssl_trusted_certificate <path>;`
@@ -142,6 +143,8 @@ Notes:
 
 - `proxy_ssl_trusted_certificate` currently requires an `openssl` build.
 - There is no separate `send_timeout` directive today; upstream timeouts are modeled as `connect`, `read`, and `write`.
+- `proxy_upstream_protocol h2` requires a TLS upstream target such as `proxy_pass https://...`.
+- `proxy_upstream_protocol h2c` requires a plaintext upstream target such as `proxy_pass http://...`.
 - Classic HTTP/1.1 WebSocket proxying works with plain `proxy_pass`; no extra `Upgrade` or `Connection` rewrite is required.
 - For long-lived WebSocket tunnels, set `proxy_read_timeout` and `proxy_write_timeout` high enough for your workload.
 - Do not use `listen ... http2_only` for classic WebSocket endpoints; the Upgrade handshake is an HTTP/1.1 flow.
@@ -165,6 +168,41 @@ Disable upstream verification only for local or disposable environments:
 location /lab/ {
     proxy_ssl_verify off;
     proxy_pass https://127.0.0.1:9443;
+}
+```
+
+gRPC examples:
+
+TLS upstream gRPC:
+
+```nginx
+server {
+    listen 443 ssl http2;
+
+    location /helloworld.Greeter/ {
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 1h;
+        proxy_write_timeout 1h;
+        proxy_upstream_protocol h2;
+        proxy_pass https://grpc-backend.internal:8443;
+    }
+}
+```
+
+Plaintext h2c upstream gRPC:
+
+```nginx
+http {
+    h2c on;
+
+    server {
+        listen 8080;
+
+        location /helloworld.Greeter/ {
+            proxy_upstream_protocol h2c;
+            proxy_pass http://127.0.0.1:50051;
+        }
+    }
 }
 ```
 

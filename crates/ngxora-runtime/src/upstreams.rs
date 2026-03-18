@@ -7,7 +7,8 @@ use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
     LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
     TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType,
-    UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
+    UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
+    UpstreamTimeouts,
 };
 use ngxora_plugin_api::{
     HeaderMapMut, LocalResponse, PluginError, PluginFlow, PluginSpec, PluginState, RequestCtx,
@@ -377,6 +378,7 @@ pub struct CompiledLocation {
     pub matcher: CompiledMatcher,
     pub target: RouteTarget,
     pub upstream_timeouts: UpstreamTimeouts,
+    pub upstream_protocol: Option<UpstreamHttpProtocol>,
     pub upstream_ssl_options: UpstreamSslOptions,
     pub plugins: Vec<PluginSpec>,
 }
@@ -827,6 +829,46 @@ fn compile_upstream_timeouts(location: &Location) -> Result<UpstreamTimeouts, St
     Ok(timeouts)
 }
 
+fn compile_upstream_protocol(
+    location: &Location,
+    target: &RouteTarget,
+) -> Result<Option<UpstreamHttpProtocol>, String> {
+    let mut protocol = None;
+
+    for directive in &location.directives {
+        if let LocationDirective::ProxyUpstreamProtocol(value) = directive {
+            if protocol.replace(*value).is_some() {
+                return Err("proxy_upstream_protocol is duplicated in the same location".into());
+            }
+        }
+    }
+
+    if let Some(protocol) = protocol {
+        let target_uses_tls = match target {
+            RouteTarget::ProxyPass { tls, .. } | RouteTarget::UpstreamGroup { tls, .. } => *tls,
+        };
+
+        match protocol {
+            UpstreamHttpProtocol::H1 => {}
+            UpstreamHttpProtocol::H2 if !target_uses_tls => {
+                return Err(
+                    "proxy_upstream_protocol h2 requires TLS upstream; use https proxy_pass or h2c"
+                        .into(),
+                );
+            }
+            UpstreamHttpProtocol::H2c if target_uses_tls => {
+                return Err(
+                    "proxy_upstream_protocol h2c requires plaintext upstream; use http proxy_pass"
+                        .into(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(protocol)
+}
+
 fn compile_upstream_ssl_options(location: &Location) -> Result<UpstreamSslOptions, String> {
     let mut options = UpstreamSslOptions::default();
 
@@ -853,12 +895,14 @@ fn compile_location(
     let Some(target) = route_target(location, upstreams)? else {
         return Ok(None);
     };
+    let upstream_protocol = compile_upstream_protocol(location, &target)?;
 
     let compiled = CompiledLocation {
         route_id: *next_route_id,
         matcher: CompiledMatcher::try_from(&location.matcher)?,
         target,
         upstream_timeouts: compile_upstream_timeouts(location)?,
+        upstream_protocol,
         upstream_ssl_options: compile_upstream_ssl_options(location)?,
         plugins: location.plugins.clone(),
     };
@@ -1207,6 +1251,7 @@ impl RuntimeUpstreamGroup {
 struct SelectedRoute {
     peer: SelectedPeer,
     upstream_timeouts: UpstreamTimeouts,
+    upstream_protocol: Option<UpstreamHttpProtocol>,
     upstream_ssl_options: UpstreamSslOptions,
     upstream_trusted_ca: Option<RuntimeTrustedCa>,
     plugins: ngxora_plugin_api::PluginChain,
@@ -1367,6 +1412,7 @@ impl SelectedRoute {
         Ok(Self {
             peer,
             upstream_timeouts: resolved.location.upstream_timeouts,
+            upstream_protocol: resolved.location.upstream_protocol,
             upstream_ssl_options: resolved.location.upstream_ssl_options.clone(),
             upstream_trusted_ca: resolved
                 .location
@@ -1484,6 +1530,16 @@ fn apply_upstream_timeouts(peer: &mut HttpPeer, timeouts: UpstreamTimeouts) {
     peer.options.connection_timeout = normalized_peer_timeout(timeouts.connect);
     peer.options.read_timeout = normalized_peer_timeout(timeouts.read);
     peer.options.write_timeout = normalized_peer_timeout(timeouts.write);
+}
+
+fn apply_upstream_http_protocol(peer: &mut HttpPeer, protocol: Option<UpstreamHttpProtocol>) {
+    match protocol {
+        Some(UpstreamHttpProtocol::H1) => peer.options.set_http_version(1, 1),
+        Some(UpstreamHttpProtocol::H2 | UpstreamHttpProtocol::H2c) => {
+            peer.options.set_http_version(2, 2)
+        }
+        None => {}
+    }
 }
 
 // Apply SSL options from location directives to Pingora peer options.
@@ -1819,6 +1875,7 @@ impl ProxyHttp for DynamicProxy {
             selected.peer.sni.clone(),
         );
         apply_upstream_timeouts(&mut peer, selected.upstream_timeouts);
+        apply_upstream_http_protocol(&mut peer, selected.upstream_protocol);
         apply_upstream_ssl_options(
             &mut peer,
             &selected.upstream_ssl_options,

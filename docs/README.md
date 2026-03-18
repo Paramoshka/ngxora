@@ -57,6 +57,7 @@ http {
 | `location` / `proxy_pass` | route | Live | Applied through `RuntimeState` swap |
 | `upstream` blocks / backend sets | upstream group | Live | Rebuilds named backend pools, current selection policy state (`round_robin`, `random`), and configured upstream health checks |
 | `proxy_connect_timeout` / `proxy_read_timeout` / `proxy_write_timeout` | route | Live | Applied to `HttpPeer.options` per selected upstream route |
+| `proxy_upstream_protocol` | route | Live | Applies upstream H1/H2/H2C selection per route; downstream listener HTTP/2 policy is still bootstrap-only |
 | `proxy_ssl_verify` | route | Live | Applied to upstream certificate and hostname verification flags per selected route |
 | `proxy_ssl_trusted_certificate` | route | Live | Custom upstream CA bundle is loaded per snapshot and attached to the selected upstream peer |
 | `server_name` | virtual host | Live | Host routing updates without restart |
@@ -82,6 +83,7 @@ http {
 
 - routing
 - upstream target selection
+- upstream HTTP protocol selection (`h1`, `h2`, `h2c`)
 - upstream TLS verification policy and trusted CA bundle
 - plugin chains
 - downstream request body limit

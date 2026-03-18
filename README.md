@@ -106,6 +106,50 @@ Notes:
 - use long enough `proxy_read_timeout` / `proxy_write_timeout` for idle WebSocket sessions
 - do not use `listen ... http2_only` for classic WebSocket endpoints, because the Upgrade handshake is HTTP/1.1
 
+## gRPC proxying
+
+`ngxora` can proxy gRPC by selecting HTTP/2 on the upstream route explicitly.
+
+TLS upstream gRPC:
+
+```nginx
+server {
+    listen 443 ssl http2;
+
+    location /helloworld.Greeter/ {
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 1h;
+        proxy_write_timeout 1h;
+        proxy_upstream_protocol h2;
+        proxy_pass https://grpc-backend.internal:8443;
+    }
+}
+```
+
+Plaintext h2c upstream gRPC:
+
+```nginx
+http {
+    h2c on;
+
+    server {
+        listen 8080;
+
+        location /helloworld.Greeter/ {
+            proxy_upstream_protocol h2c;
+            proxy_pass http://127.0.0.1:50051;
+        }
+    }
+}
+```
+
+Notes:
+
+- `proxy_upstream_protocol h2` requires `https://...` upstream
+- `proxy_upstream_protocol h2c` requires `http://...` upstream
+- downstream TLS listeners still need `listen ... http2` or `http2_only` for browser/client-side HTTP/2
+- plaintext downstream gRPC requires service-level `h2c on`
+
 ## Dynamic config
 
 The runtime is built around atomic snapshot apply:
@@ -218,6 +262,7 @@ make build-bin
 It leans on Pingora for the data plane:
 
 - HTTP/1.1 and HTTP/2 proxying
+- route-level upstream H1/H2/H2C selection for gRPC-style backends
 - classic WebSocket proxying over HTTP/1.1 upgrade
 - connection reuse and pooling
 - TLS termination and upstream TLS

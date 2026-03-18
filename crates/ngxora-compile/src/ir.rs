@@ -225,6 +225,7 @@ pub enum LocationDirective {
     ProxyConnectTimeout(Duration),
     ProxyReadTimeout(Duration),
     ProxyWriteTimeout(Duration),
+    ProxyUpstreamProtocol(UpstreamHttpProtocol),
     ProxySslVerify(Switch),
     ProxySslTrustedCertificate(PemSource),
     Root(String),
@@ -235,6 +236,13 @@ pub enum LocationDirective {
 pub enum ProxyPassTarget {
     Url(Url),
     UpstreamGroup { name: String, tls: bool },
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum UpstreamHttpProtocol {
+    H1,
+    H2,
+    H2c,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
