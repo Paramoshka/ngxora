@@ -35,6 +35,11 @@ struct BasicAuthPluginConfig {
 }
 
 #[derive(Debug, Default, Serialize)]
+struct RateLimitPluginConfig {
+    max_requests_per_second: isize,
+}
+
+#[derive(Debug, Default, Serialize)]
 struct HeaderPatchConfig {
     add: Vec<HeaderEntry>,
     set: Vec<HeaderEntry>,
@@ -658,6 +663,7 @@ fn parse_location_plugin_block(block: &Block) -> Result<PluginSpec, LowerErr> {
     match block.name.as_str() {
         consts::HEADERS => lower_headers_plugin(block),
         consts::BASIC_AUTH | consts::BASIC_AUTH_ALIAS => lower_basic_auth_plugin(block),
+        consts::RATE_LIMIT => lower_rate_limit_plugin(block),
         _ => Err(LowerErr {
             message: format!("unexpected inner block in location: {}", block.name),
         }),
@@ -837,6 +843,72 @@ fn apply_basic_auth_directive(
         }
     }
 
+    Ok(())
+}
+
+fn lower_rate_limit_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
+    if !block.args.is_empty() {
+        return Err(LowerErr {
+            message: format!("{} block: does not accept arguments", block.name),
+        });
+    }
+
+    let mut config = RateLimitPluginConfig::default();
+    for child in &block.children {
+        match child {
+            Node::Directive(directive) => apply_rate_limit_directive(&mut config, directive)?,
+            Node::Block(nested) => {
+                return Err(LowerErr {
+                    message: format!(
+                        "rate-limit block: nested blocks are not supported: {}",
+                        nested.name
+                    ),
+                });
+            }
+        }
+    }
+
+    if config.max_requests_per_second <= 0 {
+        return Err(LowerErr {
+            message: "rate-limit block: must specify positive `rate`".into()
+        });
+    }
+
+    let config = serde_json::to_value(config).expect("rate-limit plugin config serializes");
+    Ok(PluginSpec {
+        name: consts::RATE_LIMIT.into(),
+        config,
+    })
+}
+
+fn apply_rate_limit_directive(
+    config: &mut RateLimitPluginConfig,
+    directive: &Directive,
+) -> Result<(), LowerErr> {
+    match directive.name.as_str() {
+        consts::RATE => {
+            let val = parse_exactly_one_argument(&directive.args, consts::RATE)?;
+            let rate = val.parse::<isize>().map_err(|_| LowerErr {
+                message: format!("rate-limit block: rate must be an integer, got `{val}`"),
+            })?;
+            if rate <= 0 {
+                return Err(LowerErr {
+                    message: format!("rate-limit block: rate must be positive, got `{rate}`"),
+                });
+            }
+            if config.max_requests_per_second > 0 {
+                return Err(LowerErr {
+                    message: "rate-limit block: duplicate `rate` directive".into(),
+                });
+            }
+            config.max_requests_per_second = rate;
+        }
+        _ => {
+            return Err(LowerErr {
+                message: format!("rate-limit block: unsupported directive {}", directive.name),
+            });
+        }
+    }
     Ok(())
 }
 

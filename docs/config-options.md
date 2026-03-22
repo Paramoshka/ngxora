@@ -264,3 +264,21 @@ Supported directives:
 - `username <value>;`
 - `password <value>;`
 - `realm <value>;`
+
+### `rate-limit` / `rate_limit`
+
+Supported inside `location {}` when the binary is built with `plugin-rate-limit`:
+
+```nginx
+location /api/ {
+    rate-limit {
+        rate 10;
+    }
+
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
+Supported directives:
+
+- `rate <requests_per_second>;`

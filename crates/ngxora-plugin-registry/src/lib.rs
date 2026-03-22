@@ -48,4 +48,8 @@ pub fn register_builtin_plugins(registry: &mut PluginRegistry) {
     registry.register(Arc::new(
         ngxora_extension_basic_auth::BasicAuthPluginFactory,
     ));
+    #[cfg(feature = "plugin-rate-limit")]
+    registry.register(Arc::new(
+        ngxora_extension_rate_limit::RateLimitPluginFactory,
+    ));
 }

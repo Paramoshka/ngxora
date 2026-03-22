@@ -5,6 +5,8 @@ pub const LOCATION: &str = "location";
 pub const HEADERS: &str = "headers";
 pub const BASIC_AUTH: &str = "basic-auth";
 pub const BASIC_AUTH_ALIAS: &str = "basic_auth";
+pub const RATE_LIMIT: &str = "rate-limit";
+pub const RATE: &str = "rate";
 
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";

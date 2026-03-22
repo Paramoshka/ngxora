@@ -7,8 +7,10 @@ edition = "2024"
 default = []
 plugin-headers = ["dep:ngxora-extension-headers"]
 plugin-basic-auth = ["dep:ngxora-extension-basic-auth"]
+plugin-rate-limit = ["dep:ngxora-extension-rate-limit"]
 
 [dependencies]
 ngxora-extension-headers = { path = "../extensions/headers", optional = true }
 ngxora-extension-basic-auth = { path = "../extensions/basic-auth", optional = true }
+ngxora-extension-rate-limit = { path = "../extensions/rate-limit", optional = true }
 ngxora-plugin-api = { path = "../ngxora-plugin-api" }
