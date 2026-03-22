@@ -1303,11 +1303,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ngxora-extension-cors"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "ngxora-plugin-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ngxora-extension-headers"
 version = "0.1.0"
 dependencies = [
  "http",
  "ngxora-plugin-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ngxora-extension-rate-limit"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "ngxora-plugin-api",
+ "pingora-limits",
  "serde",
  "serde_json",
 ]
@@ -1327,7 +1348,9 @@ name = "ngxora-plugin-registry"
 version = "0.1.0"
 dependencies = [
  "ngxora-extension-basic-auth",
+ "ngxora-extension-cors",
  "ngxora-extension-headers",
+ "ngxora-extension-rate-limit",
  "ngxora-plugin-api",
 ]
 
@@ -1668,6 +1691,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0286fb5a0359dca1e2e137dfe14ca4d94f676635a5eae4616bb3d8d4ce06d120"
 dependencies = [
  "crc32fast",
+]
+
+[[package]]
+name = "pingora-limits"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7568624fc0e2f11fa32d27053ac862048b40bad98140b07a11d82f1b4989700"
+dependencies = [
+ "ahash",
 ]
 
 [[package]]

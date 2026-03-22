@@ -9,6 +9,7 @@ openssl = ["pingora/openssl", "pingora-proxy/openssl"]
 plugin-headers = ["ngxora-plugin-registry/plugin-headers"]
 plugin-basic-auth = ["ngxora-plugin-registry/plugin-basic-auth"]
 plugin-rate-limit = ["ngxora-plugin-registry/plugin-rate-limit"]
+plugin-cors = ["ngxora-plugin-registry/plugin-cors"]
 
 [dependencies]
 arc-swap = "1.8.2"

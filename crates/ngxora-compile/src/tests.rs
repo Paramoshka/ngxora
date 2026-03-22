@@ -556,4 +556,41 @@ http {
             }]
         );
     }
+
+    #[test]
+    fn from_ast_parses_cors_plugin_block() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location /api {
+      cors {
+        allow_origin "*";
+        allow_methods "GET, POST, OPTIONS";
+        allow_credentials on;
+        max_age 86400;
+      }
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let location = &http.servers[0].locations[0];
+        assert_eq!(
+            location.plugins,
+            vec![PluginSpec {
+                name: "cors".into(),
+                config: json!({
+                    "allow_origin": "*",
+                    "allow_methods": "GET, POST, OPTIONS",
+                    "allow_credentials": true,
+                    "max_age": 86400
+                }),
+            }]
+        );
+    }
 }

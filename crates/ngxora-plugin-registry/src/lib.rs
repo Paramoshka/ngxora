@@ -52,4 +52,6 @@ pub fn register_builtin_plugins(registry: &mut PluginRegistry) {
     registry.register(Arc::new(
         ngxora_extension_rate_limit::RateLimitPluginFactory,
     ));
+    #[cfg(feature = "plugin-cors")]
+    registry.register(Arc::new(ngxora_extension_cors::CorsPluginFactory));
 }

@@ -8,6 +8,14 @@ pub const BASIC_AUTH_ALIAS: &str = "basic_auth";
 pub const RATE_LIMIT: &str = "rate-limit";
 pub const RATE: &str = "rate";
 
+pub const CORS: &str = "cors";
+pub const ALLOW_ORIGIN: &str = "allow_origin";
+pub const ALLOW_METHODS: &str = "allow_methods";
+pub const ALLOW_HEADERS: &str = "allow_headers";
+pub const EXPOSE_HEADERS: &str = "expose_headers";
+pub const ALLOW_CREDENTIALS: &str = "allow_credentials";
+pub const MAX_AGE: &str = "max_age";
+
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";
 pub const POLICY: &str = "policy";

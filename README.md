@@ -216,11 +216,8 @@ Plugins are compiled in, not loaded through unstable runtime ABI tricks.
 Current shape:
 - plugin API crate
 - plugin registry with feature-gated registration
-- built-in `headers`, `basic-auth`, and `rate-limit` extensions
+- built-in `headers`, `basic-auth`, `rate-limit`, and `cors` extensions
 - `plugins.cfg` + `make build-bin` for build-time plugin selection
-
-Near-term plugin roadmap:
-- `cors`
 
 Later plugin roadmap:
 - `geoip`
