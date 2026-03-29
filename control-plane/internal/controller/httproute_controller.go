@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"reflect"
 	"time"
 
+	"github.com/paramoshka/ngxora/control-plane/api/v1alpha1"
 	controlv1 "github.com/paramoshka/ngxora/sdk/go/ngxora/control/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -95,6 +97,12 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if err := r.resolveBackendRefs(ctx, route.Namespace, desiredRoute, serviceCache, referenceGrantCache); err != nil {
 			statusPlans = append(statusPlans, unresolvedRefsPlan(route, parentRefs, err))
 			r.Logger.Warn("skipping unresolved HTTPRoute backends", "name", route.Name, "namespace", route.Namespace, "error", err)
+			continue
+		}
+
+		if err := r.resolveFilters(ctx, route.Namespace, &desiredRoute, referenceGrantCache); err != nil {
+			statusPlans = append(statusPlans, invalidFilterPlan(route, parentRefs, err))
+			r.Logger.Warn("skipping invalid HTTPRoute filters", "name", route.Name, "namespace", route.Namespace, "error", err)
 			continue
 		}
 
@@ -372,6 +380,29 @@ func unresolvedRefsPlan(route *gatewayv1.HTTPRoute, parentRefs []gatewayv1.Paren
 	}
 }
 
+func invalidFilterPlan(route *gatewayv1.HTTPRoute, parentRefs []gatewayv1.ParentReference, err error) httpRouteStatusPlan {
+	message := fmt.Sprintf("filter resolution failed: %v", err)
+	return httpRouteStatusPlan{
+		route:      route,
+		parentRefs: parentRefs,
+		accepted: routeConditionState{
+			status:  true,
+			reason:  string(gatewayv1.RouteReasonAccepted),
+			message: "route attached to target Gateway",
+		},
+		resolved: routeConditionState{
+			status:  false,
+			reason:  string(gatewayv1.RouteReasonUnsupportedValue),
+			message: message,
+		},
+		programmed: routeConditionState{
+			status:  false,
+			reason:  ngxorastatus.ReasonPending,
+			message: "route was not included in the active snapshot",
+		},
+	}
+}
+
 func acceptedPendingPlan(route *gatewayv1.HTTPRoute, parentRefs []gatewayv1.ParentReference) httpRouteStatusPlan {
 	return httpRouteStatusPlan{
 		route:      route,
@@ -580,6 +611,97 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 		}
 	}
 
+	return nil
+}
+
+func (r *HTTPRouteReconciler) resolveFilters(
+	ctx context.Context,
+	routeNamespace string,
+	desiredRoute *translator.DesiredRoute,
+	referenceGrantCache map[string][]gatewayv1beta1.ReferenceGrant,
+) error {
+	for i := range desiredRoute.Rules {
+		rule := &desiredRoute.Rules[i]
+		for j := range rule.Filters {
+			filter := &rule.Filters[j]
+			if filter.Type == string(gatewayv1.HTTPRouteFilterExtensionRef) && filter.ExtensionRef != nil {
+				if err := r.resolveExtensionRef(ctx, routeNamespace, filter, referenceGrantCache); err != nil {
+					return fmt.Errorf("resolve filter ExtensionRef: %w", err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (r *HTTPRouteReconciler) resolveExtensionRef(
+	ctx context.Context,
+	routeNamespace string,
+	filter *translator.DesiredFilter,
+	referenceGrantCache map[string][]gatewayv1beta1.ReferenceGrant,
+) error {
+	extRef := filter.ExtensionRef
+	group := string(extRef.Group)
+	kind := string(extRef.Kind)
+	name := string(extRef.Name)
+
+	if group != "plugins.ngxora.io" {
+		return fmt.Errorf("unsupported ExtensionRef group %q", group)
+	}
+
+	targetNamespace := routeNamespace
+
+	key := client.ObjectKey{Namespace: targetNamespace, Name: name}
+	var pluginName string
+	var jsonConfig []byte
+	var err error
+
+	switch kind {
+	case "RateLimitPolicy":
+		var policy v1alpha1.RateLimitPolicy
+		if err = r.Get(ctx, key, &policy); err != nil {
+			return err
+		}
+		pluginName = "rate-limit"
+		jsonConfig, err = json.Marshal(policy.Spec)
+	case "JwtAuthPolicy":
+		var policy v1alpha1.JwtAuthPolicy
+		if err = r.Get(ctx, key, &policy); err != nil {
+			return err
+		}
+		pluginName = "jwt_auth"
+		jsonConfig, err = json.Marshal(policy.Spec)
+	case "BasicAuthPolicy":
+		var policy v1alpha1.BasicAuthPolicy
+		if err = r.Get(ctx, key, &policy); err != nil {
+			return err
+		}
+		pluginName = "basic-auth"
+		jsonConfig, err = json.Marshal(policy.Spec)
+	case "CorsPolicy":
+		var policy v1alpha1.CorsPolicy
+		if err = r.Get(ctx, key, &policy); err != nil {
+			return err
+		}
+		pluginName = "cors"
+		jsonConfig, err = json.Marshal(policy.Spec)
+	case "ExtAuthzPolicy":
+		var policy v1alpha1.ExtAuthzPolicy
+		if err = r.Get(ctx, key, &policy); err != nil {
+			return err
+		}
+		pluginName = "ext_authz"
+		jsonConfig, err = json.Marshal(policy.Spec)
+	default:
+		return fmt.Errorf("unsupported ExtensionRef kind %q", kind)
+	}
+
+	if err != nil {
+		return fmt.Errorf("marshal %s spec: %w", kind, err)
+	}
+
+	filter.PluginName = pluginName
+	filter.PluginConfig = string(jsonConfig)
 	return nil
 }
 

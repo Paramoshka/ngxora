@@ -14,6 +14,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
+	"github.com/paramoshka/ngxora/control-plane/api/v1alpha1"
 	ngxoraclient "github.com/paramoshka/ngxora/control-plane/internal/client"
 	"github.com/paramoshka/ngxora/control-plane/internal/config"
 	"github.com/paramoshka/ngxora/control-plane/internal/snapshot"
@@ -31,6 +32,9 @@ func NewManager(cfg config.Config, logger *slog.Logger) (manager.Manager, error)
 		return nil, err
 	}
 	if err := gatewayv1beta1.Install(scheme); err != nil {
+		return nil, err
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		return nil, err
 	}
 

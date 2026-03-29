@@ -182,6 +182,23 @@ func buildRoute(rule translator.DesiredRule, upstreamGroupName string) (*control
 		},
 	}
 
+	for _, filter := range rule.Filters {
+		switch filter.Type {
+		case string(gatewayv1.HTTPRouteFilterExtensionRef):
+			if filter.PluginName != "" {
+				route.Plugins = append(route.Plugins, &controlv1.Plugin{
+					Name:       filter.PluginName,
+					JsonConfig: filter.PluginConfig,
+				})
+			}
+		default:
+			// Just to be safe, maybe we should warn or return an error?
+			// Since we want strict validation, an unsupported filter that passes controller
+			// translation (e.g. not implemented yet) should be caught here or in translation.
+			return nil, nil, fmt.Errorf("unsupported desired filter type: %s", filter.Type)
+		}
+	}
+
 	switch rule.PathMatch.Kind {
 	case "Exact":
 		route.Match = &controlv1.Match{

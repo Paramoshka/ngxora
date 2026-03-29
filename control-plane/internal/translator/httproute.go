@@ -48,7 +48,10 @@ type DesiredBackend struct {
 }
 
 type DesiredFilter struct {
-	Type string
+	Type         string
+	PluginName   string
+	PluginConfig string
+	ExtensionRef *gatewayv1.LocalObjectReference
 }
 
 // Translator converts HTTPRoute objects for one target Gateway into
@@ -170,7 +173,11 @@ func (t *Translator) translateRule(namespace string, rule gatewayv1.HTTPRouteRul
 
 		filters := make([]DesiredFilter, 0, len(rule.Filters))
 		for _, filter := range rule.Filters {
-			filters = append(filters, DesiredFilter{Type: string(filter.Type)})
+			desired := DesiredFilter{Type: string(filter.Type)}
+			if filter.Type == gatewayv1.HTTPRouteFilterExtensionRef && filter.ExtensionRef != nil {
+				desired.ExtensionRef = filter.ExtensionRef
+			}
+			filters = append(filters, desired)
 		}
 
 		result = append(result, DesiredRule{

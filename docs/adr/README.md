@@ -18,3 +18,4 @@ Current ADRs:
 - [ADR-004](./004-tls-validation-strategy.md): TLS certificate validation and listener TLS behavior
 - [ADR-005](./005-listener-restart-boundary.md): restart boundary for listeners and transport policy
 - [ADR-006](./006-referencegrant-policy.md): cross-namespace reference policy
+- [ADR-007](./007-httproute-extensionref-plugins.md): HTTPRoute plugin integration via ExtensionRef
