@@ -8,6 +8,10 @@ For supported directives, upstream policies, and built-in plugin syntax, see [Co
 
 For implementation discipline on new options and plugins, see [Feature Checklist](/home/ivan/projects/pet/ngxora/docs/feature-checklist.md).
 
+For durable architecture choices, see [ADRs](./adr/README.md).
+
+For the runtime payload boundary, see [Snapshot Schema](./snapshot-schema.md).
+
 ## Downstream Config
 
 ```nginx
