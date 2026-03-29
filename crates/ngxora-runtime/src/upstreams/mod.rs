@@ -1,3 +1,12 @@
+//! Runtime routing and upstream execution for compiled ngxora HTTP config.
+//!
+//! The module boundary is:
+//! - `compile`: IR -> `CompiledRouter`
+//! - `routing`: request-time listener/vhost/location selection
+//! - `runtime`: Pingora-facing proxy execution and upstream groups
+//! - `health`: active upstream health checks
+//! - `types`: shared compiled routing model
+
 mod compile;
 mod health;
 mod routing;

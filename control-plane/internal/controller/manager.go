@@ -20,6 +20,8 @@ import (
 	"github.com/paramoshka/ngxora/control-plane/internal/translator"
 )
 
+// NewManager builds the controller-runtime manager and installs the HTTPRoute
+// reconciler for one target Gateway.
 func NewManager(cfg config.Config, logger *slog.Logger) (manager.Manager, error) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -55,6 +57,8 @@ func NewManager(cfg config.Config, logger *slog.Logger) (manager.Manager, error)
 	return mgr, nil
 }
 
+// enqueueAllHTTPRoutes fan-outs dependent object changes to all watched
+// HTTPRoutes in the namespace because the control-plane applies full snapshots.
 func enqueueAllHTTPRoutes(c client.Client, watchNamespace string) handler.MapFunc {
 	return func(ctx context.Context, _ client.Object) []reconcile.Request {
 		var routeList gatewayv1.HTTPRouteList

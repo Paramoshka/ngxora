@@ -28,6 +28,9 @@ use tonic::transport::Server as GrpcServer;
 use tonic::{Request, Response, Status};
 use url::Url;
 
+// gRPC is the wire adapter around the existing runtime snapshot model. It does
+// not define a second configuration pipeline; it converts protobuf into the
+// same IR/CompiledRouter flow used elsewhere.
 pub mod proto {
     tonic::include_proto!("ngxora.control.v1");
 }
@@ -53,12 +56,15 @@ use proto::{
 #[path = "grpc_tests.rs"]
 mod tests;
 
+/// GrpcControlPlane exposes the in-process runtime state through the protobuf
+/// ControlPlane service.
 #[derive(Clone)]
 pub struct GrpcControlPlane {
     control: InProcessControlPlane,
 }
 
 impl GrpcControlPlane {
+    /// new wraps the in-process control-plane with the gRPC service adapter.
     pub fn new(control: InProcessControlPlane) -> Self {
         Self { control }
     }
@@ -222,6 +228,8 @@ fn runtime_snapshot_from_proto(
     Ok(RuntimeConfigSnapshot::new(snapshot.version, router))
 }
 
+// Reconstruct the shared IR shape from the wire snapshot so protobuf input goes
+// through the same validation and compilation path as other config sources.
 fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, String> {
     let options = snapshot.http.unwrap_or_default();
     let listener_defs = listener_defs(&snapshot.listeners)?;
@@ -285,6 +293,8 @@ fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<Upstream
         .collect()
 }
 
+// ListenerDef normalizes wire listeners into one listener record that can be
+// reused while rebuilding server blocks from virtual hosts.
 fn listener_defs(listeners: &[ProtoListener]) -> Result<HashMap<String, ListenerDef>, String> {
     let mut defs = HashMap::with_capacity(listeners.len());
 
@@ -303,6 +313,8 @@ fn listener_defs(listeners: &[ProtoListener]) -> Result<HashMap<String, Listener
     Ok(defs)
 }
 
+// Convert one wire virtual host back into the IR server shape expected by the
+// shared CompiledRouter builder.
 fn server_from_proto_virtual_host(
     listener: &ListenerDef,
     virtual_host: &ProtoVirtualHost,
@@ -606,6 +618,8 @@ fn upstream_tls_options_from_proto(
     }))
 }
 
+// Export the active runtime snapshot back to the protobuf shape used by the
+// local control-plane. This path is primarily for GetSnapshot and tests.
 fn proto_snapshot_from_runtime(snapshot: &RuntimeSnapshot) -> Result<ProtoConfigSnapshot, String> {
     let mut listener_keys = snapshot
         .router
@@ -743,6 +757,9 @@ fn proto_listener_from_runtime(
     })
 }
 
+// Virtual hosts are re-expanded from the compiled router because runtime state
+// stores listener -> named/default server routes rather than the original wire
+// list.
 fn proto_virtual_hosts_from_runtime(
     listener_name: &str,
     routes: &VirtualHostRoutes,
@@ -1092,6 +1109,8 @@ struct ListenerDef {
 impl TryFrom<&ProtoListener> for ListenerDef {
     type Error = String;
 
+    // Listener-level transport settings are validated here before any virtual
+    // hosts are materialized.
     fn try_from(value: &ProtoListener) -> Result<Self, Self::Error> {
         let addr: IpAddr = value
             .address

@@ -17,8 +17,12 @@ import (
 	"github.com/paramoshka/ngxora/control-plane/internal/translator"
 )
 
+// Builder converts normalized desired state into the wire snapshot model used
+// by the dataplane gRPC API.
 type Builder struct{}
 
+// BuildResult returns the compiled snapshot plus attachment counts used by
+// higher layers to derive Gateway API status.
 type BuildResult struct {
 	Snapshot         *controlv1.ConfigSnapshot
 	RouteAttachments map[string]int
@@ -36,6 +40,9 @@ func NewBuilder() *Builder {
 	return &Builder{}
 }
 
+// Build compiles desired state for one Gateway into a ConfigSnapshot.
+// Reference resolution and listener validation are expected to be done before
+// this method is called.
 func (b *Builder) Build(
 	state *translator.DesiredState,
 	gateway *gatewayv1.Gateway,
@@ -95,6 +102,8 @@ func (b *Builder) Build(
 	return result, nil
 }
 
+// StableVersion returns a deterministic hash of the snapshot payload with the
+// version field cleared, so identical config produces the same version.
 func StableVersion(snapshot *controlv1.ConfigSnapshot) (string, error) {
 	if snapshot == nil {
 		return "", fmt.Errorf("snapshot is nil")

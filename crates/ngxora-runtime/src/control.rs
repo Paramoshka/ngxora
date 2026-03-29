@@ -19,6 +19,8 @@ use tokio::time::Instant;
 #[path = "control_tests.rs"]
 mod tests;
 
+/// ConfigSnapshot is the apply-time unit exchanged between the control-plane
+/// adapter layer and the runtime state machine.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConfigSnapshot {
     pub version: String,
@@ -34,6 +36,8 @@ impl ConfigSnapshot {
     }
 }
 
+/// ApplyResult reports whether a new snapshot became active and whether the
+/// caller crossed the restart boundary instead of a live-reload boundary.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ApplyResult {
     pub applied: bool,
@@ -43,6 +47,8 @@ pub struct ApplyResult {
     pub active_generation: u64,
 }
 
+/// RuntimeSnapshot is the request-time view of the active config with plugin
+/// chains, upstream groups, and trusted CA material prebuilt.
 #[derive(Clone)]
 pub struct RuntimeSnapshot {
     pub generation: u64,
@@ -73,6 +79,8 @@ impl RuntimeSnapshot {
     }
 }
 
+/// RuntimeState owns the current immutable snapshot and enforces the restart
+/// boundary for transport-sensitive config.
 pub struct RuntimeState {
     current: ArcSwap<RuntimeSnapshot>,
     // Transport/bootstrap settings cannot be changed live with Pingora listeners,
@@ -192,6 +200,8 @@ impl RuntimeState {
     }
 }
 
+/// InProcessControlPlane is a small adapter used by gRPC handlers, tests, and
+/// other local control-plane integrations.
 #[derive(Clone)]
 pub struct InProcessControlPlane {
     state: Arc<RuntimeState>,
@@ -216,6 +226,8 @@ impl InProcessControlPlane {
     }
 }
 
+/// RuntimeUpstreamHealthChecks periodically runs configured active health
+/// checks against compiled upstream groups from the current snapshot.
 pub struct RuntimeUpstreamHealthChecks {
     state: Arc<RuntimeState>,
     snapshot_refresh_interval: Duration,

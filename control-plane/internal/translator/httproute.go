@@ -6,10 +6,14 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
+// DesiredState is the normalized output of translation before snapshot build.
+// References are preserved structurally, but they are not resolved here.
 type DesiredState struct {
 	Routes []DesiredRoute
 }
 
+// DesiredRoute is a Gateway-targeted HTTPRoute reduced to the fields used by
+// later control-plane stages.
 type DesiredRoute struct {
 	Name       string
 	Namespace  string
@@ -18,17 +22,22 @@ type DesiredRoute struct {
 	Rules      []DesiredRule
 }
 
+// DesiredRule is a single translated routing rule after HTTPRoute matches have
+// been expanded into route-level entries.
 type DesiredRule struct {
 	PathMatch DesiredPathMatch
 	Backends  []DesiredBackend
 	Filters   []DesiredFilter
 }
 
+// DesiredPathMatch is the normalized path matcher supported by ngxora today.
 type DesiredPathMatch struct {
 	Kind  string
 	Value string
 }
 
+// DesiredBackend is the translated backend reference. Existence and port
+// validation happen later in the controller, not in the translator.
 type DesiredBackend struct {
 	Group     string
 	Kind      string
@@ -42,11 +51,15 @@ type DesiredFilter struct {
 	Type string
 }
 
+// Translator converts HTTPRoute objects for one target Gateway into
+// control-plane desired state.
 type Translator struct {
 	gatewayName      string
 	gatewayNamespace string
 }
 
+// New creates a Translator scoped to one Gateway. If gatewayName is empty, the
+// translator accepts all parentRefs without Gateway-name filtering.
 func New(gatewayName, gatewayNamespace string) *Translator {
 	return &Translator{
 		gatewayName:      gatewayName,
@@ -54,6 +67,7 @@ func New(gatewayName, gatewayNamespace string) *Translator {
 	}
 }
 
+// TranslateHTTPRoutes converts matching HTTPRoutes into one DesiredState.
 func (t *Translator) TranslateHTTPRoutes(routes []gatewayv1.HTTPRoute) (*DesiredState, error) {
 	state := &DesiredState{
 		Routes: make([]DesiredRoute, 0, len(routes)),
@@ -74,10 +88,14 @@ func (t *Translator) TranslateHTTPRoutes(routes []gatewayv1.HTTPRoute) (*Desired
 	return state, nil
 }
 
+// MatchesGateway reports whether the HTTPRoute has at least one parentRef for
+// the configured Gateway.
 func (t *Translator) MatchesGateway(route gatewayv1.HTTPRoute) bool {
 	return len(t.MatchingParentRefs(route)) > 0
 }
 
+// MatchingParentRefs returns only the parentRefs that target the configured
+// Gateway. Namespace defaults to the HTTPRoute namespace when omitted.
 func (t *Translator) MatchingParentRefs(route gatewayv1.HTTPRoute) []gatewayv1.ParentReference {
 	if t.gatewayName == "" {
 		return append([]gatewayv1.ParentReference(nil), route.Spec.ParentRefs...)
@@ -109,6 +127,8 @@ func (t *Translator) MatchingParentRefs(route gatewayv1.HTTPRoute) []gatewayv1.P
 	return matches
 }
 
+// TranslateHTTPRoute converts one HTTPRoute into DesiredRoute without resolving
+// referenced Kubernetes objects.
 func (t *Translator) TranslateHTTPRoute(route gatewayv1.HTTPRoute) (DesiredRoute, error) {
 	desired := DesiredRoute{
 		Name:      route.Name,

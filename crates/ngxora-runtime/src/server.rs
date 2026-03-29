@@ -15,6 +15,9 @@ use pingora_proxy::{HttpProxy, ProxyHttp};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+// Server bootstrap binds Pingora services to the current CompiledRouter
+// listener topology. Routing decisions still happen later inside the proxy.
+
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod tests;

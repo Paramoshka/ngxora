@@ -10,6 +10,8 @@ use std::fmt::Display;
 use std::net::IpAddr;
 use std::time::Duration;
 
+// ListenKey identifies one bound downstream socket after listen directives have
+// been normalized.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct ListenKey {
     pub addr: IpAddr,
@@ -41,6 +43,8 @@ pub enum RouteTarget {
     },
 }
 
+// CompiledUpstreamServer is a backend endpoint already validated during
+// snapshot build.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CompiledUpstreamServer {
     pub host: String,
@@ -157,29 +161,37 @@ pub struct CompiledLocation {
 }
 
 impl CompiledLocation {
+    // with_plugins is used by tests and builders that want to attach the
+    // already-resolved plugin chain to a route.
     pub fn with_plugins(mut self, plugins: Vec<PluginSpec>) -> Self {
         self.plugins = plugins;
         self
     }
 }
 
+// ServerRoutes is the ordered location set for one virtual server after
+// compilation.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ServerRoutes {
     pub locations: Vec<CompiledLocation>,
 }
 
+// VirtualHostRoutes groups named and default virtual servers for one listener.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct VirtualHostRoutes {
     pub named: HashMap<String, ServerRoutes>,
     pub default: Option<ServerRoutes>,
 }
 
+// ListenerProtocolConfig captures bootstrap-time downstream protocol policy.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ListenerProtocolConfig {
     pub http2: bool,
     pub http2_only: bool,
 }
 
+// ListenerTlsSettings holds listener-level TLS policy that affects socket
+// bootstrap and therefore participates in restart boundary checks.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ListenerTlsSettings {
     pub protocols: Option<TlsProtocolBounds>,
@@ -187,6 +199,8 @@ pub struct ListenerTlsSettings {
     pub client_certificate: Option<PemSource>,
 }
 
+// ListenerTlsConfig stores the SNI identity map plus listener-level TLS
+// settings for one bound TLS listener.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct ListenerTlsConfig {
     pub named: HashMap<String, TlsIdentity>,
@@ -194,6 +208,8 @@ pub struct ListenerTlsConfig {
     pub settings: ListenerTlsSettings,
 }
 
+// HttpRuntimeOptions is the subset of HTTP-level runtime behavior read by the
+// Pingora proxy service and request filters.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct HttpRuntimeOptions {
     pub downstream_keepalive_timeout: Option<u64>,
@@ -204,7 +220,8 @@ pub struct HttpRuntimeOptions {
     pub h2c: bool,
 }
 
-// CompiledRouter stores the IR representation in an optimized form.
+// CompiledRouter is the immutable routing model consumed by the dataplane at
+// request time and by restart-boundary checks at apply time.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct CompiledRouter {
     pub upstreams: HashMap<String, CompiledUpstreamGroup>,

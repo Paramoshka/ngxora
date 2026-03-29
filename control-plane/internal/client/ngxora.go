@@ -11,11 +11,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// NGXoraClient is a thin gRPC client for the local ngxora dataplane control
+// socket.
 type NGXoraClient struct {
 	socketPath   string
 	applyTimeout time.Duration
 }
 
+// New creates a client that talks to the co-located ngxora dataplane over UDS.
 func New(socketPath string, applyTimeout time.Duration) *NGXoraClient {
 	return &NGXoraClient{
 		socketPath:   socketPath,
@@ -23,6 +26,7 @@ func New(socketPath string, applyTimeout time.Duration) *NGXoraClient {
 	}
 }
 
+// ApplySnapshot pushes the full desired runtime snapshot to the dataplane.
 func (c *NGXoraClient) ApplySnapshot(ctx context.Context, snapshot *controlv1.ConfigSnapshot) (*controlv1.ApplyResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.applyTimeout)
 	defer cancel()
@@ -37,6 +41,7 @@ func (c *NGXoraClient) ApplySnapshot(ctx context.Context, snapshot *controlv1.Co
 	return client.ApplySnapshot(ctx, snapshot)
 }
 
+// GetSnapshot returns the currently active snapshot from the dataplane.
 func (c *NGXoraClient) GetSnapshot(ctx context.Context) (*controlv1.ConfigSnapshot, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.applyTimeout)
 	defer cancel()
@@ -51,6 +56,7 @@ func (c *NGXoraClient) GetSnapshot(ctx context.Context) (*controlv1.ConfigSnapsh
 	return client.GetSnapshot(ctx, &controlv1.GetSnapshotRequest{})
 }
 
+// dial opens a UDS gRPC connection to the local dataplane instance.
 func (c *NGXoraClient) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	target := fmt.Sprintf("unix://%s", c.socketPath)
 
