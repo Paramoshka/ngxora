@@ -632,4 +632,37 @@ http {
             }]
         );
     }
+
+    #[test]
+    fn from_ast_parses_jwt_auth_plugin_block() {
+        let input = r#"
+http {
+  server {
+    listen 80;
+    location /secure {
+      jwt_auth {
+        algorithm RS256;
+        secret_file /path/to/public.pem;
+      }
+      proxy_pass http://api;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let location = &http.servers[0].locations[0];
+        assert_eq!(
+            location.plugins,
+            vec![PluginSpec {
+                name: "jwt_auth".into(),
+                config: json!({
+                    "algorithm": "RS256",
+                    "secret_file": "/path/to/public.pem",
+                }),
+            }]
+        );
+    }
 }

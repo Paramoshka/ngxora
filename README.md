@@ -216,14 +216,12 @@ Plugins are compiled in, not loaded through unstable runtime ABI tricks.
 Current shape:
 - plugin API crate
 - plugin registry with feature-gated registration
-- built-in `headers`, `basic-auth`, `rate-limit`, and `cors` extensions
+- built-in `headers`, `basic-auth`, `rate-limit`, `cors`, `ext_authz`, and `jwt_auth` extensions
 - `plugins.cfg` + `make build-bin` for build-time plugin selection
 
 Later plugin roadmap:
 - `geoip`
-- `jwt_auth`
 - `cache`
-- `ext_authz`
 
 Text config syntax for built-in location plugins is documented in [Config Options](./docs/config-options.md).
 

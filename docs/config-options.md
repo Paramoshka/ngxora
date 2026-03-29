@@ -310,3 +310,31 @@ location /api/ {
     proxy_pass http://api_pool;
 }
 ```
+
+### `jwt_auth`
+
+Supported inside `location {}` when the binary is built with `plugin-jwt-auth`.
+
+Validates JSON Web Tokens in the `Authorization: Bearer <token>` header.
+
+```nginx
+location /secured-api/ {
+    jwt_auth {
+        # The cryptographic algorithm (e.g. HS256, RS256, ES256, EdDSA)
+        algorithm RS256;
+        
+        # For HMAC algorithms (HS256/384/512), use 'secret'
+        # secret "super-secret-key-phrase";
+        
+        # For RSA/ECDSA/EdDSA algorithms, use 'secret_file' to point to the public key PEM
+        secret_file /etc/ngxora/certs/auth_pubkey.pem;
+    }
+    
+    proxy_pass http://internal_api;
+}
+```
+
+Directives:
+- `algorithm <alg>;` : (**Required**) The JWT signing algorithm.
+- `secret <value>;` : (**Required if HMAC**) The secret string for HS* algorithms.
+- `secret_file <path>;` : (**Required if RSA/EC/Ed**) The path to the public key PEM file.

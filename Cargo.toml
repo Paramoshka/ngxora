@@ -3,13 +3,25 @@ name = "ngxora"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = [
+    ".",
+    "crates/ngxora-config",
+    "crates/ngxora-compile",
+    "crates/ngxora-runtime",
+    "crates/ngxora-plugin-api",
+    "crates/ngxora-plugin-registry",
+    "crates/extensions/*",
+]
+
 [features]
-default = ["plugin-headers", "plugin-basic-auth", "plugin-rate-limit", "plugin-cors", "plugin-ext-authz"]
+default = ["plugin-headers", "plugin-basic-auth", "plugin-rate-limit", "plugin-cors", "plugin-ext-authz", "plugin-jwt-auth"]
 plugin-headers = ["ngxora-runtime/plugin-headers"]
 plugin-basic-auth = ["ngxora-runtime/plugin-basic-auth"]
 plugin-rate-limit = ["ngxora-runtime/plugin-rate-limit"]
 plugin-cors = ["ngxora-runtime/plugin-cors"]
 plugin-ext-authz = ["ngxora-runtime/plugin-ext-authz"]
+plugin-jwt-auth = ["ngxora-runtime/plugin-jwt-auth"]
 
 [dependencies]
 arc-swap = "1.8.2"

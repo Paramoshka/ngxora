@@ -48,9 +48,7 @@ pub(crate) fn select_route_target<'a>(
 }
 
 fn normalize_authority_host(value: &str) -> String {
-    value
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
+    value.trim_end_matches('.').to_ascii_lowercase()
 }
 
 fn invalid_host_header() -> Box<pingora::Error> {

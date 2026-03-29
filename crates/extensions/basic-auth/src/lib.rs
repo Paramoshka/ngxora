@@ -1,8 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http::{HeaderValue, StatusCode, header};
 use ngxora_plugin_api::{
-    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec,
-    RequestCtx, async_trait,
+    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec, RequestCtx,
+    async_trait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

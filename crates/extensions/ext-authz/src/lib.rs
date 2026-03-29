@@ -1,4 +1,4 @@
-use http::{HeaderName, HeaderValue, StatusCode};
+use http::{HeaderName, StatusCode};
 use log::{debug, error};
 use ngxora_plugin_api::{
     HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec, RequestCtx,
@@ -90,9 +90,10 @@ impl PluginFactory for ExtAuthzPluginFactory {
     }
 
     fn build(&self, spec: &PluginSpec) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
-        let config = serde_json::from_value::<ExtAuthzPluginConfig>(spec.config.clone()).map_err(
-            |err| PluginBuildError::new(self.name(), format!("invalid plugin config: {err}")),
-        )?;
+        let config =
+            serde_json::from_value::<ExtAuthzPluginConfig>(spec.config.clone()).map_err(|err| {
+                PluginBuildError::new(self.name(), format!("invalid plugin config: {err}"))
+            })?;
 
         if config.uri.is_empty() {
             return Err(PluginBuildError::new(self.name(), "uri cannot be empty"));
@@ -110,18 +111,24 @@ impl PluginFactory for ExtAuthzPluginFactory {
             )
         })?;
 
-        let parse_headers = |list: &[String], field: &str| -> Result<Vec<HeaderName>, PluginBuildError> {
-            list.iter()
-                .map(|s| {
-                    HeaderName::from_bytes(s.as_bytes()).map_err(|e| {
-                        PluginBuildError::new(PLUGIN_NAME, format!("invalid {field} header '{s}': {e}"))
+        let parse_headers =
+            |list: &[String], field: &str| -> Result<Vec<HeaderName>, PluginBuildError> {
+                list.iter()
+                    .map(|s| {
+                        HeaderName::from_bytes(s.as_bytes()).map_err(|e| {
+                            PluginBuildError::new(
+                                PLUGIN_NAME,
+                                format!("invalid {field} header '{s}': {e}"),
+                            )
+                        })
                     })
-                })
-                .collect()
-        };
+                    .collect()
+            };
 
-        let pass_request_headers = parse_headers(&config.pass_request_headers, "pass_request_header")?;
-        let pass_response_headers = parse_headers(&config.pass_response_headers, "pass_response_header")?;
+        let pass_request_headers =
+            parse_headers(&config.pass_request_headers, "pass_request_header")?;
+        let pass_response_headers =
+            parse_headers(&config.pass_response_headers, "pass_response_header")?;
 
         Ok(Arc::new(ExtAuthzPlugin {
             client,

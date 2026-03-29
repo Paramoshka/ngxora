@@ -223,7 +223,7 @@ fn runtime_snapshot_from_proto(
 }
 
 fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, String> {
-    let options = snapshot.http.clone().unwrap_or_default();
+    let options = snapshot.http.unwrap_or_default();
     let listener_defs = listener_defs(&snapshot.listeners)?;
     let mut servers = Vec::with_capacity(snapshot.virtual_hosts.len());
 

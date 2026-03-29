@@ -33,15 +33,17 @@ impl CompiledHealthCheck {
                     .insert_header("Host", host.as_str())
                     .map_err(|err| format!("failed to build health_check host header: {err}"))?;
 
-                Ok(Box::new(NgxoraHealthCheck::Http(NgxoraHttpHealthCheck {
-                    consecutive_success: self.consecutive_success,
-                    consecutive_failure: self.consecutive_failure,
-                    timeout: self.timeout,
-                    host: host.clone(),
-                    use_tls: *use_tls,
-                    request,
-                    connector: HttpConnector::new(None),
-                })))
+                Ok(Box::new(NgxoraHealthCheck::Http(Box::new(
+                    NgxoraHttpHealthCheck {
+                        consecutive_success: self.consecutive_success,
+                        consecutive_failure: self.consecutive_failure,
+                        timeout: self.timeout,
+                        host: host.clone(),
+                        use_tls: *use_tls,
+                        request,
+                        connector: HttpConnector::new(None),
+                    },
+                ))))
             }
         }
     }
@@ -66,7 +68,7 @@ struct NgxoraHttpHealthCheck {
 
 enum NgxoraHealthCheck {
     Tcp(NgxoraTcpHealthCheck),
-    Http(NgxoraHttpHealthCheck),
+    Http(Box<NgxoraHttpHealthCheck>),
 }
 
 fn backend_health_server(target: &Backend) -> pingora::Result<&CompiledUpstreamServer> {

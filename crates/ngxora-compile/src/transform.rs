@@ -67,6 +67,15 @@ struct ExtAuthzPluginConfig {
 }
 
 #[derive(Debug, Default, Serialize)]
+struct JwtAuthPluginConfig {
+    algorithm: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_file: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
 struct HeaderPatchConfig {
     add: Vec<HeaderEntry>,
     set: Vec<HeaderEntry>,
@@ -86,13 +95,14 @@ impl Ir {
         for node in &ast.items {
             match node {
                 Node::Directive(_directive) => {}
-                Node::Block(block) => match block.name.as_str() {
-                    consts::HTTP => match lower_http(block) {
-                        Ok(h) => http = Some(h),
-                        Err(e) => return Err(e),
-                    },
-                    _ => {}
-                },
+                Node::Block(block) => {
+                    if block.name.as_str() == consts::HTTP {
+                        match lower_http(block) {
+                            Ok(h) => http = Some(h),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
             }
         }
 
@@ -693,6 +703,7 @@ fn parse_location_plugin_block(block: &Block) -> Result<PluginSpec, LowerErr> {
         consts::RATE_LIMIT => lower_rate_limit_plugin(block),
         consts::CORS => lower_cors_plugin(block),
         consts::EXT_AUTHZ => lower_ext_authz_plugin(block),
+        consts::JWT_AUTH => lower_jwt_auth_plugin(block),
         _ => Err(LowerErr {
             message: format!("unexpected inner block in location: {}", block.name),
         }),
@@ -899,7 +910,7 @@ fn lower_rate_limit_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
 
     if config.max_requests_per_second <= 0 {
         return Err(LowerErr {
-            message: "rate-limit block: must specify positive `rate`".into()
+            message: "rate-limit block: must specify positive `rate`".into(),
         });
     }
 
@@ -954,7 +965,10 @@ fn lower_cors_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
             Node::Directive(directive) => apply_cors_directive(&mut config, directive)?,
             Node::Block(nested) => {
                 return Err(LowerErr {
-                    message: format!("cors block: nested blocks are not supported: {}", nested.name),
+                    message: format!(
+                        "cors block: nested blocks are not supported: {}",
+                        nested.name
+                    ),
                 });
             }
         }
@@ -988,9 +1002,9 @@ fn apply_cors_directive(
             });
         }
         let mut joined = args.join(" ");
-        if joined.starts_with('"') && joined.ends_with('"') && joined.len() >= 2 {
-            joined = joined[1..joined.len() - 1].to_string();
-        } else if joined.starts_with('\'') && joined.ends_with('\'') && joined.len() >= 2 {
+        if (joined.starts_with('"') && joined.ends_with('"') && joined.len() >= 2)
+            || (joined.starts_with('\'') && joined.ends_with('\'') && joined.len() >= 2)
+        {
             joined = joined[1..joined.len() - 1].to_string();
         }
         Ok(joined)
@@ -1016,16 +1030,24 @@ fn apply_cors_directive(
         consts::ALLOW_CREDENTIALS => {
             if config.allow_credentials.is_some() {
                 return Err(LowerErr {
-                    message: format!("cors block: duplicate `{}` directive", consts::ALLOW_CREDENTIALS),
+                    message: format!(
+                        "cors block: duplicate `{}` directive",
+                        consts::ALLOW_CREDENTIALS
+                    ),
                 });
             }
             let val = parse_exactly_one_argument(&directive.args, consts::ALLOW_CREDENTIALS)?;
             let b = match val.as_str() {
                 "on" => true,
                 "off" => false,
-                _ => return Err(LowerErr {
-                    message: format!("cors block: {} must be `on` or `off`, got `{val}`", consts::ALLOW_CREDENTIALS),
-                }),
+                _ => {
+                    return Err(LowerErr {
+                        message: format!(
+                            "cors block: {} must be `on` or `off`, got `{val}`",
+                            consts::ALLOW_CREDENTIALS
+                        ),
+                    });
+                }
             };
             config.allow_credentials = Some(b);
         }
@@ -1037,7 +1059,10 @@ fn apply_cors_directive(
             }
             let val = parse_exactly_one_argument(&directive.args, consts::MAX_AGE)?;
             let age = val.parse::<u64>().map_err(|_| LowerErr {
-                message: format!("cors block: {} must be an integer, got `{val}`", consts::MAX_AGE),
+                message: format!(
+                    "cors block: {} must be an integer, got `{val}`",
+                    consts::MAX_AGE
+                ),
             })?;
             config.max_age = Some(age);
         }
@@ -1063,12 +1088,15 @@ fn lower_ext_authz_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
             Node::Directive(directive) => apply_ext_authz_directive(&mut config, directive)?,
             Node::Block(nested) => {
                 return Err(LowerErr {
-                    message: format!("ext_authz block: nested blocks are not supported: {}", nested.name),
+                    message: format!(
+                        "ext_authz block: nested blocks are not supported: {}",
+                        nested.name
+                    ),
                 });
             }
         }
     }
-    
+
     if config.uri.is_empty() {
         return Err(LowerErr {
             message: "ext_authz block: missing `uri` directive".into(),
@@ -1105,11 +1133,17 @@ fn apply_ext_authz_directive(
             let val = parse_exactly_one_argument(&directive.args, consts::TIMEOUT)?;
             if val.ends_with("ms") || val.ends_with('s') {
                 return Err(LowerErr {
-                    message: format!("ext_authz block: `{}` expects integer ms, got `{val}`. Strip suffix.", consts::TIMEOUT),
+                    message: format!(
+                        "ext_authz block: `{}` expects integer ms, got `{val}`. Strip suffix.",
+                        consts::TIMEOUT
+                    ),
                 });
             }
             let ms = val.parse::<u64>().map_err(|_| LowerErr {
-                message: format!("ext_authz block: `{}` must be an integer (ms), got `{val}`", consts::TIMEOUT),
+                message: format!(
+                    "ext_authz block: `{}` must be an integer (ms), got `{val}`",
+                    consts::TIMEOUT
+                ),
             })?;
             config.timeout_ms = Some(ms);
         }
@@ -1124,6 +1158,93 @@ fn apply_ext_authz_directive(
         _ => {
             return Err(LowerErr {
                 message: format!("ext_authz block: unsupported directive {}", directive.name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn lower_jwt_auth_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
+    if !block.args.is_empty() {
+        return Err(LowerErr {
+            message: format!("{} block: does not accept arguments", block.name),
+        });
+    }
+
+    let mut config = JwtAuthPluginConfig::default();
+    for child in &block.children {
+        match child {
+            Node::Directive(directive) => apply_jwt_auth_directive(&mut config, directive)?,
+            Node::Block(nested) => {
+                return Err(LowerErr {
+                    message: format!(
+                        "jwt_auth block: nested blocks are not supported: {}",
+                        nested.name
+                    ),
+                });
+            }
+        }
+    }
+
+    if config.algorithm.is_empty() {
+        return Err(LowerErr {
+            message: "jwt_auth block: missing `algorithm` directive".into(),
+        });
+    }
+    if config.secret.is_none() && config.secret_file.is_none() {
+        return Err(LowerErr {
+            message: "jwt_auth block: either `secret` or `secret_file` must be provided".into(),
+        });
+    }
+
+    let config_val = serde_json::to_value(config).expect("jwt_auth plugin config serializes");
+    Ok(PluginSpec {
+        name: consts::JWT_AUTH.into(),
+        config: config_val,
+    })
+}
+
+fn apply_jwt_auth_directive(
+    config: &mut JwtAuthPluginConfig,
+    directive: &Directive,
+) -> Result<(), LowerErr> {
+    match directive.name.as_str() {
+        consts::ALGORITHM => {
+            if !config.algorithm.is_empty() {
+                return Err(LowerErr {
+                    message: format!(
+                        "jwt_auth block: duplicate `{}` directive",
+                        consts::ALGORITHM
+                    ),
+                });
+            }
+            let val = parse_exactly_one_argument(&directive.args, consts::ALGORITHM)?;
+            config.algorithm = val;
+        }
+        consts::SECRET => {
+            if config.secret.is_some() {
+                return Err(LowerErr {
+                    message: format!("jwt_auth block: duplicate `{}` directive", consts::SECRET),
+                });
+            }
+            let val = parse_exactly_one_argument(&directive.args, consts::SECRET)?;
+            config.secret = Some(val);
+        }
+        consts::SECRET_FILE => {
+            if config.secret_file.is_some() {
+                return Err(LowerErr {
+                    message: format!(
+                        "jwt_auth block: duplicate `{}` directive",
+                        consts::SECRET_FILE
+                    ),
+                });
+            }
+            let val = parse_exactly_one_argument(&directive.args, consts::SECRET_FILE)?;
+            config.secret_file = Some(val);
+        }
+        _ => {
+            return Err(LowerErr {
+                message: format!("jwt_auth block: unsupported directive {}", directive.name),
             });
         }
     }

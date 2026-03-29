@@ -245,14 +245,9 @@ pub enum UpstreamHttpProtocol {
     H2c,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum Switch {
+    #[default]
     On,
     Off,
-}
-
-impl Default for Switch {
-    fn default() -> Self {
-        Switch::On
-    }
 }

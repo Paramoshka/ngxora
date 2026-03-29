@@ -1,14 +1,12 @@
 use super::types::{
-    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledRouter,
-    CompiledUpstreamGroup, CompiledUpstreamServer, HealthCheckType, HttpRuntimeOptions,
-    ListenKey, ListenerProtocolConfig, ListenerTlsConfig, ListenerTlsSettings, RouteTarget,
-    ServerRoutes,
+    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledRouter, CompiledUpstreamGroup,
+    CompiledUpstreamServer, HealthCheckType, HttpRuntimeOptions, ListenKey, ListenerProtocolConfig,
+    ListenerTlsConfig, ListenerTlsSettings, RouteTarget, ServerRoutes,
 };
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
-    ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamHealthCheck,
-    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamServer, UpstreamSslOptions,
-    UpstreamTimeouts,
+    ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType,
+    UpstreamHttpProtocol, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;

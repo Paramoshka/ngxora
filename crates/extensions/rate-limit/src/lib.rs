@@ -1,7 +1,7 @@
 use http::{HeaderValue, StatusCode, header};
 use ngxora_plugin_api::{
-    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec,
-    RequestCtx, async_trait,
+    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec, RequestCtx,
+    async_trait,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -145,10 +145,9 @@ impl PluginFactory for RateLimitPluginFactory {
     }
 
     fn build(&self, spec: &PluginSpec) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
-        let config =
-            serde_json::from_value::<RateLimitPluginConfig>(spec.config.clone()).map_err(|err| {
-                PluginBuildError::new(self.name(), format!("invalid plugin config: {err}"))
-            })?;
+        let config = serde_json::from_value::<RateLimitPluginConfig>(spec.config.clone()).map_err(
+            |err| PluginBuildError::new(self.name(), format!("invalid plugin config: {err}")),
+        )?;
 
         if config.max_requests_per_second <= 0 {
             return Err(PluginBuildError::new(
@@ -262,7 +261,9 @@ mod tests {
             name: "rate-limit".into(),
             config: json!({ "max_requests_per_second": 10 }),
         };
-        let plugin = RateLimitPluginFactory.build(&spec).expect("build should succeed");
+        let plugin = RateLimitPluginFactory
+            .build(&spec)
+            .expect("build should succeed");
         assert_eq!(plugin.name(), "rate-limit");
     }
 
@@ -329,7 +330,8 @@ mod tests {
                     response
                         .headers
                         .iter()
-                        .find(|(name, _)| name == &header::HeaderName::from_static("x-ratelimit-limit"))
+                        .find(|(name, _)| name
+                            == &header::HeaderName::from_static("x-ratelimit-limit"))
                         .map(|(_, value)| value),
                     Some(&HeaderValue::from_static("2"))
                 );

@@ -36,7 +36,7 @@ impl<'a> Token<'a> {
 
             if c == '#' {
                 flush(&mut tokens, input, &mut word_start, i, line);
-                while let Some((_, cc)) = chars.next() {
+                for (_, cc) in chars.by_ref() {
                     if cc == '\n' {
                         line += 1;
                         break;

@@ -8,8 +8,8 @@ pub use runtime::{DynamicProxy, ProxyContext, RuntimeUpstreamGroup};
 pub use types::{
     CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter,
     CompiledUpstreamGroup, CompiledUpstreamServer, CompliedRouter, HealthCheckType,
-    HttpRuntimeOptions, ListenKey, ListenerProtocolConfig, ListenerTlsConfig,
-    ListenerTlsSettings, RouteTarget, ServerRoutes, VirtualHostRoutes,
+    HttpRuntimeOptions, ListenKey, ListenerProtocolConfig, ListenerTlsConfig, ListenerTlsSettings,
+    RouteTarget, ServerRoutes, VirtualHostRoutes,
 };
 
 pub(crate) use runtime::{RuntimeTrustedCa, build_runtime_trusted_cas};

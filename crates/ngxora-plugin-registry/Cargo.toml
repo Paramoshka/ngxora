@@ -10,6 +10,7 @@ plugin-basic-auth = ["dep:ngxora-extension-basic-auth"]
 plugin-rate-limit = ["dep:ngxora-extension-rate-limit"]
 plugin-cors = ["dep:ngxora-extension-cors"]
 plugin-ext-authz = ["dep:ngxora-extension-ext-authz"]
+plugin-jwt-auth = ["dep:ngxora-extension-jwt-auth"]
 
 [dependencies]
 ngxora-extension-headers = { path = "../extensions/headers", optional = true }
@@ -17,4 +18,5 @@ ngxora-extension-basic-auth = { path = "../extensions/basic-auth", optional = tr
 ngxora-extension-rate-limit = { path = "../extensions/rate-limit", optional = true }
 ngxora-extension-cors = { path = "../extensions/cors", optional = true }
 ngxora-extension-ext-authz = { path = "../extensions/ext-authz", optional = true }
+ngxora-extension-jwt-auth = { path = "../extensions/jwt-auth", optional = true }
 ngxora-plugin-api = { path = "../ngxora-plugin-api" }

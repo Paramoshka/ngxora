@@ -278,7 +278,10 @@ impl HeaderMapMut for ResponseHeaderEditor<'_> {
 }
 
 impl SelectedRoute {
-    fn from_resolved(snapshot: &RuntimeSnapshot, resolved: &ResolvedLocation<'_>) -> PingoraResult<Self> {
+    fn from_resolved(
+        snapshot: &RuntimeSnapshot,
+        resolved: &ResolvedLocation<'_>,
+    ) -> PingoraResult<Self> {
         let peer = match &resolved.location.target {
             RouteTarget::ProxyPass {
                 host,

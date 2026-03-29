@@ -1,7 +1,7 @@
 use http::{HeaderValue, Method, StatusCode, header};
 use ngxora_plugin_api::{
-    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec,
-    RequestCtx, ResponseCtx, async_trait,
+    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec, RequestCtx,
+    ResponseCtx, async_trait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -55,7 +55,7 @@ impl HttpPlugin for CorsPlugin {
         &self,
         ctx: &mut RequestCtx<'_>,
     ) -> Result<PluginFlow, ngxora_plugin_api::PluginError> {
-        if ctx.method == &Method::OPTIONS
+        if ctx.method == Method::OPTIONS
             && ctx.headers.get(&header::ORIGIN).is_some()
             && ctx
                 .headers
@@ -119,9 +119,10 @@ impl PluginFactory for CorsPluginFactory {
     }
 
     fn build(&self, spec: &PluginSpec) -> Result<Arc<dyn HttpPlugin>, PluginBuildError> {
-        let config = serde_json::from_value::<CorsPluginConfig>(spec.config.clone()).map_err(
-            |err| PluginBuildError::new(self.name(), format!("invalid plugin config: {err}")),
-        )?;
+        let config =
+            serde_json::from_value::<CorsPluginConfig>(spec.config.clone()).map_err(|err| {
+                PluginBuildError::new(self.name(), format!("invalid plugin config: {err}"))
+            })?;
 
         let parse_hdr =
             |opt: &Option<String>, name: &str| -> Result<Option<HeaderValue>, PluginBuildError> {
@@ -176,18 +177,30 @@ mod tests {
     }
     impl Default for FakeHeaders {
         fn default() -> Self {
-            Self { inner: HeaderMap::new() }
+            Self {
+                inner: HeaderMap::new(),
+            }
         }
     }
     impl HeaderMapMut for FakeHeaders {
         fn get(&self, name: &HeaderName) -> Option<&HeaderValue> {
             self.inner.get(name)
         }
-        fn add(&mut self, name: &HeaderName, value: HeaderValue) -> Result<(), ngxora_plugin_api::PluginError> {
-            self.inner.append(name, value); Ok(())
+        fn add(
+            &mut self,
+            name: &HeaderName,
+            value: HeaderValue,
+        ) -> Result<(), ngxora_plugin_api::PluginError> {
+            self.inner.append(name, value);
+            Ok(())
         }
-        fn set(&mut self, name: &HeaderName, value: HeaderValue) -> Result<(), ngxora_plugin_api::PluginError> {
-            self.inner.insert(name, value); Ok(())
+        fn set(
+            &mut self,
+            name: &HeaderName,
+            value: HeaderValue,
+        ) -> Result<(), ngxora_plugin_api::PluginError> {
+            self.inner.insert(name, value);
+            Ok(())
         }
         fn remove(&mut self, name: &HeaderName) {
             self.inner.remove(name);
@@ -205,7 +218,9 @@ mod tests {
                 "max_age": 86400
             }),
         };
-        let plugin = CorsPluginFactory.build(&spec).expect("build should succeed");
+        let plugin = CorsPluginFactory
+            .build(&spec)
+            .expect("build should succeed");
         assert_eq!(plugin.name(), "cors");
     }
 
@@ -220,10 +235,22 @@ mod tests {
         };
         let plugin = CorsPluginFactory.build(&spec).unwrap();
         let method = Method::OPTIONS;
-        let mut state = PluginState { extensions: Extensions::new() };
+        let mut state = PluginState {
+            extensions: Extensions::new(),
+        };
         let mut headers = FakeHeaders::default();
-        headers.set(&header::ORIGIN, HeaderValue::from_static("https://example.com")).unwrap();
-        headers.set(&header::ACCESS_CONTROL_REQUEST_METHOD, HeaderValue::from_static("GET")).unwrap();
+        headers
+            .set(
+                &header::ORIGIN,
+                HeaderValue::from_static("https://example.com"),
+            )
+            .unwrap();
+        headers
+            .set(
+                &header::ACCESS_CONTROL_REQUEST_METHOD,
+                HeaderValue::from_static("GET"),
+            )
+            .unwrap();
 
         let flow = block_on(plugin.on_request(&mut RequestCtx {
             state: &mut state,
@@ -237,11 +264,19 @@ mod tests {
 
         if let PluginFlow::Respond(res) = flow {
             assert_eq!(res.status, StatusCode::NO_CONTENT);
-            
-            let origin = res.headers.iter().find(|(k, _)| k == &header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap();
+
+            let origin = res
+                .headers
+                .iter()
+                .find(|(k, _)| k == &header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap();
             assert_eq!(origin.1.to_str().unwrap(), "*");
-            
-            let max_age = res.headers.iter().find(|(k, _)| k == &header::ACCESS_CONTROL_MAX_AGE).unwrap();
+
+            let max_age = res
+                .headers
+                .iter()
+                .find(|(k, _)| k == &header::ACCESS_CONTROL_MAX_AGE)
+                .unwrap();
             assert_eq!(max_age.1.to_str().unwrap(), "3600");
         } else {
             panic!("Expected preflight interception");

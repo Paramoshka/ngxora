@@ -1,7 +1,7 @@
 use http::{HeaderName, HeaderValue};
 use ngxora_plugin_api::{
-    HeaderMapMut, HttpPlugin, PluginBuildError, PluginError, PluginFactory, PluginFlow,
-    PluginSpec, RequestCtx, ResponseCtx, UpstreamRequestCtx, async_trait,
+    HeaderMapMut, HttpPlugin, PluginBuildError, PluginError, PluginFactory, PluginFlow, PluginSpec,
+    RequestCtx, ResponseCtx, UpstreamRequestCtx, async_trait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

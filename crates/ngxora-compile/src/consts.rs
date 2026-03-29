@@ -21,6 +21,11 @@ pub const URI: &str = "uri";
 pub const PASS_REQUEST_HEADER: &str = "pass_request_header";
 pub const PASS_RESPONSE_HEADER: &str = "pass_response_header";
 
+pub const JWT_AUTH: &str = "jwt_auth";
+pub const ALGORITHM: &str = "algorithm";
+pub const SECRET: &str = "secret";
+pub const SECRET_FILE: &str = "secret_file";
+
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";
 pub const POLICY: &str = "policy";

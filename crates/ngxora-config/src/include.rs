@@ -28,7 +28,7 @@ impl IncludeResolver {
         collect_includes(&ast.items, &mut includes_files);
 
         IncludeResolver {
-            includes_files: includes_files,
+            includes_files,
             root_dir: root_dir.into(),
         }
     }
