@@ -54,4 +54,6 @@ pub fn register_builtin_plugins(registry: &mut PluginRegistry) {
     ));
     #[cfg(feature = "plugin-cors")]
     registry.register(Arc::new(ngxora_extension_cors::CorsPluginFactory));
+    #[cfg(feature = "plugin-ext-authz")]
+    registry.register(Arc::new(ngxora_extension_ext_authz::ExtAuthzPluginFactory));
 }

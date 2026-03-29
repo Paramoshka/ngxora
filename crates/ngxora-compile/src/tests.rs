@@ -593,4 +593,43 @@ http {
             }]
         );
     }
+
+    #[test]
+    fn from_ast_parses_ext_authz_plugin_block() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location /api {
+      ext_authz {
+        uri http://127.0.0.1:9091/auth;
+        timeout 2000;
+        pass_request_header Authorization;
+        pass_request_header Cookie;
+        pass_response_header X-Remote-User;
+        pass_response_header X-Role;
+      }
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let location = &http.servers[0].locations[0];
+        assert_eq!(
+            location.plugins,
+            vec![PluginSpec {
+                name: "ext_authz".into(),
+                config: json!({
+                    "uri": "http://127.0.0.1:9091/auth",
+                    "timeout_ms": 2000,
+                    "pass_request_headers": ["Authorization", "Cookie"],
+                    "pass_response_headers": ["X-Remote-User", "X-Role"]
+                }),
+            }]
+        );
+    }
 }

@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["plugin-headers", "plugin-basic-auth", "plugin-rate-limit", "plugin-cors"]
+default = ["plugin-headers", "plugin-basic-auth", "plugin-rate-limit", "plugin-cors", "plugin-ext-authz"]
 plugin-headers = ["ngxora-runtime/plugin-headers"]
 plugin-basic-auth = ["ngxora-runtime/plugin-basic-auth"]
 plugin-rate-limit = ["ngxora-runtime/plugin-rate-limit"]
 plugin-cors = ["ngxora-runtime/plugin-cors"]
+plugin-ext-authz = ["ngxora-runtime/plugin-ext-authz"]
 
 [dependencies]
 arc-swap = "1.8.2"

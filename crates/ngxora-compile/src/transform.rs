@@ -56,6 +56,17 @@ struct CorsPluginConfig {
 }
 
 #[derive(Debug, Default, Serialize)]
+struct ExtAuthzPluginConfig {
+    uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pass_request_headers: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pass_response_headers: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
 struct HeaderPatchConfig {
     add: Vec<HeaderEntry>,
     set: Vec<HeaderEntry>,
@@ -681,6 +692,7 @@ fn parse_location_plugin_block(block: &Block) -> Result<PluginSpec, LowerErr> {
         consts::BASIC_AUTH | consts::BASIC_AUTH_ALIAS => lower_basic_auth_plugin(block),
         consts::RATE_LIMIT => lower_rate_limit_plugin(block),
         consts::CORS => lower_cors_plugin(block),
+        consts::EXT_AUTHZ => lower_ext_authz_plugin(block),
         _ => Err(LowerErr {
             message: format!("unexpected inner block in location: {}", block.name),
         }),
@@ -1032,6 +1044,86 @@ fn apply_cors_directive(
         _ => {
             return Err(LowerErr {
                 message: format!("cors block: unsupported directive {}", directive.name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn lower_ext_authz_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
+    if !block.args.is_empty() {
+        return Err(LowerErr {
+            message: format!("{} block: does not accept arguments", block.name),
+        });
+    }
+
+    let mut config = ExtAuthzPluginConfig::default();
+    for child in &block.children {
+        match child {
+            Node::Directive(directive) => apply_ext_authz_directive(&mut config, directive)?,
+            Node::Block(nested) => {
+                return Err(LowerErr {
+                    message: format!("ext_authz block: nested blocks are not supported: {}", nested.name),
+                });
+            }
+        }
+    }
+    
+    if config.uri.is_empty() {
+        return Err(LowerErr {
+            message: "ext_authz block: missing `uri` directive".into(),
+        });
+    }
+
+    let config_val = serde_json::to_value(config).expect("ext_authz plugin config serializes");
+    Ok(PluginSpec {
+        name: consts::EXT_AUTHZ.into(),
+        config: config_val,
+    })
+}
+
+fn apply_ext_authz_directive(
+    config: &mut ExtAuthzPluginConfig,
+    directive: &Directive,
+) -> Result<(), LowerErr> {
+    match directive.name.as_str() {
+        consts::URI => {
+            if !config.uri.is_empty() {
+                return Err(LowerErr {
+                    message: format!("ext_authz block: duplicate `{}` directive", consts::URI),
+                });
+            }
+            let val = parse_exactly_one_argument(&directive.args, consts::URI)?;
+            config.uri = val;
+        }
+        consts::TIMEOUT => {
+            if config.timeout_ms.is_some() {
+                return Err(LowerErr {
+                    message: format!("ext_authz block: duplicate `{}` directive", consts::TIMEOUT),
+                });
+            }
+            let val = parse_exactly_one_argument(&directive.args, consts::TIMEOUT)?;
+            if val.ends_with("ms") || val.ends_with('s') {
+                return Err(LowerErr {
+                    message: format!("ext_authz block: `{}` expects integer ms, got `{val}`. Strip suffix.", consts::TIMEOUT),
+                });
+            }
+            let ms = val.parse::<u64>().map_err(|_| LowerErr {
+                message: format!("ext_authz block: `{}` must be an integer (ms), got `{val}`", consts::TIMEOUT),
+            })?;
+            config.timeout_ms = Some(ms);
+        }
+        consts::PASS_REQUEST_HEADER => {
+            let val = parse_exactly_one_argument(&directive.args, consts::PASS_REQUEST_HEADER)?;
+            config.pass_request_headers.push(val);
+        }
+        consts::PASS_RESPONSE_HEADER => {
+            let val = parse_exactly_one_argument(&directive.args, consts::PASS_RESPONSE_HEADER)?;
+            config.pass_response_headers.push(val);
+        }
+        _ => {
+            return Err(LowerErr {
+                message: format!("ext_authz block: unsupported directive {}", directive.name),
             });
         }
     }

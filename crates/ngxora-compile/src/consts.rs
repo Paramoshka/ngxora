@@ -16,6 +16,11 @@ pub const EXPOSE_HEADERS: &str = "expose_headers";
 pub const ALLOW_CREDENTIALS: &str = "allow_credentials";
 pub const MAX_AGE: &str = "max_age";
 
+pub const EXT_AUTHZ: &str = "ext_authz";
+pub const URI: &str = "uri";
+pub const PASS_REQUEST_HEADER: &str = "pass_request_header";
+pub const PASS_RESPONSE_HEADER: &str = "pass_response_header";
+
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";
 pub const POLICY: &str = "policy";

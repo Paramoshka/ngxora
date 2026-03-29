@@ -282,3 +282,31 @@ location /api/ {
 Supported directives:
 
 - `rate <requests_per_second>;`
+
+### `ext_authz`
+
+Supported inside `location {}` when the binary is built with `plugin-ext-authz`.
+
+Delegates request authentication to an external HTTP service, allowing request headers to be passed to the auth service, and response headers to be injected from the auth service upstream to your backend.
+
+```nginx
+location /api/ {
+    ext_authz {
+        # The external authorization endpoint
+        uri http://127.0.0.1:9091/auth;
+        
+        # Sub-request timeout
+        timeout 2000;
+        
+        # Headers extracted from client and passed to auth service
+        pass_request_header Authorization;
+        pass_request_header Cookie;
+        
+        # Headers extracted from 200 OK auth response and injected into the backend pipeline
+        pass_response_header X-Remote-User;
+        pass_response_header X-Role;
+    }
+    
+    proxy_pass http://api_pool;
+}
+```
