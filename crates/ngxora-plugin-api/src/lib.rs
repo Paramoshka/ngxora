@@ -1,3 +1,4 @@
+pub use async_trait::async_trait;
 use bytes::Bytes;
 use http::{Extensions, HeaderName, HeaderValue, Method, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -64,7 +65,7 @@ impl Display for PluginBuildError {
 
 impl Error for PluginBuildError {}
 
-pub trait HeaderMapMut {
+pub trait HeaderMapMut: Send {
     fn get(&self, _name: &HeaderName) -> Option<&HeaderValue> {
         None
     }
@@ -122,21 +123,22 @@ pub fn empty_plugin_chain() -> PluginChain {
     Vec::<Arc<dyn HttpPlugin>>::new().into()
 }
 
+#[async_trait]
 pub trait HttpPlugin: Send + Sync {
     fn name(&self) -> &'static str;
 
-    fn on_request(&self, _ctx: &mut RequestCtx<'_>) -> Result<PluginFlow, PluginError> {
+    async fn on_request(&self, _ctx: &mut RequestCtx<'_>) -> Result<PluginFlow, PluginError> {
         Ok(PluginFlow::Continue)
     }
 
-    fn on_upstream_request(
+    async fn on_upstream_request(
         &self,
         _ctx: &mut UpstreamRequestCtx<'_>,
     ) -> Result<PluginFlow, PluginError> {
         Ok(PluginFlow::Continue)
     }
 
-    fn on_response(&self, _ctx: &mut ResponseCtx<'_>) -> Result<PluginFlow, PluginError> {
+    async fn on_response(&self, _ctx: &mut ResponseCtx<'_>) -> Result<PluginFlow, PluginError> {
         Ok(PluginFlow::Continue)
     }
 }

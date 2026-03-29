@@ -1,6 +1,7 @@
 use http::{HeaderValue, StatusCode, header};
 use ngxora_plugin_api::{
-    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec, RequestCtx,
+    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec,
+    RequestCtx, async_trait,
 };
 use pingora_limits::rate::Rate;
 use serde::{Deserialize, Serialize};
@@ -38,12 +39,13 @@ impl RateLimitPlugin {
     }
 }
 
+#[async_trait]
 impl HttpPlugin for RateLimitPlugin {
     fn name(&self) -> &'static str {
         PLUGIN_NAME
     }
 
-    fn on_request(
+    async fn on_request(
         &self,
         ctx: &mut RequestCtx<'_>,
     ) -> Result<PluginFlow, ngxora_plugin_api::PluginError> {
@@ -96,7 +98,7 @@ impl PluginFactory for RateLimitPluginFactory {
 
 #[cfg(test)]
 mod tests {
-    use super::{RateLimitPluginConfig, RateLimitPluginFactory};
+    use super::RateLimitPluginFactory;
     use ngxora_plugin_api::{PluginFactory, PluginSpec};
     use serde_json::json;
 

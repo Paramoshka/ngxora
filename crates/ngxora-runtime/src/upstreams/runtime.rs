@@ -661,6 +661,7 @@ impl ProxyHttp for DynamicProxy {
                     method: &method,
                     headers: &mut headers,
                 })
+                .await
                 .map_err(|err| map_plugin_error("request_filter", err))?;
             if let PluginFlow::Respond(response) = flow {
                 session.set_keepalive(None);
@@ -714,6 +715,7 @@ impl ProxyHttp for DynamicProxy {
                     state: &mut ctx.plugin_state,
                     headers: &mut headers,
                 })
+                .await
                 .map_err(|err| map_plugin_error("upstream_request_filter", err))?;
             respond_from_plugin_flow(flow, "upstream_request_filter")?;
         }
@@ -746,6 +748,7 @@ impl ProxyHttp for DynamicProxy {
                         status: &mut status,
                         headers: &mut headers,
                     })
+                    .await
                     .map_err(|err| map_plugin_error("response_filter", err))?;
                 respond_from_plugin_flow(flow, "response_filter")?;
             }

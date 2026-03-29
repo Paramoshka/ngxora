@@ -1,7 +1,7 @@
 use http::{HeaderValue, Method, StatusCode, header};
 use ngxora_plugin_api::{
-    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec, RequestCtx,
-    ResponseCtx,
+    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec,
+    RequestCtx, ResponseCtx, async_trait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -45,12 +45,13 @@ impl CorsPlugin {
     }
 }
 
+#[async_trait]
 impl HttpPlugin for CorsPlugin {
     fn name(&self) -> &'static str {
         PLUGIN_NAME
     }
 
-    fn on_request(
+    async fn on_request(
         &self,
         ctx: &mut RequestCtx<'_>,
     ) -> Result<PluginFlow, ngxora_plugin_api::PluginError> {
@@ -95,7 +96,7 @@ impl HttpPlugin for CorsPlugin {
         Ok(PluginFlow::Continue)
     }
 
-    fn on_response(
+    async fn on_response(
         &self,
         ctx: &mut ResponseCtx<'_>,
     ) -> Result<PluginFlow, ngxora_plugin_api::PluginError> {
@@ -165,6 +166,7 @@ impl PluginFactory for CorsPluginFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::executor::block_on;
     use http::{Extensions, HeaderMap, HeaderName};
     use ngxora_plugin_api::{HeaderMapMut, PluginState};
     use serde_json::json;
@@ -223,13 +225,14 @@ mod tests {
         headers.set(&header::ORIGIN, HeaderValue::from_static("https://example.com")).unwrap();
         headers.set(&header::ACCESS_CONTROL_REQUEST_METHOD, HeaderValue::from_static("GET")).unwrap();
 
-        let flow = plugin.on_request(&mut RequestCtx {
+        let flow = block_on(plugin.on_request(&mut RequestCtx {
             state: &mut state,
             path: "/",
             host: Some("api.com"),
             method: &method,
             headers: &mut headers,
-        }).unwrap();
+        }))
+        .unwrap();
 
         if let PluginFlow::Respond(res) = flow {
             assert_eq!(res.status, StatusCode::NO_CONTENT);

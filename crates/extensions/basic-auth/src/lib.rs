@@ -1,7 +1,8 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http::{HeaderValue, StatusCode, header};
 use ngxora_plugin_api::{
-    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec, RequestCtx,
+    HttpPlugin, LocalResponse, PluginBuildError, PluginFactory, PluginFlow, PluginSpec,
+    RequestCtx, async_trait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -40,12 +41,13 @@ impl BasicAuthPlugin {
     }
 }
 
+#[async_trait]
 impl HttpPlugin for BasicAuthPlugin {
     fn name(&self) -> &'static str {
         PLUGIN_NAME
     }
 
-    fn on_request(
+    async fn on_request(
         &self,
         ctx: &mut RequestCtx<'_>,
     ) -> Result<PluginFlow, ngxora_plugin_api::PluginError> {
@@ -132,6 +134,7 @@ impl PluginFactory for BasicAuthPluginFactory {
 mod tests {
     use super::{BasicAuthPluginConfig, BasicAuthPluginFactory};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use futures::executor::block_on;
     use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method};
     use ngxora_plugin_api::{
         HeaderMapMut, PluginFactory, PluginFlow, PluginSpec, PluginState, RequestCtx,
@@ -207,15 +210,14 @@ mod tests {
             )
             .unwrap();
 
-        let flow = plugin
-            .on_request(&mut RequestCtx {
-                state: &mut state,
-                path: "/",
-                host: Some("example.com"),
-                method: &method,
-                headers: &mut headers,
-            })
-            .expect("request hook should succeed");
+        let flow = block_on(plugin.on_request(&mut RequestCtx {
+            state: &mut state,
+            path: "/",
+            host: Some("example.com"),
+            method: &method,
+            headers: &mut headers,
+        }))
+        .expect("request hook should succeed");
 
         assert!(matches!(flow, PluginFlow::Continue));
     }
@@ -231,15 +233,14 @@ mod tests {
         };
         let mut headers = FakeHeaders::default();
 
-        let flow = plugin
-            .on_request(&mut RequestCtx {
-                state: &mut state,
-                path: "/",
-                host: Some("example.com"),
-                method: &method,
-                headers: &mut headers,
-            })
-            .expect("request hook should succeed");
+        let flow = block_on(plugin.on_request(&mut RequestCtx {
+            state: &mut state,
+            path: "/",
+            host: Some("example.com"),
+            method: &method,
+            headers: &mut headers,
+        }))
+        .expect("request hook should succeed");
 
         match flow {
             PluginFlow::Respond(response) => {

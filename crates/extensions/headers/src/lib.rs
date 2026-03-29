@@ -1,7 +1,7 @@
 use http::{HeaderName, HeaderValue};
 use ngxora_plugin_api::{
-    HeaderMapMut, HttpPlugin, PluginBuildError, PluginError, PluginFactory, PluginFlow, PluginSpec,
-    RequestCtx, ResponseCtx, UpstreamRequestCtx,
+    HeaderMapMut, HttpPlugin, PluginBuildError, PluginError, PluginFactory, PluginFlow,
+    PluginSpec, RequestCtx, ResponseCtx, UpstreamRequestCtx, async_trait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -115,17 +115,18 @@ pub struct HeadersPlugin {
     response: HeaderPatch,
 }
 
+#[async_trait]
 impl HttpPlugin for HeadersPlugin {
     fn name(&self) -> &'static str {
         "headers"
     }
 
-    fn on_request(&self, ctx: &mut RequestCtx<'_>) -> Result<PluginFlow, PluginError> {
+    async fn on_request(&self, ctx: &mut RequestCtx<'_>) -> Result<PluginFlow, PluginError> {
         self.request.apply(self.name(), ctx.headers)?;
         Ok(PluginFlow::Continue)
     }
 
-    fn on_upstream_request(
+    async fn on_upstream_request(
         &self,
         ctx: &mut UpstreamRequestCtx<'_>,
     ) -> Result<PluginFlow, PluginError> {
@@ -133,7 +134,7 @@ impl HttpPlugin for HeadersPlugin {
         Ok(PluginFlow::Continue)
     }
 
-    fn on_response(&self, ctx: &mut ResponseCtx<'_>) -> Result<PluginFlow, PluginError> {
+    async fn on_response(&self, ctx: &mut ResponseCtx<'_>) -> Result<PluginFlow, PluginError> {
         self.response.apply(self.name(), ctx.headers)?;
         Ok(PluginFlow::Continue)
     }
@@ -167,6 +168,7 @@ impl PluginFactory for HeadersPluginFactory {
 #[cfg(test)]
 mod tests {
     use super::{HeaderEntry, HeaderPatchConfig, HeadersPluginConfig, HeadersPluginFactory};
+    use futures::executor::block_on;
     use http::{Extensions, HeaderName, HeaderValue, Method, StatusCode};
     use ngxora_plugin_api::{
         HeaderMapMut, PluginFactory, PluginSpec, PluginState, RequestCtx, ResponseCtx,
@@ -249,9 +251,7 @@ mod tests {
             method: &method,
             headers: &mut request_headers,
         };
-        plugin
-            .on_request(&mut request_ctx)
-            .expect("request patch should succeed");
+        block_on(plugin.on_request(&mut request_ctx)).expect("request patch should succeed");
         assert_eq!(request_headers.set.len(), 1);
 
         let mut upstream_headers = FakeHeaders::default();
@@ -259,8 +259,7 @@ mod tests {
             state: &mut state,
             headers: &mut upstream_headers,
         };
-        plugin
-            .on_upstream_request(&mut upstream_ctx)
+        block_on(plugin.on_upstream_request(&mut upstream_ctx))
             .expect("upstream patch should succeed");
         assert_eq!(upstream_headers.added.len(), 1);
 
@@ -271,9 +270,7 @@ mod tests {
             status: &mut status,
             headers: &mut response_headers,
         };
-        plugin
-            .on_response(&mut response_ctx)
-            .expect("response patch should succeed");
+        block_on(plugin.on_response(&mut response_ctx)).expect("response patch should succeed");
         assert_eq!(response_headers.removed.len(), 1);
     }
 }
