@@ -352,6 +352,14 @@ fn select_runtime_route(
     )))
 }
 
+fn request_client_ip(session: &Session) -> Option<std::net::IpAddr> {
+    session
+        .downstream_session
+        .client_addr()
+        .and_then(|addr| addr.as_inet())
+        .map(|addr| addr.ip())
+}
+
 fn respond_from_plugin_flow(flow: PluginFlow, stage: &str) -> PingoraResult<()> {
     match flow {
         PluginFlow::Continue => Ok(()),
@@ -648,6 +656,7 @@ impl ProxyHttp for DynamicProxy {
 
         let path = session.req_header().uri.path().to_string();
         let method = session.req_header().method.clone();
+        let client_ip = request_client_ip(session);
         let mut headers = RequestHeaderEditor {
             inner: session.downstream_session.req_header_mut(),
         };
@@ -659,6 +668,7 @@ impl ProxyHttp for DynamicProxy {
                     path: &path,
                     host: host.as_deref(),
                     method: &method,
+                    client_ip,
                     headers: &mut headers,
                 })
                 .await

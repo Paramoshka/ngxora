@@ -215,6 +215,7 @@ mod tests {
             path: "/",
             host: Some("example.com"),
             method: &method,
+            client_ip: None,
             headers: &mut headers,
         }))
         .expect("request hook should succeed");
@@ -238,6 +239,7 @@ mod tests {
             path: "/",
             host: Some("example.com"),
             method: &method,
+            client_ip: None,
             headers: &mut headers,
         }))
         .expect("request hook should succeed");

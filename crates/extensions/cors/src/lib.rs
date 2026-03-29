@@ -230,6 +230,7 @@ mod tests {
             path: "/",
             host: Some("api.com"),
             method: &method,
+            client_ip: None,
             headers: &mut headers,
         }))
         .unwrap();

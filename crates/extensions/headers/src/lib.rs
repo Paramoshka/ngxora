@@ -249,6 +249,7 @@ mod tests {
             path: "/",
             host: Some("example.com"),
             method: &method,
+            client_ip: None,
             headers: &mut request_headers,
         };
         block_on(plugin.on_request(&mut request_ctx)).expect("request patch should succeed");

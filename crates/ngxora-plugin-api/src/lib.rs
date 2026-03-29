@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::net::IpAddr;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +81,7 @@ pub struct RequestCtx<'a> {
     pub path: &'a str,
     pub host: Option<&'a str>,
     pub method: &'a Method,
+    pub client_ip: Option<IpAddr>,
     pub headers: &'a mut dyn HeaderMapMut,
 }
 
