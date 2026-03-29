@@ -1,0 +1,4 @@
+ignore:
+  - vulnerability: GHSA-2gh3-rmm4-6rq5
+    vex-status: "not_affected"
+    justification: "The vulnerable protobuf 2.28.0 crate is pulled as a dependency of the prometheus crate inside pingora-core. The prometheus client only serializes metrics and does not parse untrusted user protobuf payloads."

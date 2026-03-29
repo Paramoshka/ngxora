@@ -1,10 +1,10 @@
 module github.com/paramoshka/ngxora/sdk/go
 
-go 1.25.0
+go 1.26.1
 
 require (
 	go.opentelemetry.io/otel/sdk/metric v1.40.0 // indirect
-	google.golang.org/grpc v1.79.2
+	google.golang.org/grpc v1.79.3
 	google.golang.org/protobuf v1.36.11
 )
 
