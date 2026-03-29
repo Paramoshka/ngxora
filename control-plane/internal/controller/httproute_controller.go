@@ -13,6 +13,7 @@ import (
 	"github.com/paramoshka/ngxora/control-plane/api/v1alpha1"
 	controlv1 "github.com/paramoshka/ngxora/sdk/go/ngxora/control/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -94,7 +95,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{}, fmt.Errorf("get namespace labels for %s: %w", route.Namespace, err)
 		}
 
-		if err := r.resolveBackendRefs(ctx, route.Namespace, desiredRoute, serviceCache, referenceGrantCache); err != nil {
+		if err := r.resolveBackendRefs(ctx, route.Namespace, &desiredRoute, serviceCache, referenceGrantCache); err != nil {
 			statusPlans = append(statusPlans, unresolvedRefsPlan(route, parentRefs, err))
 			r.Logger.Warn("skipping unresolved HTTPRoute backends", "name", route.Name, "namespace", route.Namespace, "error", err)
 			continue
@@ -208,6 +209,7 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueRoutesForSecret())).
 		Watches(&gatewayv1beta1.ReferenceGrant{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.enqueueRoutesForNamespace()), builder.WithPredicates(predicate.LabelChangedPredicate{})).
+		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
 		Complete(r)
 }
 
@@ -557,16 +559,18 @@ func (r *HTTPRouteReconciler) classifyUnattachedRoute(
 func (r *HTTPRouteReconciler) resolveBackendRefs(
 	ctx context.Context,
 	routeNamespace string,
-	desiredRoute translator.DesiredRoute,
+	desiredRoute *translator.DesiredRoute,
 	cache map[types.NamespacedName]*corev1.Service,
 	referenceGrantCache map[string][]gatewayv1beta1.ReferenceGrant,
 ) error {
-	for _, rule := range desiredRoute.Rules {
+	for i := range desiredRoute.Rules {
+		rule := &desiredRoute.Rules[i]
 		if len(rule.Backends) == 0 {
 			return fmt.Errorf("rule has no backendRefs")
 		}
 
-		for _, backend := range rule.Backends {
+		for j := range rule.Backends {
+			backend := &rule.Backends[j]
 			if backend.Group != "" || backend.Kind != "Service" {
 				return fmt.Errorf(
 					"unsupported backendRef %s/%s: only core Service backends are supported, got group=%q kind=%q",
@@ -578,7 +582,7 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 			}
 
 			if backend.Namespace != routeNamespace {
-				allowed, err := r.referenceGrantAllows(ctx, routeNamespace, backend, referenceGrantCache)
+				allowed, err := r.referenceGrantAllows(ctx, routeNamespace, *backend, referenceGrantCache)
 				if err != nil {
 					return err
 				}
@@ -605,8 +609,45 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 				cache[key] = service
 			}
 
-			if !serviceHasPort(service, backend.Port) {
+			svcPort := findServicePort(service, backend.Port)
+			if svcPort == nil {
 				return fmt.Errorf("service %s/%s does not expose port %d", key.Namespace, key.Name, backend.Port)
+			}
+
+			if service.Spec.Type != corev1.ServiceTypeExternalName {
+				var slices discoveryv1.EndpointSliceList
+				if err := r.List(ctx, &slices, client.InNamespace(backend.Namespace), client.MatchingLabels{
+					"kubernetes.io/service-name": backend.Name,
+				}); err != nil {
+					return fmt.Errorf("list EndpointSlices for %s/%s: %w", backend.Namespace, backend.Name, err)
+				}
+
+				for _, slice := range slices.Items {
+					var targetPort int32 = backend.Port
+					for _, p := range slice.Ports {
+						nameMatches := (p.Name == nil && svcPort.Name == "") || (p.Name != nil && *p.Name == svcPort.Name)
+						if nameMatches && p.Port != nil {
+							targetPort = *p.Port
+							break
+						}
+					}
+
+					for _, ep := range slice.Endpoints {
+						if ep.Conditions.Ready != nil && !*ep.Conditions.Ready {
+							continue
+						}
+						for _, ip := range ep.Addresses {
+							backend.Endpoints = append(backend.Endpoints, translator.DesiredBackendEndpoint{
+								IP:   ip,
+								Port: targetPort,
+							})
+						}
+					}
+				}
+
+				if len(backend.Endpoints) == 0 {
+					return fmt.Errorf("service %s/%s has no ready endpoints for port %d", backend.Namespace, backend.Name, backend.Port)
+				}
 			}
 		}
 	}
@@ -1103,13 +1144,13 @@ func listenerUsableForRoutes(
 	return usable
 }
 
-func serviceHasPort(service *corev1.Service, port int32) bool {
+func findServicePort(service *corev1.Service, port int32) *corev1.ServicePort {
 	for _, servicePort := range service.Spec.Ports {
 		if servicePort.Port == port {
-			return true
+			return &servicePort
 		}
 	}
-	return false
+	return nil
 }
 
 func (r *HTTPRouteReconciler) getTargetGateway(ctx context.Context) (*gatewayv1.Gateway, error) {

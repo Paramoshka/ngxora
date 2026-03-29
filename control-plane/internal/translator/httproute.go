@@ -37,6 +37,11 @@ type DesiredPathMatch struct {
 	Value string
 }
 
+type DesiredBackendEndpoint struct {
+	IP   string
+	Port int32
+}
+
 // DesiredBackend is the translated backend reference. Existence and port
 // validation happen later in the controller, not in the translator.
 type DesiredBackend struct {
@@ -46,6 +51,7 @@ type DesiredBackend struct {
 	Namespace string
 	Port      int32
 	Weight    int32
+	Endpoints []DesiredBackendEndpoint
 }
 
 type DesiredFilter struct {

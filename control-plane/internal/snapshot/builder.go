@@ -169,10 +169,19 @@ func buildRoute(rule translator.DesiredRule, upstreamGroupName string) (*control
 		Policy: controlv1.UpstreamSelectionPolicy_UPSTREAM_SELECTION_POLICY_ROUND_ROBIN,
 	}
 	for _, backend := range rule.Backends {
-		upstreamGroup.Backends = append(upstreamGroup.Backends, &controlv1.UpstreamBackend{
-			Host: fmt.Sprintf("%s.%s.svc.cluster.local", backend.Name, backend.Namespace),
-			Port: uint32(backend.Port),
-		})
+		if len(backend.Endpoints) > 0 {
+			for _, endp := range backend.Endpoints {
+				upstreamGroup.Backends = append(upstreamGroup.Backends, &controlv1.UpstreamBackend{
+					Host: endp.IP,
+					Port: uint32(endp.Port),
+				})
+			}
+		} else {
+			upstreamGroup.Backends = append(upstreamGroup.Backends, &controlv1.UpstreamBackend{
+				Host: fmt.Sprintf("%s.%s.svc.cluster.local", backend.Name, backend.Namespace),
+				Port: uint32(backend.Port),
+			})
+		}
 	}
 
 	route := &controlv1.Route{
