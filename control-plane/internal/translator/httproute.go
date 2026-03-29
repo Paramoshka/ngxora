@@ -1,6 +1,7 @@
 package translator
 
 import (
+	"encoding/json"
 	"fmt"
 
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -174,9 +175,32 @@ func (t *Translator) translateRule(namespace string, rule gatewayv1.HTTPRouteRul
 		filters := make([]DesiredFilter, 0, len(rule.Filters))
 		for _, filter := range rule.Filters {
 			desired := DesiredFilter{Type: string(filter.Type)}
-			if filter.Type == gatewayv1.HTTPRouteFilterExtensionRef && filter.ExtensionRef != nil {
-				desired.ExtensionRef = filter.ExtensionRef
+			
+			switch filter.Type {
+			case gatewayv1.HTTPRouteFilterExtensionRef:
+				if filter.ExtensionRef != nil {
+					desired.ExtensionRef = filter.ExtensionRef
+				}
+			case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+				if filter.RequestHeaderModifier != nil {
+					cfg, err := translateHeaderFilter(filter.RequestHeaderModifier, "request")
+					if err != nil {
+						return nil, err
+					}
+					desired.PluginName = "headers"
+					desired.PluginConfig = cfg
+				}
+			case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
+				if filter.ResponseHeaderModifier != nil {
+					cfg, err := translateHeaderFilter(filter.ResponseHeaderModifier, "response")
+					if err != nil {
+						return nil, err
+					}
+					desired.PluginName = "headers"
+					desired.PluginConfig = cfg
+				}
 			}
+			
 			filters = append(filters, desired)
 		}
 
@@ -252,4 +276,60 @@ func translateBackendRefs(defaultNamespace string, refs []gatewayv1.HTTPBackendR
 	}
 
 	return backends, nil
+}
+
+type headersPluginConfig struct {
+	Request  *headerPatchConfig `json:"request,omitempty"`
+	Response *headerPatchConfig `json:"response,omitempty"`
+}
+
+type headerPatchConfig struct {
+	Add    []headerEntry `json:"add,omitempty"`
+	Set    []headerEntry `json:"set,omitempty"`
+	Remove []string      `json:"remove,omitempty"`
+}
+
+type headerEntry struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+func translateHeaderFilter(hf *gatewayv1.HTTPHeaderFilter, phase string) (string, error) {
+	patch := &headerPatchConfig{
+		Add:    make([]headerEntry, 0, len(hf.Add)),
+		Set:    make([]headerEntry, 0, len(hf.Set)),
+		Remove: make([]string, 0, len(hf.Remove)),
+	}
+
+	for _, add := range hf.Add {
+		patch.Add = append(patch.Add, headerEntry{
+			Name:  string(add.Name),
+			Value: add.Value,
+		})
+	}
+	for _, set := range hf.Set {
+		patch.Set = append(patch.Set, headerEntry{
+			Name:  string(set.Name),
+			Value: set.Value,
+		})
+	}
+	for _, remove := range hf.Remove {
+		patch.Remove = append(patch.Remove, remove)
+	}
+
+	cfg := headersPluginConfig{}
+	if phase == "request" {
+		cfg.Request = patch
+	} else if phase == "response" {
+		cfg.Response = patch
+	} else {
+		return "", fmt.Errorf("unsupported header filter phase: %s", phase)
+	}
+
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("marshal header filter config: %w", err)
+	}
+
+	return string(b), nil
 }

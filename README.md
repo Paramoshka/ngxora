@@ -18,7 +18,7 @@ It aims for a simple split:
 - compile-time plugins for policy and request/response behavior
 - Pingora-powered data plane
 
-## Quick start
+## Quick start (Docker)
 
 Pull the published image:
 
@@ -45,6 +45,35 @@ docker run --rm \
   -p 8080:8080 \
   -v "$(pwd)/examples/ngxora.conf:/etc/ngxora/ngxora.conf:ro" \
   paramoshka/ngxora:main
+```
+
+## Quick start (Kubernetes)
+
+`ngxora` can run as a standard ingress/gateway inside Kubernetes. The `ngxora-control-plane` runs as a sidecar container, providing native Gateway API support by dynamically translating `Gateway` and `HTTPRoute` resources to proxy snapshots.
+
+Generate a test TLS certificate:
+
+```bash
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout tls.key -out tls.crt -subj "/CN=localhost"
+kubectl create secret tls ngxora-localhost-tls --cert=tls.crt --key=tls.key
+```
+
+Apply the example deployment, which includes the proxy, the sidecar, an example `Gateway`, `GatewayClass`, and a backend test service:
+
+```bash
+kubectl apply -f control-plane/examples/quickstart-deployment.yaml
+```
+
+Forward the proxy port locally:
+
+```bash
+kubectl port-forward svc/ngxora 8080:8080
+```
+
+And test the proxy route:
+
+```bash
+curl http://127.0.0.1:8080/
 ```
 
 ## nginx-style config
