@@ -9,6 +9,8 @@ import (
 type Config struct {
 	SocketPath       string
 	WatchNamespace   string
+	GatewayName      string
+	GatewayNamespace string
 	ApplyTimeout     time.Duration
 	ReconcileTimeout time.Duration
 }
@@ -17,6 +19,8 @@ func FromEnv() (Config, error) {
 	cfg := Config{
 		SocketPath:       envOrDefault("NGXORA_SOCKET_PATH", "/tmp/ngxora-control.sock"),
 		WatchNamespace:   envOrDefault("NGXORA_WATCH_NAMESPACE", "default"),
+		GatewayName:      envOrDefault("NGXORA_GATEWAY_NAME", "ngxora"),
+		GatewayNamespace: envOrDefault("NGXORA_GATEWAY_NAMESPACE", envOrDefault("NGXORA_WATCH_NAMESPACE", "default")),
 		ApplyTimeout:     5 * time.Second,
 		ReconcileTimeout: 10 * time.Second,
 	}

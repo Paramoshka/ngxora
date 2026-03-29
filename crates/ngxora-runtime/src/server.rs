@@ -29,8 +29,7 @@ pub(crate) struct DownstreamTlsInfo {
 #[cfg(feature = "openssl")]
 mod openssl_listener_tls {
     use super::{
-        DownstreamTlsInfo, ListenKey, RuntimeState, listener_addr, pem_source_path,
-        select_listener_tls,
+        DownstreamTlsInfo, ListenKey, PemSource, RuntimeState, listener_addr, select_listener_tls,
     };
     use async_trait::async_trait;
     use ngxora_compile::ir::TlsIdentity;
@@ -46,9 +45,15 @@ mod openssl_listener_tls {
     use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone, Eq, PartialEq, Hash)]
+    enum LoadedPemSourceKey {
+        Path(String),
+        Inline(String),
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq, Hash)]
     struct LoadedIdentityKey {
-        cert_path: String,
-        key_path: String,
+        cert: LoadedPemSourceKey,
+        key: LoadedPemSourceKey,
     }
 
     struct LoadedTlsIdentity {
@@ -57,40 +62,66 @@ mod openssl_listener_tls {
     }
 
     impl LoadedTlsIdentity {
-        fn read_file(key: &ListenKey, path: &str, label: &str) -> Result<Vec<u8>> {
-            std::fs::read(path).map_err(|err| {
-                pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    format!(
-                        "failed to read {label} for listener {} from {}: {err}",
-                        listener_addr(key),
-                        path
-                    ),
-                )
-            })
+        fn source_key(source: &PemSource, label: &str) -> Result<LoadedPemSourceKey> {
+            match source {
+                PemSource::Path(path) => path
+                    .to_str()
+                    .map(|value| LoadedPemSourceKey::Path(value.to_owned()))
+                    .ok_or_else(|| {
+                        pingora::Error::explain(
+                            pingora::ErrorType::InternalError,
+                            format!("{label} path is not valid UTF-8"),
+                        )
+                    }),
+                PemSource::InlinePem(pem) => Ok(LoadedPemSourceKey::Inline(pem.clone())),
+            }
         }
 
-        fn load_paths(key: &ListenKey, cert_path: &str, key_path: &str) -> Result<Self> {
-            let cert_bytes = Self::read_file(key, cert_path, "ssl certificate")?;
+        fn read_source(key: &ListenKey, source: &PemSource, label: &str) -> Result<Vec<u8>> {
+            match source {
+                PemSource::Path(path) => std::fs::read(path).map_err(|err| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::InternalError,
+                        format!(
+                            "failed to read {label} for listener {} from {}: {err}",
+                            listener_addr(key),
+                            path.display()
+                        ),
+                    )
+                }),
+                PemSource::InlinePem(pem) => Ok(pem.as_bytes().to_vec()),
+            }
+        }
+
+        fn load(key: &ListenKey, cert_source: &PemSource, key_source: &PemSource) -> Result<Self> {
+            let cert_bytes = Self::read_source(key, cert_source, "ssl certificate")?;
             let cert = X509::from_pem(&cert_bytes).map_err(|err| {
+                let origin = match cert_source {
+                    PemSource::Path(path) => path.display().to_string(),
+                    PemSource::InlinePem(_) => "inline PEM".to_owned(),
+                };
                 pingora::Error::explain(
                     pingora::ErrorType::InternalError,
                     format!(
                         "failed to parse ssl certificate for listener {} from {}: {err}",
                         listener_addr(key),
-                        cert_path
+                        origin
                     ),
                 )
             })?;
 
-            let key_bytes = Self::read_file(key, key_path, "ssl private key")?;
+            let key_bytes = Self::read_source(key, key_source, "ssl private key")?;
             let key = PKey::private_key_from_pem(&key_bytes).map_err(|err| {
+                let origin = match key_source {
+                    PemSource::Path(path) => path.display().to_string(),
+                    PemSource::InlinePem(_) => "inline PEM".to_owned(),
+                };
                 pingora::Error::explain(
                     pingora::ErrorType::InternalError,
                     format!(
                         "failed to parse ssl private key for listener {} from {}: {err}",
                         listener_addr(key),
-                        key_path
+                        origin
                     ),
                 )
             })?;
@@ -147,8 +178,8 @@ mod openssl_listener_tls {
             identity: &TlsIdentity,
         ) -> Result<Arc<LoadedTlsIdentity>> {
             let key = LoadedIdentityKey {
-                cert_path: pem_source_path(&identity.cert, "ssl certificate")?.to_owned(),
-                key_path: pem_source_path(&identity.key, "ssl certificate key")?.to_owned(),
+                cert: LoadedTlsIdentity::source_key(&identity.cert, "ssl certificate")?,
+                key: LoadedTlsIdentity::source_key(&identity.key, "ssl certificate key")?,
             };
 
             let mut cache = self.cache.lock().expect("tls cache poisoned");
@@ -161,10 +192,10 @@ mod openssl_listener_tls {
                 return Ok(Arc::clone(loaded));
             }
 
-            let loaded = Arc::new(LoadedTlsIdentity::load_paths(
+            let loaded = Arc::new(LoadedTlsIdentity::load(
                 &self.listen_key,
-                &key.cert_path,
-                &key.key_path,
+                &identity.cert,
+                &identity.key,
             )?);
             cache.identities.insert(key, Arc::clone(&loaded));
             Ok(loaded)

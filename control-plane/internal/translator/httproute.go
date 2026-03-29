@@ -11,10 +11,11 @@ type DesiredState struct {
 }
 
 type DesiredRoute struct {
-	Name      string
-	Namespace string
-	Hostnames []string
-	Rules     []DesiredRule
+	Name       string
+	Namespace  string
+	Hostnames  []string
+	ParentRefs []gatewayv1.ParentReference
+	Rules      []DesiredRule
 }
 
 type DesiredRule struct {
@@ -29,6 +30,8 @@ type DesiredPathMatch struct {
 }
 
 type DesiredBackend struct {
+	Group     string
+	Kind      string
 	Name      string
 	Namespace string
 	Port      int32
@@ -39,10 +42,16 @@ type DesiredFilter struct {
 	Type string
 }
 
-type Translator struct{}
+type Translator struct {
+	gatewayName      string
+	gatewayNamespace string
+}
 
-func New() *Translator {
-	return &Translator{}
+func New(gatewayName, gatewayNamespace string) *Translator {
+	return &Translator{
+		gatewayName:      gatewayName,
+		gatewayNamespace: gatewayNamespace,
+	}
 }
 
 func (t *Translator) TranslateHTTPRoutes(routes []gatewayv1.HTTPRoute) (*DesiredState, error) {
@@ -51,7 +60,11 @@ func (t *Translator) TranslateHTTPRoutes(routes []gatewayv1.HTTPRoute) (*Desired
 	}
 
 	for _, route := range routes {
-		desired, err := t.translateHTTPRoute(route)
+		if !t.MatchesGateway(route) {
+			continue
+		}
+
+		desired, err := t.TranslateHTTPRoute(route)
 		if err != nil {
 			return nil, err
 		}
@@ -61,7 +74,42 @@ func (t *Translator) TranslateHTTPRoutes(routes []gatewayv1.HTTPRoute) (*Desired
 	return state, nil
 }
 
-func (t *Translator) translateHTTPRoute(route gatewayv1.HTTPRoute) (DesiredRoute, error) {
+func (t *Translator) MatchesGateway(route gatewayv1.HTTPRoute) bool {
+	return len(t.MatchingParentRefs(route)) > 0
+}
+
+func (t *Translator) MatchingParentRefs(route gatewayv1.HTTPRoute) []gatewayv1.ParentReference {
+	if t.gatewayName == "" {
+		return append([]gatewayv1.ParentReference(nil), route.Spec.ParentRefs...)
+	}
+
+	matches := make([]gatewayv1.ParentReference, 0, len(route.Spec.ParentRefs))
+	for _, parent := range route.Spec.ParentRefs {
+		if parent.Kind != nil && string(*parent.Kind) != "Gateway" {
+			continue
+		}
+		if parent.Group != nil && string(*parent.Group) != gatewayv1.GroupName {
+			continue
+		}
+		if string(parent.Name) != t.gatewayName {
+			continue
+		}
+
+		namespace := route.Namespace
+		if parent.Namespace != nil {
+			namespace = string(*parent.Namespace)
+		}
+		if namespace != t.gatewayNamespace {
+			continue
+		}
+
+		matches = append(matches, parent)
+	}
+
+	return matches
+}
+
+func (t *Translator) TranslateHTTPRoute(route gatewayv1.HTTPRoute) (DesiredRoute, error) {
 	desired := DesiredRoute{
 		Name:      route.Name,
 		Namespace: route.Namespace,
@@ -146,6 +194,16 @@ func translateBackendRefs(defaultNamespace string, refs []gatewayv1.HTTPBackendR
 			return nil, fmt.Errorf("backend ref %q is missing port", ref.BackendRef.Name)
 		}
 
+		group := ""
+		if ref.BackendRef.Group != nil {
+			group = string(*ref.BackendRef.Group)
+		}
+
+		kind := "Service"
+		if ref.BackendRef.Kind != nil {
+			kind = string(*ref.BackendRef.Kind)
+		}
+
 		namespace := defaultNamespace
 		if ref.BackendRef.Namespace != nil {
 			namespace = string(*ref.BackendRef.Namespace)
@@ -157,6 +215,8 @@ func translateBackendRefs(defaultNamespace string, refs []gatewayv1.HTTPBackendR
 		}
 
 		backends = append(backends, DesiredBackend{
+			Group:     group,
+			Kind:      kind,
 			Name:      string(ref.BackendRef.Name),
 			Namespace: namespace,
 			Port:      int32(*ref.BackendRef.Port),

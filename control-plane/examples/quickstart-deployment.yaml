@@ -11,13 +11,55 @@ data:
 
         server {
             listen 8080 default_server;
+            listen 8443 ssl default_server;
             server_name localhost;
+
+            ssl_certificate /etc/ngxora/tls/tls.crt;
+            ssl_certificate_key /etc/ngxora/tls/tls.key;
 
             location / {
                 proxy_pass http://example-svc.default.svc.cluster.local:8080;
             }
         }
     }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: ngxora-local
+spec:
+  controllerName: ngxora.dev/control-plane
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ngxora
+  namespace: default
+spec:
+  gatewayClassName: ngxora-local
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 8080
+      hostname: localhost
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - kind: HTTPRoute
+    - name: https
+      protocol: HTTPS
+      port: 8443
+      hostname: localhost
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: ngxora-localhost-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - kind: HTTPRoute
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -77,6 +119,9 @@ spec:
             name: ngxora-bootstrap
         - name: ngxora-runtime
           emptyDir: {}
+        - name: ngxora-tls
+          secret:
+            secretName: ngxora-localhost-tls
       containers:
         - name: ngxora
           image: paramoshka/ngxora:main
@@ -86,18 +131,28 @@ spec:
             - /etc/ngxora/ngxora.conf
           ports:
             - containerPort: 8080
+            - containerPort: 8443
           volumeMounts:
             - name: ngxora-config
               mountPath: /etc/ngxora
               readOnly: true
             - name: ngxora-runtime
               mountPath: /var/run/ngxora
+            - name: ngxora-tls
+              mountPath: /etc/ngxora/tls
+              readOnly: true
         - name: ngxora-control-plane
           image: paramoshka/ngxora-control-plane:main
           env:
             - name: NGXORA_SOCKET_PATH
               value: /var/run/ngxora/control.sock
             - name: NGXORA_WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NGXORA_GATEWAY_NAME
+              value: ngxora
+            - name: NGXORA_GATEWAY_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
@@ -121,3 +176,6 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
+    - name: https
+      port: 8443
+      targetPort: 8443
