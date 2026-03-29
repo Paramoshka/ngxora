@@ -20,6 +20,28 @@ RUN ARCH="$(uname -m)" \
     && cp "target/${RUST_TARGET}/release/ngxora" /usr/local/bin/ngxora
 RUN /usr/local/bin/ngxora --check /app/examples/ngxora.conf
 
+FROM golang:1.26.1-bookworm AS control-plane-builder
+
+WORKDIR /app
+
+COPY control-plane ./control-plane
+COPY sdk/go ./sdk/go
+
+ENV CGO_ENABLED=0
+
+RUN cd /app/control-plane \
+    && go mod download \
+    && go build -trimpath -ldflags="-s -w" -o /usr/local/bin/ngxora-control-plane ./cmd/ngxora-control-plane
+
+FROM scratch AS control-plane
+
+WORKDIR /etc/ngxora
+
+COPY --from=control-plane-builder /usr/local/bin/ngxora-control-plane /usr/local/bin/ngxora-control-plane
+COPY --from=control-plane-builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+CMD ["/usr/local/bin/ngxora-control-plane"]
+
 FROM scratch
 
 WORKDIR /etc/ngxora
