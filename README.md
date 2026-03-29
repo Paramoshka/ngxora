@@ -115,7 +115,7 @@ Run proxy:
 cargo run -- examples/ngxora.conf
 ```
 
-Supported directives, upstream policies, and built-in plugin config are documented in [Config Options](./docs/config-options.md).
+Supported directives, upstream policies, and built-in plugin config are documented in [Config Options](./docs/config-options.md) and [Gateway API Policies](./docs/gateway-api-policies.md).
 
 ## WebSocket proxying
 
@@ -252,7 +252,7 @@ Later plugin roadmap:
 - `geoip`
 - `cache`
 
-Text config syntax for built-in location plugins is documented in [Config Options](./docs/config-options.md).
+Text config syntax for built-in location plugins is documented in [Config Options](./docs/config-options.md). Gateway API / Kubernetes policy CRDs are documented in [Gateway API Policies](./docs/gateway-api-policies.md).
 
 Example `headers` usage:
 

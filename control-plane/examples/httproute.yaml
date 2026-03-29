@@ -16,6 +16,21 @@ spec:
         - path:
             type: PathPrefix
             value: /
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            add:
+              - name: X-Added-By
+                value: ngxora
+            set:
+              - name: X-Gateway-Version
+                value: "1.0.0"
+            remove: ["X-Phished"]
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            add:
+              - name: Server
+                value: ngxora-proxy
       backendRefs:
         - name: example-svc
           port: 8080

@@ -1,0 +1,50 @@
+apiVersion: plugins.ngxora.io/v1alpha1
+kind: BasicAuthPolicy
+metadata:
+  name: example-basic-auth
+  namespace: default
+spec:
+  username: "admin"
+  password: "password123"
+  realm: "Restricted Area"
+---
+apiVersion: plugins.ngxora.io/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: example-rate-limit
+  namespace: default
+spec:
+  max_requests_per_second: 10
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: plugin-example-route
+  namespace: default
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ngxora
+      namespace: default
+  hostnames:
+    - "secure.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: plugins.ngxora.io
+            kind: BasicAuthPolicy
+            name: example-basic-auth
+        - type: ExtensionRef
+          extensionRef:
+            group: plugins.ngxora.io
+            kind: RateLimitPolicy
+            name: example-rate-limit
+      backendRefs:
+        - name: example-svc
+          port: 8080
