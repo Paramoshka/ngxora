@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -193,6 +194,7 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&gatewayv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
 		Watches(&gatewayv1beta1.ReferenceGrant{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
 		Complete(r)
 }
 
@@ -813,6 +815,33 @@ func (r *HTTPRouteReconciler) resolveListenerTLSBinding(
 				secretKey.Name,
 				corev1.TLSCertKey,
 				corev1.TLSPrivateKeyKey,
+			),
+		}
+	}
+
+	if secret.Type != corev1.SecretTypeTLS {
+		return nil, routeConditionState{
+			status: false,
+			reason: string(gatewayv1.ListenerReasonInvalidCertificateRef),
+			message: fmt.Sprintf(
+				"TLS Secret %s/%s has invalid type %q; must be %q",
+				secretKey.Namespace,
+				secretKey.Name,
+				secret.Type,
+				corev1.SecretTypeTLS,
+			),
+		}
+	}
+
+	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+		return nil, routeConditionState{
+			status: false,
+			reason: string(gatewayv1.ListenerReasonInvalidCertificateRef),
+			message: fmt.Sprintf(
+				"TLS Secret %s/%s contains invalid certificate or private key: %v",
+				secretKey.Namespace,
+				secretKey.Name,
+				err,
 			),
 		}
 	}
