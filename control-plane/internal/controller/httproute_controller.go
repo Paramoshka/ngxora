@@ -3,9 +3,11 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"reflect"
+	"time"
 
 	controlv1 "github.com/paramoshka/ngxora/sdk/go/ngxora/control/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -24,6 +26,9 @@ import (
 	"github.com/paramoshka/ngxora/control-plane/internal/snapshot"
 	ngxorastatus "github.com/paramoshka/ngxora/control-plane/internal/status"
 	"github.com/paramoshka/ngxora/control-plane/internal/translator"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type HTTPRouteReconciler struct {
@@ -192,9 +197,9 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&gatewayv1.HTTPRoute{}).
 		Watches(&gatewayv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.enqueueRoutesForSecret())).
 		Watches(&gatewayv1beta1.ReferenceGrant{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
-		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.enqueueRoutesForNamespace()), builder.WithPredicates(predicate.LabelChangedPredicate{})).
 		Complete(r)
 }
 
@@ -833,7 +838,8 @@ func (r *HTTPRouteReconciler) resolveListenerTLSBinding(
 		}
 	}
 
-	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+	keyPair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
 		return nil, routeConditionState{
 			status: false,
 			reason: string(gatewayv1.ListenerReasonInvalidCertificateRef),
@@ -843,6 +849,30 @@ func (r *HTTPRouteReconciler) resolveListenerTLSBinding(
 				secretKey.Name,
 				err,
 			),
+		}
+	}
+
+	if len(keyPair.Certificate) > 0 {
+		cert, err := x509.ParseCertificate(keyPair.Certificate[0])
+		if err == nil {
+			now := time.Now()
+			if now.After(cert.NotAfter) || now.Before(cert.NotBefore) {
+				return nil, routeConditionState{
+					status: false,
+					reason: string(gatewayv1.ListenerReasonInvalidCertificateRef),
+					message: fmt.Sprintf("TLS certificate in Secret %s/%s is expired or not yet valid", secretKey.Namespace, secretKey.Name),
+				}
+			}
+
+			if listener.Hostname != nil {
+				if err := cert.VerifyHostname(string(*listener.Hostname)); err != nil {
+					return nil, routeConditionState{
+						status: false,
+						reason: string(gatewayv1.ListenerReasonInvalidCertificateRef),
+						message: fmt.Sprintf("TLS certificate in Secret %s/%s is not valid for listener hostname %q: %v", secretKey.Namespace, secretKey.Name, *listener.Hostname, err),
+					}
+				}
+			}
 		}
 	}
 
@@ -1079,7 +1109,7 @@ func (r *HTTPRouteReconciler) syncGatewayStatus(
 				gateway.Generation,
 				string(gatewayv1.ListenerConditionProgrammed),
 				evaluation.resolved.status && programmed,
-				gatewayListenerProgrammedReason(evaluation.accepted.status && evaluation.resolved.status && programmed),
+				gatewayListenerProgrammedReason(evaluation, programmed),
 				gatewayListenerProgrammedMessage(evaluation, programmed, programmedMessage),
 			))
 		} else {
@@ -1102,7 +1132,7 @@ func (r *HTTPRouteReconciler) syncGatewayStatus(
 				gateway.Generation,
 				string(gatewayv1.ListenerConditionProgrammed),
 				false,
-				gatewayListenerProgrammedReason(false),
+				gatewayListenerProgrammedReason(evaluation, programmed),
 				gatewayListenerProgrammedMessage(evaluation, programmed, programmedMessage),
 			))
 		}
@@ -1121,7 +1151,7 @@ func (r *HTTPRouteReconciler) syncGatewayStatus(
 		gateway.Generation,
 		string(gatewayv1.GatewayConditionProgrammed),
 		validListeners > 0 && programmed,
-		gatewayConditionProgrammedReason(validListeners > 0 && programmed),
+		gatewayConditionProgrammedReason(validListeners > 0, programmed),
 		gatewayConditionProgrammedMessage(validListeners > 0, programmed, programmedMessage),
 	))
 
@@ -1165,7 +1195,10 @@ func gatewayAcceptedMessage(validListeners, invalidListeners int) string {
 	}
 }
 
-func gatewayConditionProgrammedReason(programmed bool) string {
+func gatewayConditionProgrammedReason(hasAcceptedListeners bool, programmed bool) string {
+	if !hasAcceptedListeners {
+		return string(gatewayv1.GatewayReasonListenersNotValid)
+	}
 	if programmed {
 		return string(gatewayv1.GatewayReasonProgrammed)
 	}
@@ -1175,7 +1208,7 @@ func gatewayConditionProgrammedReason(programmed bool) string {
 func gatewayConditionProgrammedMessage(hasAcceptedListeners bool, programmed bool, message string) string {
 	switch {
 	case !hasAcceptedListeners:
-		return "gateway has no accepted listeners to program"
+		return "gateway has no valid listeners to program"
 	case programmed:
 		return message
 	case message != "":
@@ -1185,7 +1218,13 @@ func gatewayConditionProgrammedMessage(hasAcceptedListeners bool, programmed boo
 	}
 }
 
-func gatewayListenerProgrammedReason(programmed bool) string {
+func gatewayListenerProgrammedReason(evaluation gatewayListenerEvaluation, programmed bool) string {
+	if !evaluation.accepted.status {
+		return evaluation.accepted.reason
+	}
+	if !evaluation.resolved.status {
+		return evaluation.resolved.reason
+	}
 	if programmed {
 		return string(gatewayv1.ListenerReasonProgrammed)
 	}
@@ -1300,4 +1339,78 @@ func parentStatusKey(parentRef gatewayv1.ParentReference, routeNamespace string)
 	}
 
 	return fmt.Sprintf("%s/%s/%s/%s/%s/%d", group, kind, namespace, parentRef.Name, sectionName, port)
+}
+
+func (r *HTTPRouteReconciler) enqueueRoutesForSecret() handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		secret, ok := obj.(*corev1.Secret)
+		if !ok {
+			return nil
+		}
+
+		gateway := &gatewayv1.Gateway{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: r.GatewayNamespace, Name: r.GatewayName}, gateway); err != nil {
+			return nil
+		}
+
+		used := false
+		for _, listener := range gateway.Spec.Listeners {
+			if listener.TLS == nil {
+				continue
+			}
+			for _, ref := range listener.TLS.CertificateRefs {
+				ns := gateway.Namespace
+				if ref.Namespace != nil {
+					ns = string(*ref.Namespace)
+				}
+				if string(ref.Name) == secret.Name && ns == secret.Namespace {
+					used = true
+					break
+				}
+			}
+			if used {
+				break
+			}
+		}
+
+		if !used {
+			return nil
+		}
+
+		return enqueueAllHTTPRoutes(r.Client, r.WatchNamespace)(ctx, obj)
+	}
+}
+
+func (r *HTTPRouteReconciler) enqueueRoutesForNamespace() handler.MapFunc {
+	return func(ctx context.Context, obj client.Object) []reconcile.Request {
+		_, ok := obj.(*corev1.Namespace)
+		if !ok {
+			return nil
+		}
+
+		gateway := &gatewayv1.Gateway{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: r.GatewayNamespace, Name: r.GatewayName}, gateway); err != nil {
+			return nil
+		}
+
+		used := false
+		for _, listener := range gateway.Spec.Listeners {
+			if listener.AllowedRoutes != nil && listener.AllowedRoutes.Namespaces != nil && listener.AllowedRoutes.Namespaces.From != nil {
+				if *listener.AllowedRoutes.Namespaces.From == gatewayv1.NamespacesFromSelector {
+					used = true
+					break
+				}
+			}
+		}
+
+		// Also check WatchNamespace logic (global route enqueue)
+		// If the namespace itself is exactly the watched namespace used by the reconciler, 
+		// we might want to watch it, but if it has no selector listeners, routes aren't dynamically attached by labels.
+		// However, returning all routes upon namespace label change is safest if used is true.
+		if !used {
+			return nil
+		}
+
+		return enqueueAllHTTPRoutes(r.Client, r.WatchNamespace)(ctx, obj)
+	}
 }
