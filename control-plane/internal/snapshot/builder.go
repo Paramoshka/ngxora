@@ -193,7 +193,9 @@ func buildRoute(rule translator.DesiredRule, upstreamGroupName string) (*control
 
 	for _, filter := range rule.Filters {
 		switch filter.Type {
-		case string(gatewayv1.HTTPRouteFilterExtensionRef):
+		case string(gatewayv1.HTTPRouteFilterExtensionRef),
+			string(gatewayv1.HTTPRouteFilterRequestHeaderModifier),
+			string(gatewayv1.HTTPRouteFilterResponseHeaderModifier):
 			if filter.PluginName != "" {
 				route.Plugins = append(route.Plugins, &controlv1.Plugin{
 					Name:       filter.PluginName,
