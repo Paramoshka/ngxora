@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1alpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	"github.com/paramoshka/ngxora/control-plane/internal/attachment"
@@ -210,6 +211,7 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&gatewayv1beta1.ReferenceGrant{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
 		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.enqueueRoutesForNamespace()), builder.WithPredicates(predicate.LabelChangedPredicate{})).
 		Watches(&discoveryv1.EndpointSlice{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
+		Watches(&gatewayv1alpha3.BackendTLSPolicy{}, handler.EnqueueRequestsFromMapFunc(enqueueAllHTTPRoutes(r.Client, r.WatchNamespace))).
 		Complete(r)
 }
 
@@ -619,6 +621,45 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 				backend.BackendProtocol = gatewayv1.ProtocolType(*svcPort.AppProtocol)
 			}
 
+			var backendTlsPolicies gatewayv1alpha3.BackendTLSPolicyList
+			if err := r.List(ctx, &backendTlsPolicies, client.InNamespace(backend.Namespace)); err != nil {
+				return fmt.Errorf("list BackendTLSPolicy for service %s/%s: %w", backend.Namespace, backend.Name, err)
+			}
+
+			var activePolicy *gatewayv1alpha3.BackendTLSPolicy
+			for i := range backendTlsPolicies.Items {
+				policy := &backendTlsPolicies.Items[i]
+				for _, ref := range policy.Spec.TargetRefs {
+					if string(ref.Kind) == "Service" && (string(ref.Group) == "core" || string(ref.Group) == "") && string(ref.Name) == backend.Name {
+						activePolicy = policy
+						break
+					}
+				}
+				if activePolicy != nil {
+					break
+				}
+			}
+
+			if activePolicy != nil {
+				v := true
+				backend.TLSVerify = &v
+				if len(activePolicy.Spec.Validation.CACertificateRefs) > 0 {
+					cmRef := activePolicy.Spec.Validation.CACertificateRefs[0]
+					if string(cmRef.Kind) == "" || string(cmRef.Kind) == "ConfigMap" {
+						cmKey := client.ObjectKey{Namespace: backend.Namespace, Name: string(cmRef.Name)}
+						var caMap corev1.ConfigMap
+						if err := r.Get(ctx, cmKey, &caMap); err != nil {
+							return fmt.Errorf("failed to get ConfigMap %s for BackendTLSPolicy %s: %w", cmRef.Name, activePolicy.Name, err)
+						}
+						if certDetails, ok := caMap.Data["ca.crt"]; ok {
+							backend.TLSTrustedCertPEM = certDetails
+						} else {
+							return fmt.Errorf("ConfigMap %s does not contain 'ca.crt' key required by BackendTLSPolicy %s", cmRef.Name, activePolicy.Name)
+						}
+					}
+				}
+			}
+
 			if service.Spec.Type != corev1.ServiceTypeExternalName {
 				var slices discoveryv1.EndpointSliceList
 				if err := r.List(ctx, &slices, client.InNamespace(backend.Namespace), client.MatchingLabels{
@@ -662,6 +703,9 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 		}
 
 		var ruleProtocol string
+		var ruleTLSVerify *bool
+		var ruleTLSCertPEM *string
+
 		for j := range rule.Backends {
 			backend := &rule.Backends[j]
 			p := "http"
@@ -674,11 +718,29 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 					break
 				}
 			}
-			
+
 			if ruleProtocol == "" {
 				ruleProtocol = p
 			} else if ruleProtocol != p {
 				return fmt.Errorf("HTTPRouteRule contains mixed backend protocols (e.g. %s and %s) which is not supported for a single rule", ruleProtocol, p)
+			}
+
+			if ruleTLSVerify == nil {
+				if backend.TLSVerify != nil {
+					v := *backend.TLSVerify
+					ruleTLSVerify = &v
+				}
+			} else if backend.TLSVerify != nil && *ruleTLSVerify != *backend.TLSVerify {
+				return fmt.Errorf("HTTPRouteRule contains mixed TLS verify settings which is not supported for a single rule")
+			}
+
+			if ruleTLSCertPEM == nil {
+				if backend.TLSTrustedCertPEM != "" {
+					certPEM := backend.TLSTrustedCertPEM
+					ruleTLSCertPEM = &certPEM
+				}
+			} else if backend.TLSTrustedCertPEM != "" && *ruleTLSCertPEM != backend.TLSTrustedCertPEM {
+				return fmt.Errorf("HTTPRouteRule contains mixed TLS trusted certificate config which is not supported for a single rule")
 			}
 		}
 	}

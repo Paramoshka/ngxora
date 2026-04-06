@@ -36,6 +36,32 @@ filters:
           value: ngxora-proxy
 ```
 
+### BackendTLSPolicy
+
+Configures TLS verification settings when the Gateway connects to an upstream `Service` over HTTPS. The proxy will dynamically read the configured `ConfigMap` and trust the provided CA bundle.
+
+**Resource:**
+```yaml
+apiVersion: gateway.networking.k8s.io/v1alpha3
+kind: BackendTLSPolicy
+metadata:
+  name: my-backend-tls
+  namespace: default
+spec:
+  targetRefs:
+    - group: core
+      kind: Service
+      name: secure-backend
+  validation:
+    hostname: secure-backend.internal
+    caCertificateRefs:
+      - kind: ConfigMap
+        name: my-ca-bundle
+        group: core
+```
+
+*Note: The referenced `ConfigMap` must contain a key named `ca.crt` containing the PEM-encoded CA certificate bundle.*
+
 ---
 
 ## Custom Policies (ExtensionRef)

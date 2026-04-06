@@ -201,11 +201,43 @@ func buildRoute(rule translator.DesiredRule, upstreamGroupName string) (*control
 		}
 	}
 
+	var tlsOptions *controlv1.UpstreamTlsOptions
+	if scheme == "https" && len(rule.Backends) > 0 {
+		var ruleVerify *bool
+		var ruleCertPEM string
+
+		for _, backend := range rule.Backends {
+			if backend.TLSVerify != nil {
+				ruleVerify = backend.TLSVerify
+			}
+			if backend.TLSTrustedCertPEM != "" {
+				ruleCertPEM = backend.TLSTrustedCertPEM
+			}
+		}
+
+		if ruleVerify != nil || ruleCertPEM != "" {
+			tlsOptions = &controlv1.UpstreamTlsOptions{}
+			if ruleVerify != nil {
+				if *ruleVerify {
+					tlsOptions.Verify = controlv1.Switch_SWITCH_ON
+				} else {
+					tlsOptions.Verify = controlv1.Switch_SWITCH_OFF
+				}
+			}
+			if ruleCertPEM != "" {
+				tlsOptions.TrustedCertificate = &controlv1.PemSource{
+					Source: &controlv1.PemSource_InlinePem{InlinePem: ruleCertPEM},
+				}
+			}
+		}
+	}
+
 	route := &controlv1.Route{
 		Upstream: &controlv1.Upstream{
 			Scheme:        scheme,
 			UpstreamGroup: upstreamGroupName,
 		},
+		TlsOptions: tlsOptions,
 	}
 
 	for _, filter := range rule.Filters {

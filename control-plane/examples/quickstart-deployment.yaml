@@ -10,10 +10,10 @@ metadata:
   name: ngxora-control-plane
 rules:
   - apiGroups: [""]
-    resources: ["services", "secrets", "namespaces"]
+    resources: ["services", "secrets", "namespaces", "configmaps"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["gateway.networking.k8s.io"]
-    resources: ["gateways", "httproutes", "gatewayclasses"]
+    resources: ["gateways", "httproutes", "gatewayclasses", "backendtlspolicies"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways/status", "httproutes/status"]

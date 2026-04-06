@@ -46,14 +46,16 @@ type DesiredBackendEndpoint struct {
 // DesiredBackend is the translated backend reference. Existence and port
 // validation happen later in the controller, not in the translator.
 type DesiredBackend struct {
-	Group           string
-	Kind            string
-	Name            string
-	Namespace       string
-	Port            int32
-	Weight          int32
-	BackendProtocol gatewayv1.ProtocolType
-	Endpoints       []DesiredBackendEndpoint
+	Group             string
+	Kind              string
+	Name              string
+	Namespace         string
+	Port              int32
+	Weight            int32
+	BackendProtocol   gatewayv1.ProtocolType
+	TLSVerify         *bool
+	TLSTrustedCertPEM string
+	Endpoints         []DesiredBackendEndpoint
 }
 
 type DesiredFilter struct {

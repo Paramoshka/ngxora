@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: secure-app
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: upstream-ca-bundle
+  namespace: secure-app
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIDEzCCAfugAwIBAgIQeu8NmbdrxomIfR7p98n0XzANBgkqhkiG9w0BAQsFADAU
+    MRIwEAYDVQQDEwlNeSBSb290IENBMB4XDTI0MDEwMTAwMDAwMFoXDTI5MDEwMTAw
+    ... (your CA certificate data here) ...
+    -----END CERTIFICATE-----
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-backend
+  namespace: secure-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: secure-backend
+  template:
+    metadata:
+      labels:
+        app: secure-backend
+    spec:
+      containers:
+        - name: https-echo
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - -text=Secure!
+            # Ensure the backend serves TLS using your certs
+            - -listen=:8443
+          ports:
+            - containerPort: 8443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: secure-backend
+  namespace: secure-app
+spec:
+  selector:
+    app: secure-backend
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+      appProtocol: https
+---
+apiVersion: gateway.networking.k8s.io/v1alpha3
+kind: BackendTLSPolicy
+metadata:
+  name: backend-tls-verification
+  namespace: secure-app
+spec:
+  targetRefs:
+    - group: core
+      kind: Service
+      name: secure-backend
+  validation:
+    hostname: secure-backend.internal
+    caCertificateRefs:
+      - kind: ConfigMap
+        name: upstream-ca-bundle
+        group: core
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: secure-route
+  namespace: secure-app
+spec:
+  parentRefs:
+    - name: ngxora
+      namespace: default
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /secure
+      backendRefs:
+        - name: secure-backend
+          port: 8443
