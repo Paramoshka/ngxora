@@ -184,9 +184,26 @@ func buildRoute(rule translator.DesiredRule, upstreamGroupName string) (*control
 		}
 	}
 
+	scheme := "http"
+	for _, backend := range rule.Backends {
+		if backend.BackendProtocol == gatewayv1.HTTPSProtocolType || backend.BackendProtocol == gatewayv1.TLSProtocolType {
+			scheme = "https"
+			break
+		}
+		for _, endp := range backend.Endpoints {
+			if endp.BackendProtocol == gatewayv1.HTTPSProtocolType || endp.BackendProtocol == gatewayv1.TLSProtocolType {
+				scheme = "https"
+				break
+			}
+		}
+		if scheme == "https" {
+			break
+		}
+	}
+
 	route := &controlv1.Route{
 		Upstream: &controlv1.Upstream{
-			Scheme:        "http",
+			Scheme:        scheme,
 			UpstreamGroup: upstreamGroupName,
 		},
 	}

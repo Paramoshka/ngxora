@@ -614,6 +614,11 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 				return fmt.Errorf("service %s/%s does not expose port %d", key.Namespace, key.Name, backend.Port)
 			}
 
+			backend.BackendProtocol = gatewayv1.HTTPProtocolType
+			if svcPort.AppProtocol != nil && *svcPort.AppProtocol != "" {
+				backend.BackendProtocol = gatewayv1.ProtocolType(*svcPort.AppProtocol)
+			}
+
 			if service.Spec.Type != corev1.ServiceTypeExternalName {
 				var slices discoveryv1.EndpointSliceList
 				if err := r.List(ctx, &slices, client.InNamespace(backend.Namespace), client.MatchingLabels{
@@ -624,10 +629,14 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 
 				for _, slice := range slices.Items {
 					var targetPort int32 = backend.Port
+					var targetProtocol gatewayv1.ProtocolType = gatewayv1.HTTPProtocolType
 					for _, p := range slice.Ports {
 						nameMatches := (p.Name == nil && svcPort.Name == "") || (p.Name != nil && *p.Name == svcPort.Name)
 						if nameMatches && p.Port != nil {
 							targetPort = *p.Port
+							if p.AppProtocol != nil && *p.AppProtocol != "" {
+								targetProtocol = gatewayv1.ProtocolType(*p.AppProtocol)
+							}
 							break
 						}
 					}
@@ -638,8 +647,9 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 						}
 						for _, ip := range ep.Addresses {
 							backend.Endpoints = append(backend.Endpoints, translator.DesiredBackendEndpoint{
-								IP:   ip,
-								Port: targetPort,
+								IP:              ip,
+								Port:            targetPort,
+								BackendProtocol: targetProtocol,
 							})
 						}
 					}
@@ -648,6 +658,27 @@ func (r *HTTPRouteReconciler) resolveBackendRefs(
 				if len(backend.Endpoints) == 0 {
 					return fmt.Errorf("service %s/%s has no ready endpoints for port %d", backend.Namespace, backend.Name, backend.Port)
 				}
+			}
+		}
+
+		var ruleProtocol string
+		for j := range rule.Backends {
+			backend := &rule.Backends[j]
+			p := "http"
+			if backend.BackendProtocol == gatewayv1.HTTPSProtocolType || backend.BackendProtocol == gatewayv1.TLSProtocolType {
+				p = "https"
+			}
+			for _, endp := range backend.Endpoints {
+				if endp.BackendProtocol == gatewayv1.HTTPSProtocolType || endp.BackendProtocol == gatewayv1.TLSProtocolType {
+					p = "https"
+					break
+				}
+			}
+			
+			if ruleProtocol == "" {
+				ruleProtocol = p
+			} else if ruleProtocol != p {
+				return fmt.Errorf("HTTPRouteRule contains mixed backend protocols (e.g. %s and %s) which is not supported for a single rule", ruleProtocol, p)
 			}
 		}
 	}
@@ -1021,8 +1052,8 @@ func (r *HTTPRouteReconciler) resolveListenerTLSBinding(
 			now := time.Now()
 			if now.After(cert.NotAfter) || now.Before(cert.NotBefore) {
 				return nil, routeConditionState{
-					status: false,
-					reason: string(gatewayv1.ListenerReasonInvalidCertificateRef),
+					status:  false,
+					reason:  string(gatewayv1.ListenerReasonInvalidCertificateRef),
 					message: fmt.Sprintf("TLS certificate in Secret %s/%s is expired or not yet valid", secretKey.Namespace, secretKey.Name),
 				}
 			}
@@ -1030,8 +1061,8 @@ func (r *HTTPRouteReconciler) resolveListenerTLSBinding(
 			if listener.Hostname != nil {
 				if err := cert.VerifyHostname(string(*listener.Hostname)); err != nil {
 					return nil, routeConditionState{
-						status: false,
-						reason: string(gatewayv1.ListenerReasonInvalidCertificateRef),
+						status:  false,
+						reason:  string(gatewayv1.ListenerReasonInvalidCertificateRef),
 						message: fmt.Sprintf("TLS certificate in Secret %s/%s is not valid for listener hostname %q: %v", secretKey.Namespace, secretKey.Name, *listener.Hostname, err),
 					}
 				}
@@ -1567,7 +1598,7 @@ func (r *HTTPRouteReconciler) enqueueRoutesForNamespace() handler.MapFunc {
 		}
 
 		// Also check WatchNamespace logic (global route enqueue)
-		// If the namespace itself is exactly the watched namespace used by the reconciler, 
+		// If the namespace itself is exactly the watched namespace used by the reconciler,
 		// we might want to watch it, but if it has no selector listeners, routes aren't dynamically attached by labels.
 		// However, returning all routes upon namespace label change is safest if used is true.
 		if !used {

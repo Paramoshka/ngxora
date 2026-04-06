@@ -38,20 +38,22 @@ type DesiredPathMatch struct {
 }
 
 type DesiredBackendEndpoint struct {
-	IP   string
-	Port int32
+	IP              string
+	Port            int32
+	BackendProtocol gatewayv1.ProtocolType
 }
 
 // DesiredBackend is the translated backend reference. Existence and port
 // validation happen later in the controller, not in the translator.
 type DesiredBackend struct {
-	Group     string
-	Kind      string
-	Name      string
-	Namespace string
-	Port      int32
-	Weight    int32
-	Endpoints []DesiredBackendEndpoint
+	Group           string
+	Kind            string
+	Name            string
+	Namespace       string
+	Port            int32
+	Weight          int32
+	BackendProtocol gatewayv1.ProtocolType
+	Endpoints       []DesiredBackendEndpoint
 }
 
 type DesiredFilter struct {
@@ -181,7 +183,7 @@ func (t *Translator) translateRule(namespace string, rule gatewayv1.HTTPRouteRul
 		filters := make([]DesiredFilter, 0, len(rule.Filters))
 		for _, filter := range rule.Filters {
 			desired := DesiredFilter{Type: string(filter.Type)}
-			
+
 			switch filter.Type {
 			case gatewayv1.HTTPRouteFilterExtensionRef:
 				if filter.ExtensionRef != nil {
@@ -206,7 +208,7 @@ func (t *Translator) translateRule(namespace string, rule gatewayv1.HTTPRouteRul
 					desired.PluginConfig = cfg
 				}
 			}
-			
+
 			filters = append(filters, desired)
 		}
 
