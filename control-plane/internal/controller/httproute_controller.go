@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -102,7 +103,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			continue
 		}
 
-		if err := r.resolveFilters(ctx, route.Namespace, &desiredRoute, referenceGrantCache); err != nil {
+		if err := r.resolveFilters(ctx, route.Namespace, &desiredRoute); err != nil {
 			statusPlans = append(statusPlans, invalidFilterPlan(route, parentRefs, err))
 			r.Logger.Warn("skipping invalid HTTPRoute filters", "name", route.Name, "namespace", route.Namespace, "error", err)
 			continue
@@ -262,6 +263,26 @@ type gatewayListenerEvaluation struct {
 	tls      *controlv1.TlsBinding
 }
 
+type filterResolutionError struct {
+	reason string
+	err    error
+}
+
+func (e *filterResolutionError) Error() string {
+	return e.err.Error()
+}
+
+func (e *filterResolutionError) Unwrap() error {
+	return e.err
+}
+
+func newFilterResolutionError(reason string, err error) error {
+	return &filterResolutionError{
+		reason: reason,
+		err:    err,
+	}
+}
+
 func (r *HTTPRouteReconciler) syncHTTPRouteStatus(
 	ctx context.Context,
 	route *gatewayv1.HTTPRoute,
@@ -405,6 +426,12 @@ func unresolvedRefsPlan(route *gatewayv1.HTTPRoute, parentRefs []gatewayv1.Paren
 }
 
 func invalidFilterPlan(route *gatewayv1.HTTPRoute, parentRefs []gatewayv1.ParentReference, err error) httpRouteStatusPlan {
+	reason := string(gatewayv1.RouteReasonUnsupportedValue)
+	var filterErr *filterResolutionError
+	if errors.As(err, &filterErr) && filterErr.reason != "" {
+		reason = filterErr.reason
+	}
+
 	message := fmt.Sprintf("filter resolution failed: %v", err)
 	return httpRouteStatusPlan{
 		route:      route,
@@ -416,7 +443,7 @@ func invalidFilterPlan(route *gatewayv1.HTTPRoute, parentRefs []gatewayv1.Parent
 		},
 		resolved: routeConditionState{
 			status:  false,
-			reason:  string(gatewayv1.RouteReasonUnsupportedValue),
+			reason:  reason,
 			message: message,
 		},
 		programmed: routeConditionState{
@@ -774,14 +801,13 @@ func (r *HTTPRouteReconciler) resolveFilters(
 	ctx context.Context,
 	routeNamespace string,
 	desiredRoute *translator.DesiredRoute,
-	referenceGrantCache map[string][]gatewayv1beta1.ReferenceGrant,
 ) error {
 	for i := range desiredRoute.Rules {
 		rule := &desiredRoute.Rules[i]
 		for j := range rule.Filters {
 			filter := &rule.Filters[j]
 			if filter.Type == string(gatewayv1.HTTPRouteFilterExtensionRef) && filter.ExtensionRef != nil {
-				if err := r.resolveExtensionRef(ctx, routeNamespace, filter, referenceGrantCache); err != nil {
+				if err := r.resolveExtensionRef(ctx, routeNamespace, filter); err != nil {
 					return fmt.Errorf("resolve filter ExtensionRef: %w", err)
 				}
 			}
@@ -794,7 +820,6 @@ func (r *HTTPRouteReconciler) resolveExtensionRef(
 	ctx context.Context,
 	routeNamespace string,
 	filter *translator.DesiredFilter,
-	referenceGrantCache map[string][]gatewayv1beta1.ReferenceGrant,
 ) error {
 	extRef := filter.ExtensionRef
 	group := string(extRef.Group)
@@ -802,7 +827,10 @@ func (r *HTTPRouteReconciler) resolveExtensionRef(
 	name := string(extRef.Name)
 
 	if group != "plugins.ngxora.io" {
-		return fmt.Errorf("unsupported ExtensionRef group %q", group)
+		return newFilterResolutionError(
+			ngxorastatus.ReasonInvalidExtensionRef,
+			fmt.Errorf("unsupported ExtensionRef group %q", group),
+		)
 	}
 
 	targetNamespace := routeNamespace
@@ -816,6 +844,9 @@ func (r *HTTPRouteReconciler) resolveExtensionRef(
 	case "RateLimitPolicy":
 		var policy v1alpha1.RateLimitPolicy
 		if err = r.Get(ctx, key, &policy); err != nil {
+			if apierrors.IsNotFound(err) {
+				return newFilterResolutionError(ngxorastatus.ReasonExtensionRefNotFound, err)
+			}
 			return err
 		}
 		pluginName = "rate-limit"
@@ -823,6 +854,9 @@ func (r *HTTPRouteReconciler) resolveExtensionRef(
 	case "JwtAuthPolicy":
 		var policy v1alpha1.JwtAuthPolicy
 		if err = r.Get(ctx, key, &policy); err != nil {
+			if apierrors.IsNotFound(err) {
+				return newFilterResolutionError(ngxorastatus.ReasonExtensionRefNotFound, err)
+			}
 			return err
 		}
 		pluginName = "jwt_auth"
@@ -830,6 +864,9 @@ func (r *HTTPRouteReconciler) resolveExtensionRef(
 	case "BasicAuthPolicy":
 		var policy v1alpha1.BasicAuthPolicy
 		if err = r.Get(ctx, key, &policy); err != nil {
+			if apierrors.IsNotFound(err) {
+				return newFilterResolutionError(ngxorastatus.ReasonExtensionRefNotFound, err)
+			}
 			return err
 		}
 		pluginName = "basic-auth"
@@ -837,6 +874,9 @@ func (r *HTTPRouteReconciler) resolveExtensionRef(
 	case "CorsPolicy":
 		var policy v1alpha1.CorsPolicy
 		if err = r.Get(ctx, key, &policy); err != nil {
+			if apierrors.IsNotFound(err) {
+				return newFilterResolutionError(ngxorastatus.ReasonExtensionRefNotFound, err)
+			}
 			return err
 		}
 		pluginName = "cors"
@@ -844,12 +884,18 @@ func (r *HTTPRouteReconciler) resolveExtensionRef(
 	case "ExtAuthzPolicy":
 		var policy v1alpha1.ExtAuthzPolicy
 		if err = r.Get(ctx, key, &policy); err != nil {
+			if apierrors.IsNotFound(err) {
+				return newFilterResolutionError(ngxorastatus.ReasonExtensionRefNotFound, err)
+			}
 			return err
 		}
 		pluginName = "ext_authz"
 		jsonConfig, err = json.Marshal(policy.Spec)
 	default:
-		return fmt.Errorf("unsupported ExtensionRef kind %q", kind)
+		return newFilterResolutionError(
+			ngxorastatus.ReasonInvalidExtensionRef,
+			fmt.Errorf("unsupported ExtensionRef kind %q", kind),
+		)
 	}
 
 	if err != nil {
