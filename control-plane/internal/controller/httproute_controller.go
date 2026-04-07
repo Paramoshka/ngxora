@@ -140,7 +140,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if statusErr := r.applyStatusPlans(ctx, statusPlans); statusErr != nil {
 			return ctrl.Result{}, fmt.Errorf("build snapshot: %w; update route status: %v", err, statusErr)
 		}
-		if statusErr := r.syncGatewayStatus(ctx, gateway, listenerAttachedRoutes, listenerEvaluations, false, err.Error()); statusErr != nil {
+		if statusErr := r.syncGatewayStatus(ctx, gateway, listenerAttachedRoutes, listenerEvaluations, false, ngxorastatus.ReasonTranslationFailed, err.Error()); statusErr != nil {
 			return ctrl.Result{}, fmt.Errorf("build snapshot: %w; update gateway status: %v", err, statusErr)
 		}
 		return ctrl.Result{}, fmt.Errorf("build snapshot: %w", err)
@@ -161,11 +161,11 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	activeSnapshot, err := r.NGXoraClient.GetSnapshot(ctx)
 	if err == nil && activeSnapshot != nil && activeSnapshot.Version == version {
-		r.markProgrammed(statusPlans, true, "active snapshot already matches desired version")
+		r.markProgrammed(statusPlans, true, ngxorastatus.ReasonProgrammed, "active snapshot already matches desired version")
 		if err := r.applyStatusPlans(ctx, statusPlans); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update HTTPRoute status after no-op apply: %w", err)
 		}
-		if err := r.syncGatewayStatus(ctx, gateway, listenerAttachedRoutes, listenerEvaluations, true, "active snapshot already matches desired version"); err != nil {
+		if err := r.syncGatewayStatus(ctx, gateway, listenerAttachedRoutes, listenerEvaluations, true, ngxorastatus.ReasonProgrammed, "active snapshot already matches desired version"); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update Gateway status after no-op apply: %w", err)
 		}
 		r.Logger.Info("snapshot unchanged, skipping apply", "version", version)
@@ -174,21 +174,41 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	result, err := r.NGXoraClient.ApplySnapshot(ctx, buildResult.Snapshot)
 	if err != nil {
-		r.markProgrammed(statusPlans, false, err.Error())
+		r.markProgrammed(statusPlans, false, ngxorastatus.ReasonApplyFailed, err.Error())
 		if statusErr := r.applyStatusPlans(ctx, statusPlans); statusErr != nil {
 			return ctrl.Result{}, fmt.Errorf("apply snapshot: %w; update status: %v", err, statusErr)
 		}
-		if statusErr := r.syncGatewayStatus(ctx, gateway, listenerAttachedRoutes, listenerEvaluations, false, err.Error()); statusErr != nil {
+		if statusErr := r.syncGatewayStatus(ctx, gateway, listenerAttachedRoutes, listenerEvaluations, false, ngxorastatus.ReasonApplyFailed, err.Error()); statusErr != nil {
 			return ctrl.Result{}, fmt.Errorf("apply snapshot: %w; update gateway status: %v", err, statusErr)
 		}
 		return ctrl.Result{}, fmt.Errorf("apply snapshot: %w", err)
 	}
 
-	r.markProgrammed(statusPlans, true, fmt.Sprintf("snapshot version %s applied", version))
+	programmed := true
+	programmedReason := ngxorastatus.ReasonProgrammed
+	programmedMessage := fmt.Sprintf("snapshot version %s applied", version)
+	if result.RestartRequired {
+		programmed = false
+		programmedReason = ngxorastatus.ReasonRestartRequired
+		if result.ActiveVersion != "" {
+			programmedMessage = fmt.Sprintf(
+				"snapshot version %s requires restart to activate; dataplane is still serving version %s",
+				version,
+				result.ActiveVersion,
+			)
+		} else {
+			programmedMessage = fmt.Sprintf(
+				"snapshot version %s requires restart to activate; dataplane is still serving the previous runtime state",
+				version,
+			)
+		}
+	}
+
+	r.markProgrammed(statusPlans, programmed, programmedReason, programmedMessage)
 	if err := r.applyStatusPlans(ctx, statusPlans); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update HTTPRoute status after apply: %w", err)
 	}
-	if err := r.syncGatewayStatus(ctx, gateway, listenerAttachedRoutes, listenerEvaluations, true, fmt.Sprintf("snapshot version %s applied", version)); err != nil {
+	if err := r.syncGatewayStatus(ctx, gateway, listenerAttachedRoutes, listenerEvaluations, programmed, programmedReason, programmedMessage); err != nil {
 		return ctrl.Result{}, fmt.Errorf("update Gateway status after apply: %w", err)
 	}
 
@@ -474,15 +494,17 @@ func (r *HTTPRouteReconciler) unattachedPlan(
 	}
 }
 
-func (r *HTTPRouteReconciler) markProgrammed(plans []httpRouteStatusPlan, programmed bool, message string) {
+func (r *HTTPRouteReconciler) markProgrammed(plans []httpRouteStatusPlan, programmed bool, reason, message string) {
 	for i := range plans {
 		if plans[i].clear || !plans[i].accepted.status || !plans[i].resolved.status {
 			continue
 		}
 
-		reason := ngxorastatus.ReasonApplyFailed
-		if programmed {
-			reason = ngxorastatus.ReasonProgrammed
+		if reason == "" {
+			reason = ngxorastatus.ReasonApplyFailed
+			if programmed {
+				reason = ngxorastatus.ReasonProgrammed
+			}
 		}
 		plans[i].programmed = routeConditionState{
 			status:  programmed,
@@ -1311,6 +1333,7 @@ func (r *HTTPRouteReconciler) syncGatewayStatus(
 	attachedRoutes map[string]int32,
 	listenerEvaluations map[string]gatewayListenerEvaluation,
 	programmed bool,
+	programmedReason string,
 	programmedMessage string,
 ) error {
 	before := gateway.DeepCopy()
@@ -1365,7 +1388,7 @@ func (r *HTTPRouteReconciler) syncGatewayStatus(
 				gateway.Generation,
 				string(gatewayv1.ListenerConditionProgrammed),
 				evaluation.resolved.status && programmed,
-				gatewayListenerProgrammedReason(evaluation, programmed),
+				gatewayListenerProgrammedReason(evaluation, programmed, programmedReason),
 				gatewayListenerProgrammedMessage(evaluation, programmed, programmedMessage),
 			))
 		} else {
@@ -1388,7 +1411,7 @@ func (r *HTTPRouteReconciler) syncGatewayStatus(
 				gateway.Generation,
 				string(gatewayv1.ListenerConditionProgrammed),
 				false,
-				gatewayListenerProgrammedReason(evaluation, programmed),
+				gatewayListenerProgrammedReason(evaluation, programmed, programmedReason),
 				gatewayListenerProgrammedMessage(evaluation, programmed, programmedMessage),
 			))
 		}
@@ -1407,7 +1430,7 @@ func (r *HTTPRouteReconciler) syncGatewayStatus(
 		gateway.Generation,
 		string(gatewayv1.GatewayConditionProgrammed),
 		validListeners > 0 && programmed,
-		gatewayConditionProgrammedReason(validListeners > 0, programmed),
+		gatewayConditionProgrammedReason(validListeners > 0, programmed, programmedReason),
 		gatewayConditionProgrammedMessage(validListeners > 0, programmed, programmedMessage),
 	))
 
@@ -1451,12 +1474,15 @@ func gatewayAcceptedMessage(validListeners, invalidListeners int) string {
 	}
 }
 
-func gatewayConditionProgrammedReason(hasAcceptedListeners bool, programmed bool) string {
+func gatewayConditionProgrammedReason(hasAcceptedListeners bool, programmed bool, notProgrammedReason string) string {
 	if !hasAcceptedListeners {
 		return string(gatewayv1.GatewayReasonListenersNotValid)
 	}
 	if programmed {
 		return string(gatewayv1.GatewayReasonProgrammed)
+	}
+	if notProgrammedReason != "" {
+		return notProgrammedReason
 	}
 	return ngxorastatus.ReasonApplyFailed
 }
@@ -1474,7 +1500,11 @@ func gatewayConditionProgrammedMessage(hasAcceptedListeners bool, programmed boo
 	}
 }
 
-func gatewayListenerProgrammedReason(evaluation gatewayListenerEvaluation, programmed bool) string {
+func gatewayListenerProgrammedReason(
+	evaluation gatewayListenerEvaluation,
+	programmed bool,
+	notProgrammedReason string,
+) string {
 	if !evaluation.accepted.status {
 		return evaluation.accepted.reason
 	}
@@ -1483,6 +1513,9 @@ func gatewayListenerProgrammedReason(evaluation gatewayListenerEvaluation, progr
 	}
 	if programmed {
 		return string(gatewayv1.ListenerReasonProgrammed)
+	}
+	if notProgrammedReason != "" {
+		return notProgrammedReason
 	}
 	return ngxorastatus.ReasonApplyFailed
 }

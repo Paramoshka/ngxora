@@ -9,7 +9,7 @@
 We will use the **`ExtensionRef` mechanism** inside `HTTPRoute.filters` as the primary configuration vector for Request/Response modification plugins (e.g., RateLimit, JWT).
 
 - `HTTPRoute` rules can define an `ExtensionRef` within their `filters` list.
-- The `ExtensionRef` will point to a custom resource (e.g., `RateLimitPolicy`, `JwtAuthPolicy`) in the same namespace (or a different namespace if a strict `ReferenceGrant` allows it, adhering to ADR-006).
+- The `ExtensionRef` points to a custom resource (e.g., `RateLimitPolicy`, `JwtAuthPolicy`) in the same namespace as the `HTTPRoute`. This follows the Gateway API `LocalObjectReference` shape used by `HTTPRoute.filters.extensionRef`.
 - The `ngxora` control-plane will validate these references, read the referenced CRD, and embed the extracted plugin configuration directly into the intermediate representation (IR) translated for the data-plane.
 
 ## Consequences
@@ -17,3 +17,4 @@ We will use the **`ExtensionRef` mechanism** inside `HTTPRoute.filters` as the p
 - The Gateway API translation logic in the control-plane must implement explicit type checking for referenced Groups and Kinds. Invalid references or unsupported kinds will trigger status conditions (e.g., `ResolvedRefs=False` with `Reason=InvalidExtensionRef`).
 - We avoid an explosion of Policy CRDs implicitly linked to resources, making the routing intent highly visible directly on the `HTTPRoute`.
 - Since plugins might be referenced by multiple `HTTPRoute`s, the snapshot generator must efficiently cache or inline plugin data to prevent duplicate reads and maintain the strict IR boundary defined in ADR-002.
+- Cross-namespace plugin references are out of scope for this ADR. If we want them later, that will require a different attachment model or an explicit API change, not just `ReferenceGrant` wiring.

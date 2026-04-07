@@ -10,4 +10,5 @@ const (
 	ReasonPending           = "Pending"
 	ReasonTranslationFailed = "TranslationFailed"
 	ReasonApplyFailed       = "ApplyFailed"
+	ReasonRestartRequired   = "RestartRequired"
 )
