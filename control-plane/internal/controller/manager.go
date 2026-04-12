@@ -1,16 +1,12 @@
 package controller
 
 import (
-	"context"
 	"log/slog"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
@@ -43,8 +39,10 @@ func NewManager(cfg config.Config, logger *slog.Logger) (manager.Manager, error)
 		return nil, err
 	}
 
+	c := mgr.GetClient()
+
 	reconciler := &HTTPRouteReconciler{
-		Client:           mgr.GetClient(),
+		Client:           c,
 		Logger:           logger.With("controller", "httproute"),
 		WatchNamespace:   cfg.WatchNamespace,
 		GatewayName:      cfg.GatewayName,
@@ -52,6 +50,10 @@ func NewManager(cfg config.Config, logger *slog.Logger) (manager.Manager, error)
 		Translator:       translator.New(cfg.GatewayName, cfg.GatewayNamespace),
 		SnapshotBuilder:  snapshot.NewBuilder(),
 		NGXoraClient:     ngxoraclient.New(cfg.SocketPath, cfg.ApplyTimeout),
+		BackendResolver:  NewBackendResolver(c),
+		FilterResolver:   NewFilterResolver(c),
+		TLSValidator:     NewTLSValidator(c),
+		StatusApplier:    NewStatusApplier(c),
 	}
 
 	if err := reconciler.SetupWithManager(mgr); err != nil {
@@ -59,23 +61,4 @@ func NewManager(cfg config.Config, logger *slog.Logger) (manager.Manager, error)
 	}
 
 	return mgr, nil
-}
-
-// enqueueAllHTTPRoutes fan-outs dependent object changes to all watched
-// HTTPRoutes in the namespace because the control-plane applies full snapshots.
-func enqueueAllHTTPRoutes(c client.Client, watchNamespace string) handler.MapFunc {
-	return func(ctx context.Context, _ client.Object) []reconcile.Request {
-		var routeList gatewayv1.HTTPRouteList
-		if err := c.List(ctx, &routeList, client.InNamespace(watchNamespace)); err != nil {
-			return nil
-		}
-
-		requests := make([]reconcile.Request, 0, len(routeList.Items))
-		for _, route := range routeList.Items {
-			requests = append(requests, reconcile.Request{
-				NamespacedName: client.ObjectKeyFromObject(&route),
-			})
-		}
-		return requests
-	}
 }
