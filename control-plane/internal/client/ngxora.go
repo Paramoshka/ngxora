@@ -60,8 +60,7 @@ func (c *NGXoraClient) GetSnapshot(ctx context.Context) (*controlv1.ConfigSnapsh
 func (c *NGXoraClient) dial(ctx context.Context) (*grpc.ClientConn, error) {
 	target := fmt.Sprintf("unix://%s", c.socketPath)
 
-	conn, err := grpc.DialContext(
-		ctx,
+	conn, err := grpc.NewClient(
 		target,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {

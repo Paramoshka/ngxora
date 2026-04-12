@@ -368,7 +368,7 @@ func TestFilterResolver_ResolveFilters_NoExtensionRef(t *testing.T) {
 			{
 				Filters: []translator.DesiredFilter{
 					{
-						Type: string(gatewayv1.HTTPRouteFilterRequestHeaderModifier),
+						Type:         string(gatewayv1.HTTPRouteFilterRequestHeaderModifier),
 						PluginName:   "headers",
 						PluginConfig: `{"request":{"set":[{"name":"X-Custom","value":"test"}]}}`,
 					},

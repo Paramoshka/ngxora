@@ -323,9 +323,7 @@ func translateHeaderFilter(hf *gatewayv1.HTTPHeaderFilter, phase string) (string
 			Value: set.Value,
 		})
 	}
-	for _, remove := range hf.Remove {
-		patch.Remove = append(patch.Remove, remove)
-	}
+	patch.Remove = append(patch.Remove, hf.Remove...)
 
 	cfg := headersPluginConfig{}
 	if phase == "request" {

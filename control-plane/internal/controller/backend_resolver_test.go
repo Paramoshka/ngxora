@@ -568,16 +568,16 @@ func TestValidateRuleConsistency_MixedProtocols(t *testing.T) {
 	rule := &translator.DesiredRule{
 		Backends: []translator.DesiredBackend{
 			{
-				Name:              "backend-a",
-				Namespace:         "default",
-				BackendProtocol:   gatewayv1.HTTPProtocolType,
-				Endpoints:         []translator.DesiredBackendEndpoint{{IP: "10.0.0.1", Port: 80}},
+				Name:            "backend-a",
+				Namespace:       "default",
+				BackendProtocol: gatewayv1.HTTPProtocolType,
+				Endpoints:       []translator.DesiredBackendEndpoint{{IP: "10.0.0.1", Port: 80}},
 			},
 			{
-				Name:              "backend-b",
-				Namespace:         "default",
-				BackendProtocol:   gatewayv1.HTTPSProtocolType,
-				Endpoints:         []translator.DesiredBackendEndpoint{{IP: "10.0.0.2", Port: 443}},
+				Name:            "backend-b",
+				Namespace:       "default",
+				BackendProtocol: gatewayv1.HTTPSProtocolType,
+				Endpoints:       []translator.DesiredBackendEndpoint{{IP: "10.0.0.2", Port: 443}},
 			},
 		},
 	}
@@ -591,16 +591,16 @@ func TestValidateRuleConsistency_SameProtocol(t *testing.T) {
 	rule := &translator.DesiredRule{
 		Backends: []translator.DesiredBackend{
 			{
-				Name:              "backend-a",
-				Namespace:         "default",
-				BackendProtocol:   gatewayv1.HTTPProtocolType,
-				Endpoints:         []translator.DesiredBackendEndpoint{{IP: "10.0.0.1", Port: 80}},
+				Name:            "backend-a",
+				Namespace:       "default",
+				BackendProtocol: gatewayv1.HTTPProtocolType,
+				Endpoints:       []translator.DesiredBackendEndpoint{{IP: "10.0.0.1", Port: 80}},
 			},
 			{
-				Name:              "backend-b",
-				Namespace:         "default",
-				BackendProtocol:   gatewayv1.HTTPProtocolType,
-				Endpoints:         []translator.DesiredBackendEndpoint{{IP: "10.0.0.2", Port: 80}},
+				Name:            "backend-b",
+				Namespace:       "default",
+				BackendProtocol: gatewayv1.HTTPProtocolType,
+				Endpoints:       []translator.DesiredBackendEndpoint{{IP: "10.0.0.2", Port: 80}},
 			},
 		},
 	}
@@ -615,16 +615,16 @@ func TestValidateRuleConsistency_MixedTLSVerify(t *testing.T) {
 	rule := &translator.DesiredRule{
 		Backends: []translator.DesiredBackend{
 			{
-				Name:        "backend-a",
-				Namespace:   "default",
-				TLSVerify:   &vTrue,
-				Endpoints:   []translator.DesiredBackendEndpoint{{IP: "10.0.0.1", Port: 443}},
+				Name:      "backend-a",
+				Namespace: "default",
+				TLSVerify: &vTrue,
+				Endpoints: []translator.DesiredBackendEndpoint{{IP: "10.0.0.1", Port: 443}},
 			},
 			{
-				Name:        "backend-b",
-				Namespace:   "default",
-				TLSVerify:   &vFalse,
-				Endpoints:   []translator.DesiredBackendEndpoint{{IP: "10.0.0.2", Port: 443}},
+				Name:      "backend-b",
+				Namespace: "default",
+				TLSVerify: &vFalse,
+				Endpoints: []translator.DesiredBackendEndpoint{{IP: "10.0.0.2", Port: 443}},
 			},
 		},
 	}

@@ -81,13 +81,17 @@ test-unit: ## Run unit tests
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/ngxora.conf
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/ngxora-tls.conf
 
-test-control-plane: ## Run Go control-plane tests
+test-control-plane: ## Run Go control-plane unit tests
 	if [ -d "$(CONTROL_PLANE_DIR)" ]; then \
-		cd $(CONTROL_PLANE_DIR) && GOCACHE="$(GO_BUILD_CACHE)" $(GO) test ./...; \
+		cd $(CONTROL_PLANE_DIR) && GOCACHE="$(GO_BUILD_CACHE)" $(GO) test -race ./...; \
 	fi
 
-test-integration: ## Run integration tests
-	@echo "test-integration: no integration suite configured yet"
+test-control-plane-integration: ## Run Go control-plane integration tests (requires envtest)
+	if [ -d "$(CONTROL_PLANE_DIR)" ]; then \
+		cd $(CONTROL_PLANE_DIR) && GOCACHE="$(GO_BUILD_CACHE)" $(GO) test -race -tags=integration ./internal/controller/; \
+	fi
+
+test-integration: test-control-plane-integration ## Run all integration test suites
 
 # =========================
 # Build section

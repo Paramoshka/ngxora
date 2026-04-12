@@ -27,30 +27,47 @@ import (
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
-// SnapshotClient defines the interface for communicating with the dataplane.
+// SnapshotClient defines the interface for communicating with the ngxora
+// dataplane. It is used to push configuration snapshots and retrieve the
+// currently active snapshot for comparison.
+//
+// The production implementation is ngxoraclient.NGXoraClient, which connects
+// to the dataplane over a Unix Domain Socket using gRPC.
 type SnapshotClient interface {
+	// ApplySnapshot pushes the full desired runtime snapshot to the dataplane.
 	ApplySnapshot(ctx context.Context, snap *controlv1.ConfigSnapshot) (*controlv1.ApplyResult, error)
+	// GetSnapshot returns the currently active snapshot from the dataplane.
 	GetSnapshot(ctx context.Context) (*controlv1.ConfigSnapshot, error)
 }
 
-// Ensure the real client implements the interface.
+// Compile-time check: ensure the real client implements the interface.
 var _ SnapshotClient = (*ngxoraclient.NGXoraClient)(nil)
 
 // HTTPRouteReconciler orchestrates the reconciliation of HTTPRoute objects
 // by delegating to specialized services.
+//
+// The reconciler follows a clear pipeline:
+//  1. List all HTTPRoutes in the watch namespace
+//  2. Translate each route to desired state (Translator)
+//  3. Resolve backend refs to actual pod endpoints (BackendResolver)
+//  4. Resolve ExtensionRef filters to plugin configs (FilterResolver)
+//  5. Evaluate Gateway listeners and validate TLS (TLSValidator)
+//  6. Build a ConfigSnapshot (SnapshotBuilder)
+//  7. Apply the snapshot to the dataplane (NGXoraClient)
+//  8. Update HTTPRoute and Gateway status (StatusApplier)
 type HTTPRouteReconciler struct {
 	client.Client
-	Logger           *slog.Logger
-	WatchNamespace   string
-	GatewayName      string
-	GatewayNamespace string
-	Translator       *translator.Translator
-	SnapshotBuilder  *snapshot.Builder
-	NGXoraClient     SnapshotClient
-	BackendResolver  *BackendResolver
-	FilterResolver   *FilterResolver
-	TLSValidator     *TLSValidator
-	StatusApplier    *StatusApplier
+	Logger           *slog.Logger           // structured logger
+	WatchNamespace   string                 // K8s namespace to watch
+	GatewayName      string                 // target Gateway name
+	GatewayNamespace string                 // target Gateway namespace
+	Translator       *translator.Translator // Gateway API → DesiredState
+	SnapshotBuilder  *snapshot.Builder      // DesiredState → ConfigSnapshot
+	NGXoraClient     SnapshotClient         // dataplane gRPC client
+	BackendResolver  *BackendResolver       // Service → EndpointSlice resolution
+	FilterResolver   *FilterResolver        // ExtensionRef → Plugin CRD
+	TLSValidator     *TLSValidator          // certificate validation
+	StatusApplier    *StatusApplier         // HTTPRoute/Gateway status updates
 }
 
 func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

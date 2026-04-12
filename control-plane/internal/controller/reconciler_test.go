@@ -24,8 +24,8 @@ import (
 type mockNGXoraClient struct {
 	applySnapshotFn func(ctx context.Context, snap *controlv1.ConfigSnapshot) (*controlv1.ApplyResult, error)
 	getSnapshotFn   func(ctx context.Context) (*controlv1.ConfigSnapshot, error)
-	appliedSnapshot  *controlv1.ConfigSnapshot
-	applyCount       int
+	appliedSnapshot *controlv1.ConfigSnapshot
+	applyCount      int
 }
 
 func (m *mockNGXoraClient) ApplySnapshot(ctx context.Context, snap *controlv1.ConfigSnapshot) (*controlv1.ApplyResult, error) {

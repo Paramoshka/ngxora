@@ -371,10 +371,10 @@ func TestParentStatusKey(t *testing.T) {
 
 func TestGatewayAcceptedReason(t *testing.T) {
 	tests := []struct {
-		name     string
-		valid    int
-		invalid  int
-		want     string
+		name    string
+		valid   int
+		invalid int
+		want    string
 	}{
 		{name: "no listeners", valid: 0, invalid: 0, want: string(gatewayv1.GatewayReasonListenersNotValid)},
 		{name: "some invalid", valid: 1, invalid: 1, want: string(gatewayv1.GatewayReasonListenersNotValid)},
@@ -405,8 +405,8 @@ func TestListenerTLSBindings(t *testing.T) {
 
 	bindings := listenerTLSBindings(evaluations)
 
-	assert.NotContains(t, bindings, "http")    // no TLS
-	assert.Contains(t, bindings, "https")      // accepted + TLS
+	assert.NotContains(t, bindings, "http")     // no TLS
+	assert.Contains(t, bindings, "https")       // accepted + TLS
 	assert.NotContains(t, bindings, "rejected") // not accepted
 }
 
