@@ -6,6 +6,10 @@ This project follows a simple Keep a Changelog-style format.
 
 ## [Unreleased]
 
+### Removed
+
+- Kubernetes-oriented control-plane (Go sidecar) and all related Gateway API controller logic. The built-in Rust gRPC control-plane remains for dynamic configuration updates.
+
 ## [0.1.0] - 2026-03-14
 
 Initial public release.

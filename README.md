@@ -47,34 +47,6 @@ docker run --rm \
   paramoshka/ngxora:main
 ```
 
-## Quick start (Kubernetes)
-
-`ngxora` can run as a standard ingress/gateway inside Kubernetes. The `ngxora-control-plane` runs as a sidecar container, providing native Gateway API support by dynamically translating `Gateway` and `HTTPRoute` resources to proxy snapshots.
-
-Generate a test TLS certificate:
-
-```bash
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout tls.key -out tls.crt -subj "/CN=localhost"
-kubectl create secret tls ngxora-localhost-tls --cert=tls.crt --key=tls.key
-```
-
-Apply the example deployment, which includes the proxy, the sidecar, an example `Gateway`, `GatewayClass`, and a backend test service:
-
-```bash
-kubectl apply -f control-plane/examples/quickstart-deployment.yaml
-```
-
-Forward the proxy port locally:
-
-```bash
-kubectl port-forward svc/ngxora 8080:8080
-```
-
-And test the proxy route:
-
-```bash
-curl http://127.0.0.1:8080/
-```
 
 ## nginx-style config
 
@@ -115,7 +87,7 @@ Run proxy:
 cargo run -- examples/ngxora.conf
 ```
 
-Supported directives, upstream policies, and built-in plugin config are documented in [Config Options](./docs/config-options.md) and [Gateway API Policies](./docs/gateway-api-policies.md).
+Supported directives, upstream policies, and built-in plugin config are documented in [Config Options](./docs/config-options.md).
 
 ## WebSocket proxying
 
@@ -252,7 +224,7 @@ Later plugin roadmap:
 - `geoip`
 - `cache`
 
-Text config syntax for built-in location plugins is documented in [Config Options](./docs/config-options.md). Gateway API / Kubernetes policy CRDs are documented in [Gateway API Policies](./docs/gateway-api-policies.md).
+Text config syntax for built-in location plugins is documented in [Config Options](./docs/config-options.md).
 
 Example `headers` usage:
 
