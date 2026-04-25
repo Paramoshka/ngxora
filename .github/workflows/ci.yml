@@ -17,7 +17,6 @@ permissions:
 env:
   REGISTRY: docker.io
   IMAGE_REPO: paramoshka/ngxora
-  CONTROL_PLANE_IMAGE_REPO: paramoshka/ngxora-control-plane
   REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
   REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
   TAG: ${{ github.ref_name }}
@@ -43,22 +42,13 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: control-plane/go.mod
+          go-version-file: sdk/go/go.mod
 
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Install envtest binaries
-        run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-          setup-envtest use --bin-dir /home/runner/.local/kubebuilder
-
-      - name: Set KUBEBUILDER_ASSETS
-        run: |
-          echo "KUBEBUILDER_ASSETS=$(setup-envtest list --bin-dir /home/runner/.local/kubebuilder -p path | head -1)" >> "$GITHUB_ENV"
-
       - name: Run tests
-        run: make test test-integration
+        run: make test
 
   build-and-publish:
     needs: test
@@ -81,7 +71,7 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: control-plane/go.mod
+          go-version-file: sdk/go/go.mod
 
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -98,12 +88,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: make scan-image
 
-      - name: Scan control-plane image on tag builds
-        if: startsWith(github.ref, 'refs/tags/')
-        run: make scan-control-plane-image
-
       - name: Push image
         run: make publish-image
-
-      - name: Push control-plane image
-        run: make publish-control-plane-image
