@@ -137,11 +137,22 @@ impl CacheBackend {
             return None;
         }
 
-        // DashMap::get returns a Ref, but since we need to clone out of the
-        // inner HashMap, we lock the per-location RwLock for read.
         let store = self.stores.get(&key.route_id)?;
         let guard = store.read().await;
         guard.get(key).cloned()
+    }
+
+    /// Look up a cached response **ignoring TTL** — used for stale-if-error.
+    ///
+    /// Returns any entry regardless of age, as long as the cache is enabled.
+    pub async fn get_stale(&self, key: &CacheKey, cfg: &CacheConfig) -> Option<CachedResponse> {
+        if !cfg.enabled {
+            return None;
+        }
+
+        let store = self.stores.get(&key.route_id)?;
+        let guard = store.read().await;
+        guard.entries.get(key).cloned()
     }
 
     /// Store a response in the cache for the given key and config.

@@ -816,6 +816,70 @@ impl ProxyHttp for DynamicProxy {
         Ok(())
     }
 
+    /// Serve a stale cached response when upstream returns an error.
+    ///
+    /// Only activates when the location has `proxy_cache_stale_if_error`
+    /// configured and a cached entry exists (TTL is ignored for stale).
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        _error: &pingora::Error,
+        ctx: &mut Self::CTX,
+    ) -> pingora_proxy::FailToProxy
+    where
+        Self::CTX: Send + Sync,
+    {
+        let Some(selected) = ctx.selected.as_ref() else {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        };
+        let Some(cache_cfg) = selected.cache.as_ref() else {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        };
+        // stale_if_error must be explicitly configured
+        if cache_cfg.stale_if_error.is_none() {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        }
+        let Some(cache_key) = &ctx.cache_key else {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        };
+
+        let Some(mut cached) = self.cache_backend.get_stale(cache_key, cache_cfg).await else {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        };
+
+        cached.headers.insert(
+            http::HeaderName::from_static("x-cache"),
+            http::HeaderValue::from_static("STALE"),
+        );
+
+        if write_cached_response(session, &cached).await.is_err() {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        }
+
+        pingora_proxy::FailToProxy {
+            can_reuse_downstream: true,
+            error_code: cached.status.as_u16(),
+        }
+    }
+
     // Response plugins run in reverse order so they behave like unwind-style
     // middleware around the upstream exchange.
     async fn response_filter(
