@@ -19,7 +19,7 @@ env:
   IMAGE_REPO: paramoshka/ngxora
   REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
   REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
-  TAG: ${{ github.ref_name }}
+  TAG: ${{ github.ref_type == 'tag' && github.ref_name || (github.ref_name == 'main' && 'latest' || format('pr-{0}', github.event.pull_request.number)) }}
 
 jobs:
   test:
@@ -89,4 +89,5 @@ jobs:
         run: make scan-image
 
       - name: Push image
+        if: github.ref_name == 'main' || github.ref_type == 'tag'
         run: make publish-image
