@@ -1,7 +1,8 @@
 use bytes::Bytes;
+use dashmap::DashMap;
 use http::{HeaderMap, StatusCode};
 use ngxora_compile::ir::CacheConfig;
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -22,11 +23,21 @@ pub struct CachedResponse {
     pub created_at: Instant,
 }
 
-/// Per-location cache store.
+impl CachedResponse {
+    fn estimated_size(&self) -> u64 {
+        // Body length + ~512 bytes for headers overhead
+        self.body.len() as u64 + 512
+    }
+}
+
+/// Per-location cache store, protected by an `RwLock`.
+///
+/// Contention is minimal because each location has its own lock, and
+/// `CacheBackend` uses `DashMap` to shard access across locations.
 struct LocationCache {
     ttl: Duration,
     max_size: u64,
-    current_size: u64,
+    current_size: AtomicU64,
     entries: HashMap<CacheKey, CachedResponse>,
 }
 
@@ -35,7 +46,7 @@ impl LocationCache {
         Self {
             ttl,
             max_size,
-            current_size: 0,
+            current_size: AtomicU64::new(0),
             entries: HashMap::new(),
         }
     }
@@ -49,25 +60,30 @@ impl LocationCache {
     }
 
     fn put(&mut self, key: CacheKey, response: CachedResponse) {
-        let entry_size = response.body.len() as u64 + 512;
+        let entry_size = response.estimated_size();
 
+        // Remove old entry for the same key first
         if let Some(old) = self.entries.remove(&key) {
-            self.current_size = self
-                .current_size
-                .saturating_sub(old.body.len() as u64 + 512);
+            self.current_size
+                .fetch_sub(old.estimated_size(), Ordering::Relaxed);
         }
 
-        while self.current_size + entry_size > self.max_size && !self.entries.is_empty() {
+        // Evict oldest entries while over capacity (simple FIFO-like eviction)
+        let mut current = self.current_size.load(Ordering::Relaxed);
+        while current + entry_size > self.max_size && !self.entries.is_empty() {
+            // Take an arbitrary key (HashMap iteration order is not guaranteed
+            // FIFO, but it is deterministic and cheap)
             if let Some(stale_key) = self.entries.keys().next().cloned() {
                 if let Some(evicted) = self.entries.remove(&stale_key) {
-                    self.current_size = self
+                    current = self
                         .current_size
-                        .saturating_sub(evicted.body.len() as u64 + 512);
+                        .fetch_sub(evicted.estimated_size(), Ordering::Relaxed)
+                        - evicted.estimated_size();
                 }
             }
         }
 
-        self.current_size += entry_size;
+        self.current_size.fetch_add(entry_size, Ordering::Relaxed);
         self.entries.insert(key, response);
     }
 
@@ -75,9 +91,8 @@ impl LocationCache {
         let ttl = self.ttl;
         self.entries.retain(|_key, entry| {
             if entry.created_at.elapsed() >= ttl {
-                self.current_size = self
-                    .current_size
-                    .saturating_sub(entry.body.len() as u64 + 512);
+                self.current_size
+                    .fetch_sub(entry.estimated_size(), Ordering::Relaxed);
                 false
             } else {
                 true
@@ -86,10 +101,15 @@ impl LocationCache {
     }
 }
 
-/// Global cache backend shared across all locations.
-/// Each location gets its own isolated `LocationCache` based on `route_id`.
+use std::collections::HashMap;
+
+/// Global cache backend with sharded per-location stores.
+///
+/// `DashMap` provides concurrent access across locations without a global lock.
+/// Each location's `LocationCache` is behind its own `RwLock`, so writes to
+/// one location never block reads from another.
 pub struct CacheBackend {
-    stores: RwLock<HashMap<u64, LocationCache>>,
+    stores: DashMap<u64, RwLock<LocationCache>>,
     default_max_size: u64,
 }
 
@@ -97,58 +117,73 @@ impl CacheBackend {
     /// Create a new cache backend with a default per-location max size.
     pub fn new(default_max_size: u64) -> Self {
         Self {
-            stores: RwLock::new(HashMap::new()),
+            stores: DashMap::new(),
             default_max_size,
         }
     }
 
     /// Look up a cached response for the given key and config.
+    ///
+    /// Returns `None` if the cache is disabled, the entry is missing, or the
+    /// entry has expired.
     pub async fn get(&self, key: &CacheKey, cfg: &CacheConfig) -> Option<CachedResponse> {
         if !cfg.enabled {
             return None;
         }
-        let stores = self.stores.read().await;
-        let store = stores.get(&key.route_id)?;
-        store.get(key).cloned()
+
+        // DashMap::get returns a Ref, but since we need to clone out of the
+        // inner HashMap, we lock the per-location RwLock for read.
+        let store = self.stores.get(&key.route_id)?;
+        let guard = store.read().await;
+        guard.get(key).cloned()
     }
 
     /// Store a response in the cache for the given key and config.
+    ///
+    /// If the location doesn't have a cache yet, one is created with the
+    /// configured TTL and max size.
     pub async fn put(&self, key: CacheKey, response: CachedResponse, cfg: &CacheConfig) {
         if !cfg.enabled {
             return;
         }
+
         let ttl = cfg.ttl.unwrap_or(Duration::from_secs(60));
         let max_size = cfg.max_size.unwrap_or(self.default_max_size);
-        let route_id = key.route_id;
 
-        let mut stores = self.stores.write().await;
-        let store = stores
-            .entry(route_id)
-            .or_insert_with(|| LocationCache::new(ttl, max_size));
-        store.put(key, response);
+        // Get or create the per-location store. `DashMap::entry` locks only
+        // the shard containing this route_id.
+        let store = self
+            .stores
+            .entry(key.route_id)
+            .or_insert_with(|| RwLock::new(LocationCache::new(ttl, max_size)));
+
+        store.write().await.put(key, response);
     }
 
-    /// Evict stale entries across all locations.
+    /// Evict stale entries across all locations without blocking reads for
+    /// longer than a single location lock.
     pub async fn evict_stale(&self) {
-        let mut stores = self.stores.write().await;
-        for store in stores.values_mut() {
-            store.evict_stale();
+        for entry in self.stores.iter() {
+            entry.value().write().await.evict_stale();
         }
     }
 
     /// Invalidate all cache entries for a specific route.
-    pub async fn invalidate_route(&self, route_id: u64) {
-        self.stores.write().await.remove(&route_id);
+    pub fn invalidate_route(&self, route_id: u64) {
+        self.stores.remove(&route_id);
     }
 
     /// Return the total number of cached entries across all locations.
-    pub async fn total_entries(&self) -> usize {
-        self.stores
-            .read()
-            .await
-            .values()
-            .map(|s| s.entries.len())
-            .sum()
+    pub fn total_entries(&self) -> usize {
+        let mut total = 0;
+        for entry in self.stores.iter() {
+            // We use try_read to avoid blocking. During a write of a tiny
+            // location this will succeed near-instantly.
+            if let Ok(guard) = entry.value().try_read() {
+                total += guard.entries.len();
+            }
+        }
+        total
     }
 }
 
@@ -333,5 +368,63 @@ mod tests {
             .await;
 
         assert!(backend.get(&key, &cfg).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn different_locations_are_isolated() {
+        let backend = CacheBackend::new(10 * 1024 * 1024);
+        let cfg = CacheConfig::default();
+
+        let key_a = CacheKey {
+            route_id: 1,
+            method: "GET".into(),
+            uri: "/a".into(),
+        };
+        let key_b = CacheKey {
+            route_id: 2,
+            method: "GET".into(),
+            uri: "/b".into(),
+        };
+
+        backend
+            .put(
+                key_a.clone(),
+                CachedResponse {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    body: Bytes::from_static(b"a"),
+                    created_at: Instant::now(),
+                },
+                &cfg,
+            )
+            .await;
+
+        backend
+            .put(
+                key_b.clone(),
+                CachedResponse {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    body: Bytes::from_static(b"b"),
+                    created_at: Instant::now(),
+                },
+                &cfg,
+            )
+            .await;
+
+        assert_eq!(
+            backend.get(&key_a, &cfg).await.unwrap().body,
+            Bytes::from_static(b"a")
+        );
+        assert_eq!(
+            backend.get(&key_b, &cfg).await.unwrap().body,
+            Bytes::from_static(b"b")
+        );
+        assert_eq!(backend.total_entries(), 2);
+
+        backend.invalidate_route(1);
+        assert!(backend.get(&key_a, &cfg).await.is_none());
+        assert!(backend.get(&key_b, &cfg).await.is_some());
+        assert_eq!(backend.total_entries(), 1);
     }
 }
