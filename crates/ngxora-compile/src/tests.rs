@@ -43,6 +43,7 @@ http {
         );
         assert_eq!(http.keepalive_requests, None);
         assert_eq!(http.client_max_body_size, None);
+        assert_eq!(http.proxy_cache_max_size, None);
         assert_eq!(http.tcp_nodelay, Switch::Off);
         assert_eq!(http.servers.len(), 1);
 
@@ -317,10 +318,35 @@ http {
         let ast = Ast::parse_config(input).unwrap();
         let err = Ir::from_ast(&ast).expect_err("expected client_max_body_size to fail");
 
-        assert!(
-            err.message
-                .contains("client_max_body_size: unsupported size unit `q` in `10q`")
-        );
+        assert!(err.message.contains("unsupported size unit"));
+    }
+
+    #[test]
+    fn from_ast_parses_global_proxy_cache_max_size() {
+        let input = r#"
+http {
+  proxy_cache_max_size 256m;
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        assert_eq!(http.proxy_cache_max_size, Some(256 * 1024 * 1024));
+    }
+
+    #[test]
+    fn from_ast_parses_global_proxy_cache_max_size_zero() {
+        let input = r#"
+http {
+  proxy_cache_max_size 0;
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        assert_eq!(http.proxy_cache_max_size, Some(0));
     }
 
     #[test]

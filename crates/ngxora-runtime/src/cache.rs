@@ -110,7 +110,7 @@ use std::collections::HashMap;
 /// one location never block reads from another.
 pub struct CacheBackend {
     stores: DashMap<u64, RwLock<LocationCache>>,
-    default_max_size: u64,
+    default_max_size: AtomicU64,
 }
 
 impl CacheBackend {
@@ -118,8 +118,14 @@ impl CacheBackend {
     pub fn new(default_max_size: u64) -> Self {
         Self {
             stores: DashMap::new(),
-            default_max_size,
+            default_max_size: AtomicU64::new(default_max_size),
         }
+    }
+
+    /// Update the fallback max size used when a location doesn't specify its
+    /// own `proxy_cache_max_size`. Safe to call at any time.
+    pub fn set_default_max_size(&self, size: u64) {
+        self.default_max_size.store(size, Ordering::Relaxed);
     }
 
     /// Look up a cached response for the given key and config.
@@ -148,7 +154,9 @@ impl CacheBackend {
         }
 
         let ttl = cfg.ttl.unwrap_or(Duration::from_secs(60));
-        let max_size = cfg.max_size.unwrap_or(self.default_max_size);
+        let max_size = cfg
+            .max_size
+            .unwrap_or(self.default_max_size.load(Ordering::Relaxed));
 
         // Get or create the per-location store. `DashMap::entry` locks only
         // the shard containing this route_id.

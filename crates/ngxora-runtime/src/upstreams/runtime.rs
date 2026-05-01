@@ -706,6 +706,12 @@ impl ProxyHttp for DynamicProxy {
         ctx.client_max_body_size = snapshot.router.http_options.client_max_body_size;
         ctx.received_body_bytes = 0;
 
+        // Apply global proxy_cache_max_size from config (once per snapshot
+        // change — set_default_max_size is a relaxed atomic store).
+        if let Some(global_size) = snapshot.router.http_options.proxy_cache_max_size {
+            self.cache_backend.set_default_max_size(global_size);
+        }
+
         if restrict_client_max_body_size(session, ctx).await? {
             return Ok(true);
         }

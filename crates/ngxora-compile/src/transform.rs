@@ -154,6 +154,11 @@ fn apply_http_directive(http: &mut Http, d: &Directive) -> Result<(), LowerErr> 
             http.allow_connect_method_proxying = get_directive_switch(d)?
         }
         consts::H2C => http.h2c = get_directive_switch(d)?,
+        consts::PROXY_CACHE_MAX_SIZE => {
+            let raw = parse_exactly_one_argument(&d.args, consts::PROXY_CACHE_MAX_SIZE)?;
+            http.proxy_cache_max_size =
+                Some(parse_size_literal(&raw, consts::PROXY_CACHE_MAX_SIZE)?);
+        }
 
         _ => {
             return Err(LowerErr {

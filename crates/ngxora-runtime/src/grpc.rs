@@ -256,6 +256,7 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
         tcp_nodelay: switch_from_bool(options.tcp_nodelay),
         allow_connect_method_proxying: switch_from_bool(options.allow_connect_method_proxying),
         h2c: switch_from_bool(options.h2c),
+        proxy_cache_max_size: none_if_zero_u64(options.proxy_cache_max_size_bytes),
     })
 }
 
@@ -946,6 +947,7 @@ fn proto_http_options_from_runtime(options: &HttpRuntimeOptions) -> ProtoHttpOpt
         allow_connect_method_proxying: options.allow_connect_method_proxying,
         h2c: options.h2c,
         client_max_body_size_bytes: options.client_max_body_size.unwrap_or(0),
+        proxy_cache_max_size_bytes: options.proxy_cache_max_size.unwrap_or(0),
     }
 }
 

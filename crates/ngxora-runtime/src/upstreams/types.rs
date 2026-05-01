@@ -218,6 +218,7 @@ pub struct HttpRuntimeOptions {
     pub downstream_keepalive_timeout: Option<u64>,
     pub keepalive_requests: Option<u32>,
     pub client_max_body_size: Option<u64>,
+    pub proxy_cache_max_size: Option<u64>,
     pub tcp_nodelay: bool,
     pub allow_connect_method_proxying: bool,
     pub h2c: bool,
