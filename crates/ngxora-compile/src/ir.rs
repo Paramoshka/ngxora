@@ -197,6 +197,7 @@ pub struct Location {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CacheConfig {
+    pub enabled: bool,
     pub max_size: Option<u64>,
     pub ttl: Option<Duration>,
     pub stale_if_error: Option<Duration>,
@@ -208,6 +209,7 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             max_size: None,
             ttl: Some(Duration::from_secs(60)),
             stale_if_error: None,

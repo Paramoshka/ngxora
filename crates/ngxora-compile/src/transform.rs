@@ -8,9 +8,9 @@ use url::Url;
 use crate::{
     consts,
     ir::{
-        Http, Ir, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher,
-        PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
-        TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
+        CacheConfig, Http, Ir, KeepaliveTimeout, Listen, Location, LocationDirective,
+        LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity,
+        TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
         UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
     },
 };
@@ -583,13 +583,13 @@ fn set_once<T>(slot: &mut Option<T>, value: T, directive: &str) -> Result<(), Lo
 
 fn lower_location(block: &Block) -> Result<Location, LowerErr> {
     let matcher = parse_location_matcher(&block.args)?;
-    let (directives, plugins) = parse_location_contents(&block.children)?;
+    let (directives, plugins, cache) = parse_location_contents(&block.children)?;
 
     Ok(Location {
         matcher,
         directives,
         plugins,
-        cache: None,
+        cache,
     })
 }
 
@@ -623,22 +623,186 @@ fn parse_location_matcher(args: &[String]) -> Result<LocationMatcher, LowerErr> 
 
 fn parse_location_contents(
     nodes: &[Node],
-) -> Result<(Vec<LocationDirective>, Vec<PluginSpec>), LowerErr> {
+) -> Result<(Vec<LocationDirective>, Vec<PluginSpec>, Option<CacheConfig>), LowerErr> {
     let mut directives: Vec<LocationDirective> = Vec::new();
     let mut plugins: Vec<PluginSpec> = Vec::new();
+    let mut cache: Option<CacheConfig> = None;
     for node in nodes {
         match node {
             Node::Directive(directive) => {
+                if let Some(cache_field) = apply_cache_directive(directive, cache.as_ref())? {
+                    if cache.replace(cache_field).is_some() {
+                        return Err(LowerErr {
+                            message: "duplicate proxy_cache directive in location".into(),
+                        });
+                    }
+                    continue;
+                }
                 let location_directive = apply_location_directive(directive)?;
                 directives.push(location_directive);
             }
             Node::Block(block) => {
-                plugins.push(parse_location_plugin_block(block)?);
+                if block.name.as_str() == consts::PROXY_CACHE {
+                    if cache.is_some() {
+                        return Err(LowerErr {
+                            message: "duplicate proxy_cache block in location".into(),
+                        });
+                    }
+                    cache = Some(parse_proxy_cache_block(block)?);
+                } else {
+                    plugins.push(parse_location_plugin_block(block)?);
+                }
             }
         }
     }
 
-    Ok((directives, plugins))
+    Ok((directives, plugins, cache))
+}
+
+fn apply_cache_directive(
+    directive: &Directive,
+    existing: Option<&CacheConfig>,
+) -> Result<Option<CacheConfig>, LowerErr> {
+    use crate::ir::CacheKeyMode;
+
+    match directive.name.as_str() {
+        consts::PROXY_CACHE => match directive.args.as_slice() {
+            [value] if value == "on" || value == "off" => {
+                if value == "off" {
+                    if existing.is_some() {
+                        return Err(LowerErr {
+                            message: "proxy_cache off cannot be used with other cache directives"
+                                .into(),
+                        });
+                    }
+                    // off = no cache for this location, represented as None
+                    // but we keep it as a disabled CacheConfig to distinguish from "not configured"
+                    return Ok(Some(CacheConfig {
+                        enabled: false,
+                        ..CacheConfig::default()
+                    }));
+                }
+                // "on" — keep the defaults, just enable
+                Ok(Some(CacheConfig::default()))
+            }
+            [] => Ok(Some(CacheConfig::default())),
+            _ => Err(LowerErr {
+                message: format!(
+                    "proxy_cache: expected 'on' or 'off', got {:?}",
+                    directive.args
+                ),
+            }),
+        },
+        consts::PROXY_CACHE_TTL => {
+            let ttl = parse_single_duration_directive(&directive.args, consts::PROXY_CACHE_TTL)?;
+            Ok(existing.map(|c| CacheConfig {
+                ttl: Some(ttl),
+                ..c.clone()
+            }))
+        }
+        consts::PROXY_CACHE_STALE_IF_ERROR => {
+            let duration = parse_single_duration_directive(
+                &directive.args,
+                consts::PROXY_CACHE_STALE_IF_ERROR,
+            )?;
+            Ok(existing.map(|c| CacheConfig {
+                stale_if_error: Some(duration),
+                ..c.clone()
+            }))
+        }
+        consts::PROXY_CACHE_KEY => match directive.args.as_slice() {
+            [mode] => {
+                let mode = match mode.as_str() {
+                    "uri" => CacheKeyMode::Uri,
+                    "uri_and_method" => CacheKeyMode::UriAndMethod,
+                    "normalized_uri" => CacheKeyMode::NormalizedUri,
+                    _ => {
+                        return Err(LowerErr {
+                            message: format!(
+                                "proxy_cache_key: expected uri, uri_and_method, or normalized_uri, got {mode}"
+                            ),
+                        });
+                    }
+                };
+                Ok(existing.map(|c| CacheConfig {
+                    cache_key: mode,
+                    ..c.clone()
+                }))
+            }
+            [] => Err(LowerErr {
+                message: "proxy_cache_key: expected argument".into(),
+            }),
+            _ => Err(LowerErr {
+                message: "proxy_cache_key: expected exactly 1 argument".into(),
+            }),
+        },
+        consts::PROXY_CACHE_MIN_USES => {
+            let min = parse_positive_usize(&directive.args, consts::PROXY_CACHE_MIN_USES)?;
+            Ok(existing.map(|c| CacheConfig {
+                min_uses: Some(min),
+                ..c.clone()
+            }))
+        }
+        consts::PROXY_CACHE_VALID => {
+            let statuses: Vec<u16> = directive
+                .args
+                .iter()
+                .map(|s| {
+                    s.parse::<u16>().map_err(|_| LowerErr {
+                        message: format!("proxy_cache_valid: invalid status code `{s}`"),
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            if statuses.is_empty() {
+                return Err(LowerErr {
+                    message: "proxy_cache_valid: expected at least one status code".into(),
+                });
+            }
+            Ok(existing.map(|c| CacheConfig {
+                valid_statuses: statuses,
+                ..c.clone()
+            }))
+        }
+        consts::PROXY_CACHE_MAX_SIZE => {
+            let raw = parse_exactly_one_argument(&directive.args, consts::PROXY_CACHE_MAX_SIZE)?;
+            let size = parse_size_literal(&raw, consts::PROXY_CACHE_MAX_SIZE)?;
+            Ok(existing.map(|c| CacheConfig {
+                max_size: Some(size),
+                ..c.clone()
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn parse_proxy_cache_block(block: &Block) -> Result<CacheConfig, LowerErr> {
+    if !block.args.is_empty() {
+        return Err(LowerErr {
+            message: "proxy_cache block does not accept arguments".into(),
+        });
+    }
+
+    let mut cache = CacheConfig::default();
+
+    for child in &block.children {
+        match child {
+            Node::Directive(directive) => {
+                if let Some(updated) = apply_cache_directive(directive, Some(&cache))? {
+                    cache = updated;
+                }
+            }
+            Node::Block(nested) => {
+                return Err(LowerErr {
+                    message: format!(
+                        "proxy_cache block: nested blocks are not supported: {}",
+                        nested.name
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(cache)
 }
 
 fn parse_upstream_server(args: &[String]) -> Result<UpstreamServer, LowerErr> {

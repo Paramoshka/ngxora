@@ -65,6 +65,7 @@ fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
         upstream_protocol: None,
         upstream_ssl_options: UpstreamSslOptions::default(),
         plugins: Vec::<PluginSpec>::new(),
+        cache: None,
     }
 }
 

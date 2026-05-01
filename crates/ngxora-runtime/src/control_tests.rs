@@ -49,6 +49,7 @@ fn router_with_route_plugin(port: u16, plugin_name: &str) -> CompiledRouter {
             name: plugin_name.into(),
             config: Default::default(),
         }],
+        cache: None,
     };
 
     CompiledRouter {

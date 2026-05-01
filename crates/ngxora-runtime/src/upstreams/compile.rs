@@ -462,6 +462,7 @@ fn compile_location(
         upstream_protocol,
         upstream_ssl_options: compile_upstream_ssl_options(location)?,
         plugins: location.plugins.clone(),
+        cache: location.cache.clone(),
     };
     *next_route_id += 1;
     Ok(Some(compiled))
