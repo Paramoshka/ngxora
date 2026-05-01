@@ -397,6 +397,7 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
             .iter()
             .map(plugin_spec_from_proto)
             .collect::<Result<Vec<_>, _>>()?,
+        cache: None,
     })
 }
 

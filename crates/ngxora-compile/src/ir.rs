@@ -192,6 +192,38 @@ pub struct Location {
     pub matcher: LocationMatcher,
     pub directives: Vec<LocationDirective>, // proxy_pass, root, try_files...
     pub plugins: Vec<PluginSpec>,
+    pub cache: Option<CacheConfig>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CacheConfig {
+    pub max_size: Option<u64>,
+    pub ttl: Option<Duration>,
+    pub stale_if_error: Option<Duration>,
+    pub cache_key: CacheKeyMode,
+    pub min_uses: Option<usize>,
+    pub valid_statuses: Vec<u16>,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            max_size: None,
+            ttl: Some(Duration::from_secs(60)),
+            stale_if_error: None,
+            cache_key: CacheKeyMode::default(),
+            min_uses: None,
+            valid_statuses: vec![200, 301, 404],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+pub enum CacheKeyMode {
+    #[default]
+    Uri,
+    UriAndMethod,
+    NormalizedUri,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]

@@ -338,6 +338,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                     }),
                 ],
                 plugins: test_route_plugins(),
+                cache: None,
             }],
             listens: vec![Listen {
                 addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),

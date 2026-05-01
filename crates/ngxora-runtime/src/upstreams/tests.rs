@@ -248,6 +248,7 @@ fn compiled_router_rejects_invalid_location_regex() {
                     "http://127.0.0.1:8080".parse().unwrap(),
                 ))],
                 plugins: Vec::new(),
+                cache: None,
             }],
             ..Server::default()
         }],
@@ -277,6 +278,7 @@ fn compiled_router_parses_proxy_timeouts() {
                     )),
                 ],
                 plugins: Vec::new(),
+                cache: None,
             }],
             ..Server::default()
         }],
@@ -323,6 +325,7 @@ fn compiled_router_parses_proxy_ssl_options() {
                     )),
                 ],
                 plugins: Vec::new(),
+                cache: None,
             }],
             ..Server::default()
         }],
@@ -366,6 +369,7 @@ fn compiled_router_parses_proxy_upstream_protocol() {
                     )),
                 ],
                 plugins: Vec::new(),
+                cache: None,
             }],
             ..Server::default()
         }],
@@ -403,6 +407,7 @@ fn compiled_router_rejects_h2_without_tls_upstream() {
                     )),
                 ],
                 plugins: Vec::new(),
+                cache: None,
             }],
             ..Server::default()
         }],
@@ -430,6 +435,7 @@ fn compiled_router_rejects_h2c_with_tls_upstream() {
                     )),
                 ],
                 plugins: Vec::new(),
+                cache: None,
             }],
             ..Server::default()
         }],
@@ -477,6 +483,7 @@ fn apply_upstream_ssl_options_sets_trusted_ca() {
                     )),
                 ],
                 plugins: Vec::new(),
+                cache: None,
             }],
             ..Server::default()
         }],
@@ -551,6 +558,7 @@ fn compiled_router_maps_named_upstream_groups() {
                     "http://backend".parse().unwrap(),
                 ))],
                 plugins: Vec::new(),
+                cache: None,
             }],
             ..Server::default()
         }],
@@ -834,6 +842,7 @@ fn compiled_router_preserves_location_plugins() {
                         }
                     }),
                 }],
+                cache: None,
             }],
             ..Server::default()
         }],

@@ -589,6 +589,7 @@ fn lower_location(block: &Block) -> Result<Location, LowerErr> {
         matcher,
         directives,
         plugins,
+        cache: None,
     })
 }
 
