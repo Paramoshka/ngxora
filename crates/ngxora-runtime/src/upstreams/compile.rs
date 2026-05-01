@@ -21,6 +21,7 @@ impl CompiledRouter {
                 ),
                 keepalive_requests: http.keepalive_requests,
                 client_max_body_size: http.client_max_body_size,
+                proxy_cache_max_size: http.proxy_cache_max_size,
                 tcp_nodelay: matches!(http.tcp_nodelay, Switch::On),
                 allow_connect_method_proxying: matches!(
                     http.allow_connect_method_proxying,
@@ -462,6 +463,7 @@ fn compile_location(
         upstream_protocol,
         upstream_ssl_options: compile_upstream_ssl_options(location)?,
         plugins: location.plugins.clone(),
+        cache: location.cache.clone(),
     };
     *next_route_id += 1;
     Ok(Some(compiled))

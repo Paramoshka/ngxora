@@ -20,6 +20,8 @@ For `gRPC ApplySnapshot` reload semantics, see [docs/README.md](./README.md).
   Enables or disables cleartext HTTP/2 handling at the service level.
 - `tcp_nodelay on|off;`
   Parsed and stored in runtime config, but not yet enforced on downstream sockets.
+- `proxy_cache_max_size <size>;`
+  Global default for per-location cache size. Overridden by `proxy_cache_max_size` in a `proxy_cache { ... }` block. Default if omitted: `50m`. Supports size suffixes: `k`/`K`, `m`/`M`, `g`/`G`.
 
 ## Upstream Blocks
 
@@ -338,3 +340,71 @@ Directives:
 - `algorithm <alg>;` : (**Required**) The JWT signing algorithm.
 - `secret <value>;` : (**Required if HMAC**) The secret string for HS* algorithms.
 - `secret_file <path>;` : (**Required if RSA/EC/Ed**) The path to the public key PEM file.
+
+## Proxy Cache (Location-Level)
+
+Cache configuration is location-scoped: enable it for specific paths only.
+A location without cache directives does not cache responses.
+
+### Inline form
+
+Enable caching with defaults:
+
+```nginx
+location /api/ {
+    proxy_cache on;
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
+Explicitly disable (e.g. for realtime endpoints):
+
+```nginx
+location /realtime/ {
+    proxy_cache off;
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
+### Block form (recommended for fine-tuning)
+
+```nginx
+location /blog/ {
+    proxy_cache {
+        proxy_cache_ttl 5m;
+        proxy_cache_stale_if_error 30s;
+        proxy_cache_key normalized_uri;
+        proxy_cache_min_uses 3;
+        proxy_cache_valid 200 301 302;
+        proxy_cache_max_size 256m;
+    }
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
+### Supported cache directives
+
+| Directive | Arguments | Default | Description |
+|---|---|---|---|
+| `proxy_cache` | `on` or `off` | — | Enable/disable caching for this location. When omitted, no caching occurs. |
+| `proxy_cache_ttl` | `<duration>` | `60s` | How long a cached response stays fresh. |
+| `proxy_cache_stale_if_error` | `<duration>` | — | Serve a stale cached response if upstream returns an error (502, timeout, connection refused). Adds `X-Cache: STALE` header. Works only if the entry was previously cached (even if TTL expired). |
+| `proxy_cache_key` | `uri`, `uri_and_method`, or `normalized_uri` | `uri` | Controls how the cache key is derived from the request. |
+| `proxy_cache_min_uses` | `<count>` | — | Minimum number of requests before a response is cached (hot-entry protection). |
+| `proxy_cache_valid` | `<status>...` | `200 301 404` | HTTP status codes eligible for caching. |
+| `proxy_cache_max_size` | `<size>` | — | Per-location max cache size. Supports suffixes: `k`/`K`, `m`/`M`, `g`/`G`. |
+
+### Cache key modes
+
+| Mode | Key derivation |
+|---|---|
+| `uri` | Request URI path and query string (default). |
+| `uri_and_method` | URI + HTTP method (e.g. `GET /api/users` vs `POST /api/users`). |
+| `normalized_uri` | URI with sorted query parameters (stable keys regardless of param order). |
+
+### Notes
+
+- Cache is per-location: two locations with the same upstream do not share cache unless configured identically.
+- Cache storage is in-memory. `proxy_cache_max_size` caps memory per location.
+- `proxy_cache off` explicitly disables caching for that location (useful to override a broader config).
+- Upstream `Cache-Control: private`, `no-store`, and `Set-Cookie` may skip caching; exact behavior will be finalized during runtime implementation.

@@ -44,6 +44,7 @@ fn proto_snapshot_converts_into_runtime_router() {
             allow_connect_method_proxying: true,
             h2c: false,
             client_max_body_size_bytes: 8 * 1024 * 1024,
+            proxy_cache_max_size_bytes: 0,
         }),
         listeners: vec![proto::Listener {
             name: "edge".into(),
@@ -338,6 +339,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                     }),
                 ],
                 plugins: test_route_plugins(),
+                cache: None,
             }],
             listens: vec![Listen {
                 addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -362,6 +364,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
         tcp_nodelay: Switch::On,
         allow_connect_method_proxying: Switch::Off,
         h2c: Switch::Off,
+        proxy_cache_max_size: None,
     };
 
     CompiledRouter::from_http(&http).expect("router compiles")

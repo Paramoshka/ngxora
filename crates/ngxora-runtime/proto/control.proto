@@ -33,6 +33,7 @@ message HttpOptions {
   bool allow_connect_method_proxying = 4;
   bool h2c = 5;
   uint64 client_max_body_size_bytes = 6;
+  uint64 proxy_cache_max_size_bytes = 7;
 }
 
 message Listener {

@@ -4,13 +4,14 @@ use super::types::{
     CompiledRouter, CompiledUpstreamGroup, CompiledUpstreamServer, ListenKey, RouteTarget,
     VirtualHostRoutes,
 };
+use crate::cache::{CacheBackend, CacheKey, build_cache_key, is_cacheable};
 use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::FutureExt;
 use ngxora_compile::ir::{
-    PemSource, Switch, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamSslOptions,
-    UpstreamTimeouts,
+    CacheConfig, PemSource, Switch, UpstreamHttpProtocol, UpstreamSelectionPolicy,
+    UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::{
     HeaderMapMut, LocalResponse, PluginError, PluginFlow, PluginState, RequestCtx, ResponseCtx,
@@ -184,12 +185,20 @@ struct SelectedPeer {
 
 #[derive(Clone)]
 pub(crate) struct SelectedRoute {
+    route_id: u64,
     peer: SelectedPeer,
     upstream_timeouts: UpstreamTimeouts,
     upstream_protocol: Option<UpstreamHttpProtocol>,
     upstream_ssl_options: UpstreamSslOptions,
     upstream_trusted_ca: Option<RuntimeTrustedCa>,
     plugins: ngxora_plugin_api::PluginChain,
+    cache: Option<CacheConfig>,
+}
+
+impl SelectedRoute {
+    pub(crate) fn route_id(&self) -> u64 {
+        self.route_id
+    }
 }
 
 #[derive(Default)]
@@ -198,6 +207,10 @@ pub struct ProxyContext {
     pub(crate) plugin_state: PluginState,
     pub(crate) client_max_body_size: Option<u64>,
     pub(crate) received_body_bytes: u64,
+    pub(crate) cache_key: Option<CacheKey>,
+    pub(crate) cache_status: Option<http::StatusCode>,
+    pub(crate) cache_headers: Option<http::HeaderMap>,
+    pub(crate) response_body_buf: bytes::Bytes,
 }
 
 fn header_editor_error(action: &str, name: &http::HeaderName, err: impl Display) -> PluginError {
@@ -318,6 +331,7 @@ impl SelectedRoute {
         };
 
         Ok(Self {
+            route_id: resolved.location.route_id,
             peer,
             upstream_timeouts: resolved.location.upstream_timeouts,
             upstream_protocol: resolved.location.upstream_protocol,
@@ -337,6 +351,7 @@ impl SelectedRoute {
                 })
                 .transpose()?,
             plugins: snapshot.plugin_chain(resolved.location.route_id),
+            cache: resolved.location.cache.clone(),
         })
     }
 }
@@ -596,13 +611,56 @@ async fn write_local_response(session: &mut Session, response: LocalResponse) ->
     }
 }
 
+async fn write_cached_response(
+    session: &mut Session,
+    cached: &crate::cache::CachedResponse,
+) -> PingoraResult<()> {
+    let mut header = ResponseHeader::build(cached.status, None).map_err(|err| {
+        pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            format!("failed to build cached response header: {err}"),
+        )
+    })?;
+    for (name, value) in cached.headers.iter() {
+        header
+            .insert_header(name.clone(), value.clone())
+            .map_err(|err| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!("failed to insert cached header `{name}`: {err}"),
+                )
+            })?;
+    }
+    if cached.body.is_empty() {
+        session.write_response_header(Box::new(header), true).await
+    } else {
+        session
+            .write_response_header(Box::new(header), false)
+            .await?;
+        session
+            .write_response_body(Some(cached.body.clone()), true)
+            .await
+    }
+}
+
 pub struct DynamicProxy {
     state: Arc<RuntimeState>,
+    cache_backend: CacheBackend,
 }
 
 impl DynamicProxy {
     pub fn new(state: Arc<RuntimeState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            cache_backend: CacheBackend::new(50 * 1024 * 1024), // 50MB default
+        }
+    }
+
+    pub fn new_with_cache(state: Arc<RuntimeState>, cache_backend: CacheBackend) -> Self {
+        Self {
+            state,
+            cache_backend,
+        }
     }
 
     pub fn from_router(routing: CompiledRouter) -> Self {
@@ -648,6 +706,12 @@ impl ProxyHttp for DynamicProxy {
         ctx.client_max_body_size = snapshot.router.http_options.client_max_body_size;
         ctx.received_body_bytes = 0;
 
+        // Apply global proxy_cache_max_size from config (once per snapshot
+        // change — set_default_max_size is a relaxed atomic store).
+        if let Some(global_size) = snapshot.router.http_options.proxy_cache_max_size {
+            self.cache_backend.set_default_max_size(global_size);
+        }
+
         if restrict_client_max_body_size(session, ctx).await? {
             return Ok(true);
         }
@@ -656,6 +720,22 @@ impl ProxyHttp for DynamicProxy {
             ctx.selected = None;
             return Ok(false);
         };
+
+        // ── Cache lookup ──
+        let full_uri = session.req_header().uri.to_string();
+        if let Some(cache_cfg) = &selected.cache {
+            let cache_key = build_cache_key(
+                &session.req_header().method,
+                &full_uri,
+                selected.route_id(),
+                cache_cfg,
+            );
+            if let Some(cached) = self.cache_backend.get(&cache_key, cache_cfg).await {
+                write_cached_response(session, &cached).await?;
+                return Ok(true);
+            }
+            ctx.cache_key = Some(cache_key);
+        }
 
         let path = session.req_header().uri.path().to_string();
         let method = session.req_header().method.clone();
@@ -736,6 +816,70 @@ impl ProxyHttp for DynamicProxy {
         Ok(())
     }
 
+    /// Serve a stale cached response when upstream returns an error.
+    ///
+    /// Only activates when the location has `proxy_cache_stale_if_error`
+    /// configured and a cached entry exists (TTL is ignored for stale).
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        _error: &pingora::Error,
+        ctx: &mut Self::CTX,
+    ) -> pingora_proxy::FailToProxy
+    where
+        Self::CTX: Send + Sync,
+    {
+        let Some(selected) = ctx.selected.as_ref() else {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        };
+        let Some(cache_cfg) = selected.cache.as_ref() else {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        };
+        // stale_if_error must be explicitly configured
+        if cache_cfg.stale_if_error.is_none() {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        }
+        let Some(cache_key) = &ctx.cache_key else {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        };
+
+        let Some(mut cached) = self.cache_backend.get_stale(cache_key, cache_cfg).await else {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        };
+
+        cached.headers.insert(
+            http::HeaderName::from_static("x-cache"),
+            http::HeaderValue::from_static("STALE"),
+        );
+
+        if write_cached_response(session, &cached).await.is_err() {
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: 502,
+            };
+        }
+
+        pingora_proxy::FailToProxy {
+            can_reuse_downstream: true,
+            error_code: cached.status.as_u16(),
+        }
+    }
+
     // Response plugins run in reverse order so they behave like unwind-style
     // middleware around the upstream exchange.
     async fn response_filter(
@@ -767,6 +911,18 @@ impl ProxyHttp for DynamicProxy {
             }
         }
 
+        // ── Cache store preparation: save status & headers for response_body_filter ──
+        if let (Some(_cache_key), Some(cache_cfg)) = (&ctx.cache_key, selected.cache.as_ref()) {
+            if is_cacheable(
+                upstream_response.status,
+                &upstream_response.headers,
+                cache_cfg,
+            ) {
+                ctx.cache_status = Some(upstream_response.status);
+                ctx.cache_headers = Some(upstream_response.headers.clone());
+            }
+        }
+
         upstream_response.set_status(status).map_err(|err| {
             pingora::Error::explain(
                 pingora::ErrorType::InternalError,
@@ -774,6 +930,55 @@ impl ProxyHttp for DynamicProxy {
             )
         })?;
         Ok(())
+    }
+
+    /// Collect upstream response body chunks for later caching in `logging`.
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> PingoraResult<Option<Duration>> {
+        if let Some(chunk) = body.take() {
+            let buf = std::mem::take(&mut ctx.response_body_buf);
+            let mut combined = bytes::BytesMut::with_capacity(buf.len() + chunk.len());
+            combined.extend_from_slice(&buf);
+            combined.extend_from_slice(&chunk);
+            ctx.response_body_buf = combined.freeze();
+        }
+        Ok(None)
+    }
+
+    /// Store cacheable responses when the request completes.
+    async fn logging(
+        &self,
+        _session: &mut Session,
+        _e: Option<&pingora::Error>,
+        ctx: &mut Self::CTX,
+    ) {
+        if let (Some(cache_key), Some(cache_cfg)) = (
+            &ctx.cache_key,
+            ctx.selected.as_ref().and_then(|s| s.cache.as_ref()),
+        ) {
+            if let (Some(status), Some(headers)) = (ctx.cache_status, ctx.cache_headers.take()) {
+                if !ctx.response_body_buf.is_empty() || status.is_success() {
+                    let body = std::mem::take(&mut ctx.response_body_buf);
+                    self.cache_backend
+                        .put(
+                            cache_key.clone(),
+                            crate::cache::CachedResponse {
+                                status,
+                                headers,
+                                body,
+                                created_at: std::time::Instant::now(),
+                            },
+                            cache_cfg,
+                        )
+                        .await;
+                }
+            }
+        }
     }
 
     // Upstream selection is derived from the already resolved route; if the

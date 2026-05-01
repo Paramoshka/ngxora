@@ -149,6 +149,8 @@ impl TryFrom<&LocationMatcher> for CompiledMatcher {
     }
 }
 
+use ngxora_compile::ir::CacheConfig;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CompiledLocation {
     pub route_id: u64,
@@ -158,6 +160,7 @@ pub struct CompiledLocation {
     pub upstream_protocol: Option<UpstreamHttpProtocol>,
     pub upstream_ssl_options: UpstreamSslOptions,
     pub plugins: Vec<PluginSpec>,
+    pub cache: Option<CacheConfig>,
 }
 
 impl CompiledLocation {
@@ -215,6 +218,7 @@ pub struct HttpRuntimeOptions {
     pub downstream_keepalive_timeout: Option<u64>,
     pub keepalive_requests: Option<u32>,
     pub client_max_body_size: Option<u64>,
+    pub proxy_cache_max_size: Option<u64>,
     pub tcp_nodelay: bool,
     pub allow_connect_method_proxying: bool,
     pub h2c: bool,
