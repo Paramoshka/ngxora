@@ -34,6 +34,7 @@ tonic = { version = "0.12", default-features = false, features = ["transport", "
 tower = "0.5"
 url = "2"
 protoc-bin-vendored = "3"
+pingora-cache = "0.8.0"
 
 [dev-dependencies]
 

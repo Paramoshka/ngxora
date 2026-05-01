@@ -1500,6 +1500,7 @@ dependencies = [
  "ngxora-config",
  "ngxora-runtime",
  "pingora",
+ "pingora-cache",
  "pingora-proxy",
 ]
 
@@ -1627,6 +1628,7 @@ dependencies = [
  "ngxora-plugin-api",
  "ngxora-plugin-registry",
  "pingora",
+ "pingora-cache",
  "pingora-proxy",
  "prost",
  "protoc-bin-vendored",
