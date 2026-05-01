@@ -6,6 +6,7 @@
 //! - `server`: listener binding into Pingora services
 //! - `upstreams`: compiled routing model and request-time upstream execution
 
+pub mod cache;
 pub mod control;
 pub mod grpc;
 pub mod server;
