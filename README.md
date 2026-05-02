@@ -15,6 +15,7 @@ It aims for a simple split:
 - familiar `server` / `listen` / `location` / `proxy_pass`
 - shared `:443` listeners with SNI-based certificate selection
 - atomic route updates through runtime snapshots
+- location-level in-memory response caching with stale-on-upstream-error fallback
 - compile-time plugins for policy and request/response behavior
 - Pingora-powered data plane
 
@@ -222,7 +223,6 @@ Current shape:
 
 Later plugin roadmap:
 - `geoip`
-- `cache`
 
 Text config syntax for built-in location plugins is documented in [Config Options](./docs/config-options.md).
 

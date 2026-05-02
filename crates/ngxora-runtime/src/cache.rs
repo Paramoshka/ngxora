@@ -2,6 +2,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use http::{HeaderMap, StatusCode};
 use ngxora_compile::ir::CacheConfig;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -37,7 +38,7 @@ impl CachedResponse {
 struct LocationCache {
     ttl: Duration,
     max_size: u64,
-    current_size: AtomicU64,
+    current_size: u64,
     entries: HashMap<CacheKey, CachedResponse>,
 }
 
@@ -46,17 +47,52 @@ impl LocationCache {
         Self {
             ttl,
             max_size,
-            current_size: AtomicU64::new(0),
+            current_size: 0,
             entries: HashMap::new(),
         }
     }
 
-    fn get(&self, key: &CacheKey) -> Option<&CachedResponse> {
+    fn is_fresh(entry: &CachedResponse, ttl: Duration) -> bool {
+        entry.created_at.elapsed() < ttl
+    }
+
+    fn get(&self, key: &CacheKey, ttl: Duration) -> Option<&CachedResponse> {
         let entry = self.entries.get(key)?;
-        if entry.created_at.elapsed() >= self.ttl {
+        if !Self::is_fresh(entry, ttl) {
             return None;
         }
         Some(entry)
+    }
+
+    fn get_stale(
+        &self,
+        key: &CacheKey,
+        ttl: Duration,
+        stale_if_error: Duration,
+    ) -> Option<&CachedResponse> {
+        let entry = self.entries.get(key)?;
+        let max_stale_age = ttl.saturating_add(stale_if_error);
+        if entry.created_at.elapsed() >= max_stale_age {
+            return None;
+        }
+        Some(entry)
+    }
+
+    fn sync_limits(&mut self, ttl: Duration, max_size: u64) {
+        self.ttl = ttl;
+        self.max_size = max_size;
+        self.evict_until_within_limit();
+    }
+
+    fn evict_until_within_limit(&mut self) {
+        while self.current_size > self.max_size && !self.entries.is_empty() {
+            let Some(key) = self.entries.keys().next().cloned() else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&key) {
+                self.current_size = self.current_size.saturating_sub(evicted.estimated_size());
+            }
+        }
     }
 
     fn put(&mut self, key: CacheKey, response: CachedResponse) {
@@ -64,35 +100,33 @@ impl LocationCache {
 
         // Remove old entry for the same key first
         if let Some(old) = self.entries.remove(&key) {
-            self.current_size
-                .fetch_sub(old.estimated_size(), Ordering::Relaxed);
+            self.current_size = self.current_size.saturating_sub(old.estimated_size());
+        }
+
+        if entry_size > self.max_size {
+            return;
         }
 
         // Evict oldest entries while over capacity (simple FIFO-like eviction)
-        let mut current = self.current_size.load(Ordering::Relaxed);
-        while current + entry_size > self.max_size && !self.entries.is_empty() {
+        while self.current_size + entry_size > self.max_size && !self.entries.is_empty() {
             // Take an arbitrary key (HashMap iteration order is not guaranteed
             // FIFO, but it is deterministic and cheap)
             if let Some(stale_key) = self.entries.keys().next().cloned() {
                 if let Some(evicted) = self.entries.remove(&stale_key) {
-                    current = self
-                        .current_size
-                        .fetch_sub(evicted.estimated_size(), Ordering::Relaxed)
-                        - evicted.estimated_size();
+                    self.current_size = self.current_size.saturating_sub(evicted.estimated_size());
                 }
             }
         }
 
-        self.current_size.fetch_add(entry_size, Ordering::Relaxed);
+        self.current_size += entry_size;
         self.entries.insert(key, response);
     }
 
     fn evict_stale(&mut self) {
         let ttl = self.ttl;
         self.entries.retain(|_key, entry| {
-            if entry.created_at.elapsed() >= ttl {
-                self.current_size
-                    .fetch_sub(entry.estimated_size(), Ordering::Relaxed);
+            if !Self::is_fresh(entry, ttl) {
+                self.current_size = self.current_size.saturating_sub(entry.estimated_size());
                 false
             } else {
                 true
@@ -100,8 +134,6 @@ impl LocationCache {
         });
     }
 }
-
-use std::collections::HashMap;
 
 /// Global cache backend with sharded per-location stores.
 ///
@@ -137,9 +169,10 @@ impl CacheBackend {
             return None;
         }
 
+        let ttl = cfg.ttl.unwrap_or(Duration::from_secs(60));
         let store = self.stores.get(&key.route_id)?;
         let guard = store.read().await;
-        guard.get(key).cloned()
+        guard.get(key, ttl).cloned()
     }
 
     /// Look up a cached response **ignoring TTL** — used for stale-if-error.
@@ -150,9 +183,11 @@ impl CacheBackend {
             return None;
         }
 
+        let ttl = cfg.ttl.unwrap_or(Duration::from_secs(60));
+        let stale_if_error = cfg.stale_if_error?;
         let store = self.stores.get(&key.route_id)?;
         let guard = store.read().await;
-        guard.entries.get(key).cloned()
+        guard.get_stale(key, ttl, stale_if_error).cloned()
     }
 
     /// Store a response in the cache for the given key and config.
@@ -176,7 +211,9 @@ impl CacheBackend {
             .entry(key.route_id)
             .or_insert_with(|| RwLock::new(LocationCache::new(ttl, max_size)));
 
-        store.write().await.put(key, response);
+        let mut guard = store.write().await;
+        guard.sync_limits(ttl, max_size);
+        guard.put(key, response);
     }
 
     /// Evict stale entries across all locations without blocking reads for
@@ -445,5 +482,81 @@ mod tests {
         assert!(backend.get(&key_a, &cfg).await.is_none());
         assert!(backend.get(&key_b, &cfg).await.is_some());
         assert_eq!(backend.total_entries(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_backend_stale_if_error_respects_window() {
+        let backend = CacheBackend::new(10 * 1024 * 1024);
+        let cfg = CacheConfig {
+            ttl: Some(Duration::from_secs(60)),
+            stale_if_error: Some(Duration::from_secs(30)),
+            ..CacheConfig::default()
+        };
+        let key = CacheKey {
+            route_id: 3,
+            method: "GET".into(),
+            uri: "/stale".into(),
+        };
+
+        backend
+            .put(
+                key.clone(),
+                CachedResponse {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    body: Bytes::from_static(b"stale"),
+                    created_at: Instant::now() - Duration::from_secs(70),
+                },
+                &cfg,
+            )
+            .await;
+
+        assert!(backend.get(&key, &cfg).await.is_none());
+        assert!(backend.get_stale(&key, &cfg).await.is_some());
+
+        backend
+            .put(
+                key.clone(),
+                CachedResponse {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    body: Bytes::from_static(b"expired"),
+                    created_at: Instant::now() - Duration::from_secs(91),
+                },
+                &cfg,
+            )
+            .await;
+
+        assert!(backend.get_stale(&key, &cfg).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cache_backend_rejects_entries_larger_than_max_size() {
+        let backend = CacheBackend::new(1024);
+        let cfg = CacheConfig {
+            max_size: Some(128),
+            ..CacheConfig::default()
+        };
+        let key = CacheKey {
+            route_id: 4,
+            method: "GET".into(),
+            uri: "/oversized".into(),
+        };
+
+        backend
+            .put(
+                key.clone(),
+                CachedResponse {
+                    status: StatusCode::OK,
+                    headers: HeaderMap::new(),
+                    body: Bytes::from(vec![b'x'; 1024]),
+                    created_at: Instant::now(),
+                },
+                &cfg,
+            )
+            .await;
+
+        assert!(backend.get(&key, &cfg).await.is_none());
+        assert_eq!(backend.total_entries(), 0);
     }
 }

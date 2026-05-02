@@ -911,24 +911,22 @@ impl ProxyHttp for DynamicProxy {
             }
         }
 
-        // ── Cache store preparation: save status & headers for response_body_filter ──
-        if let (Some(_cache_key), Some(cache_cfg)) = (&ctx.cache_key, selected.cache.as_ref()) {
-            if is_cacheable(
-                upstream_response.status,
-                &upstream_response.headers,
-                cache_cfg,
-            ) {
-                ctx.cache_status = Some(upstream_response.status);
-                ctx.cache_headers = Some(upstream_response.headers.clone());
-            }
-        }
-
         upstream_response.set_status(status).map_err(|err| {
             pingora::Error::explain(
                 pingora::ErrorType::InternalError,
                 format!("failed to update response status from plugin chain: {err}"),
             )
         })?;
+
+        // Cacheability must be evaluated against the final response that the
+        // client will actually receive after plugins mutate headers/status.
+        if let (Some(_cache_key), Some(cache_cfg)) = (&ctx.cache_key, selected.cache.as_ref()) {
+            if is_cacheable(status, &upstream_response.headers, cache_cfg) {
+                ctx.cache_status = Some(status);
+                ctx.cache_headers = Some(upstream_response.headers.clone());
+            }
+        }
+
         Ok(())
     }
 
@@ -940,11 +938,15 @@ impl ProxyHttp for DynamicProxy {
         _end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> PingoraResult<Option<Duration>> {
-        if let Some(chunk) = body.take() {
+        if ctx.cache_headers.is_none() {
+            return Ok(None);
+        }
+
+        if let Some(chunk) = body.as_ref() {
             let buf = std::mem::take(&mut ctx.response_body_buf);
             let mut combined = bytes::BytesMut::with_capacity(buf.len() + chunk.len());
             combined.extend_from_slice(&buf);
-            combined.extend_from_slice(&chunk);
+            combined.extend_from_slice(chunk);
             ctx.response_body_buf = combined.freeze();
         }
         Ok(None)
@@ -954,29 +956,34 @@ impl ProxyHttp for DynamicProxy {
     async fn logging(
         &self,
         _session: &mut Session,
-        _e: Option<&pingora::Error>,
+        e: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
+        if e.is_some() {
+            ctx.cache_headers = None;
+            ctx.cache_status = None;
+            ctx.response_body_buf = Bytes::new();
+            return;
+        }
+
         if let (Some(cache_key), Some(cache_cfg)) = (
             &ctx.cache_key,
             ctx.selected.as_ref().and_then(|s| s.cache.as_ref()),
         ) {
             if let (Some(status), Some(headers)) = (ctx.cache_status, ctx.cache_headers.take()) {
-                if !ctx.response_body_buf.is_empty() || status.is_success() {
-                    let body = std::mem::take(&mut ctx.response_body_buf);
-                    self.cache_backend
-                        .put(
-                            cache_key.clone(),
-                            crate::cache::CachedResponse {
-                                status,
-                                headers,
-                                body,
-                                created_at: std::time::Instant::now(),
-                            },
-                            cache_cfg,
-                        )
-                        .await;
-                }
+                let body = std::mem::take(&mut ctx.response_body_buf);
+                self.cache_backend
+                    .put(
+                        cache_key.clone(),
+                        crate::cache::CachedResponse {
+                            status,
+                            headers,
+                            body,
+                            created_at: std::time::Instant::now(),
+                        },
+                        cache_cfg,
+                    )
+                    .await;
             }
         }
     }
@@ -1016,5 +1023,182 @@ impl ProxyHttp for DynamicProxy {
         );
 
         Ok(Box::new(peer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::StatusCode;
+    use ngxora_plugin_api::{HttpPlugin, PluginFlow, async_trait, empty_plugin_chain};
+    use std::sync::Arc;
+    use tokio::io::{AsyncWriteExt, duplex};
+
+    async fn test_session() -> Session {
+        let (mut client, server) = duplex(1024);
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("write request");
+
+        let mut session = Session::new_h1(Box::new(server));
+        session.read_request().await.expect("read request");
+        session
+    }
+
+    fn cached_route(cache: CacheConfig, plugins: ngxora_plugin_api::PluginChain) -> SelectedRoute {
+        SelectedRoute {
+            route_id: 1,
+            peer: SelectedPeer {
+                host: "127.0.0.1".into(),
+                port: 8080,
+                tls: false,
+                sni: String::new(),
+            },
+            upstream_timeouts: UpstreamTimeouts::default(),
+            upstream_protocol: None,
+            upstream_ssl_options: UpstreamSslOptions::default(),
+            upstream_trusted_ca: None,
+            plugins,
+            cache: Some(cache),
+        }
+    }
+
+    struct StatusRewritePlugin {
+        status: StatusCode,
+    }
+
+    #[async_trait]
+    impl HttpPlugin for StatusRewritePlugin {
+        fn name(&self) -> &'static str {
+            "status-rewrite"
+        }
+
+        async fn on_response(&self, ctx: &mut ResponseCtx<'_>) -> Result<PluginFlow, PluginError> {
+            *ctx.status = self.status;
+            Ok(PluginFlow::Continue)
+        }
+    }
+
+    #[tokio::test]
+    async fn response_body_filter_preserves_downstream_body() {
+        let proxy = DynamicProxy::from_router(CompiledRouter::default());
+        let mut session = test_session().await;
+        let mut ctx = ProxyContext {
+            cache_headers: Some(http::HeaderMap::new()),
+            ..Default::default()
+        };
+        let original = Bytes::from_static(b"hello");
+        let mut body = Some(original.clone());
+
+        ProxyHttp::response_body_filter(&proxy, &mut session, &mut body, false, &mut ctx)
+            .expect("body filter succeeds");
+
+        assert_eq!(body, Some(original.clone()));
+        assert_eq!(ctx.response_body_buf, original);
+    }
+
+    #[tokio::test]
+    async fn response_filter_uses_final_plugin_status_for_cacheability() {
+        let proxy = DynamicProxy::from_router(CompiledRouter::default());
+        let mut session = test_session().await;
+        let cache_cfg = CacheConfig {
+            valid_statuses: vec![302],
+            ..CacheConfig::default()
+        };
+        let plugins: ngxora_plugin_api::PluginChain =
+            vec![Arc::new(StatusRewritePlugin {
+                status: StatusCode::FOUND,
+            }) as Arc<dyn HttpPlugin>]
+            .into();
+        let mut ctx = ProxyContext {
+            selected: Some(cached_route(cache_cfg.clone(), plugins)),
+            cache_key: Some(CacheKey {
+                route_id: 1,
+                method: "GET".into(),
+                uri: "/".into(),
+            }),
+            ..Default::default()
+        };
+        let mut upstream_response =
+            ResponseHeader::build(StatusCode::OK, None).expect("build response");
+
+        ProxyHttp::response_filter(&proxy, &mut session, &mut upstream_response, &mut ctx)
+            .await
+            .expect("response filter succeeds");
+
+        assert_eq!(upstream_response.status, StatusCode::FOUND);
+        assert_eq!(ctx.cache_status, Some(StatusCode::FOUND));
+        assert!(ctx.cache_headers.is_some());
+    }
+
+    #[tokio::test]
+    async fn logging_skips_cache_write_after_error() {
+        let cache_backend = CacheBackend::new(10 * 1024 * 1024);
+        let proxy = DynamicProxy::new_with_cache(
+            Arc::new(RuntimeState::bootstrap(CompiledRouter::default())),
+            cache_backend,
+        );
+        let mut session = test_session().await;
+        let cache_cfg = CacheConfig::default();
+        let key = CacheKey {
+            route_id: 1,
+            method: "GET".into(),
+            uri: "/partial".into(),
+        };
+        let mut ctx = ProxyContext {
+            selected: Some(cached_route(cache_cfg.clone(), empty_plugin_chain())),
+            cache_key: Some(key.clone()),
+            cache_status: Some(StatusCode::OK),
+            cache_headers: Some(http::HeaderMap::new()),
+            response_body_buf: Bytes::from_static(b"partial"),
+            ..Default::default()
+        };
+        let err = pingora::Error::explain(pingora::ErrorType::InternalError, "boom");
+
+        ProxyHttp::logging(&proxy, &mut session, Some(err.as_ref()), &mut ctx).await;
+
+        assert!(proxy.cache_backend.get(&key, &cache_cfg).await.is_none());
+        assert_eq!(proxy.cache_backend.total_entries(), 0);
+        assert!(ctx.response_body_buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn logging_caches_empty_cacheable_response() {
+        let cache_backend = CacheBackend::new(10 * 1024 * 1024);
+        let proxy = DynamicProxy::new_with_cache(
+            Arc::new(RuntimeState::bootstrap(CompiledRouter::default())),
+            cache_backend,
+        );
+        let mut session = test_session().await;
+        let cache_cfg = CacheConfig {
+            valid_statuses: vec![301],
+            ..CacheConfig::default()
+        };
+        let key = CacheKey {
+            route_id: 1,
+            method: "GET".into(),
+            uri: "/redirect".into(),
+        };
+        let mut ctx = ProxyContext {
+            selected: Some(cached_route(cache_cfg.clone(), empty_plugin_chain())),
+            cache_key: Some(key.clone()),
+            ..Default::default()
+        };
+        let mut upstream_response =
+            ResponseHeader::build(StatusCode::MOVED_PERMANENTLY, None).expect("build response");
+
+        ProxyHttp::response_filter(&proxy, &mut session, &mut upstream_response, &mut ctx)
+            .await
+            .expect("response filter succeeds");
+        ProxyHttp::logging(&proxy, &mut session, None, &mut ctx).await;
+
+        let cached = proxy
+            .cache_backend
+            .get(&key, &cache_cfg)
+            .await
+            .expect("empty redirect should be cached");
+        assert_eq!(cached.status, StatusCode::MOVED_PERMANENTLY);
+        assert!(cached.body.is_empty());
     }
 }

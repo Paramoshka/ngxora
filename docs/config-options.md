@@ -374,7 +374,6 @@ location /blog/ {
         proxy_cache_ttl 5m;
         proxy_cache_stale_if_error 30s;
         proxy_cache_key normalized_uri;
-        proxy_cache_min_uses 3;
         proxy_cache_valid 200 301 302;
         proxy_cache_max_size 256m;
     }
@@ -388,9 +387,9 @@ location /blog/ {
 |---|---|---|---|
 | `proxy_cache` | `on` or `off` | — | Enable/disable caching for this location. When omitted, no caching occurs. |
 | `proxy_cache_ttl` | `<duration>` | `60s` | How long a cached response stays fresh. |
-| `proxy_cache_stale_if_error` | `<duration>` | — | Serve a stale cached response if upstream returns an error (502, timeout, connection refused). Adds `X-Cache: STALE` header. Works only if the entry was previously cached (even if TTL expired). |
+| `proxy_cache_stale_if_error` | `<duration>` | — | Serve a stale cached response if proxying to the upstream fails. Adds `X-Cache: STALE`. The cached entry is eligible only while its age is less than `proxy_cache_ttl + proxy_cache_stale_if_error`. |
 | `proxy_cache_key` | `uri`, `uri_and_method`, or `normalized_uri` | `uri` | Controls how the cache key is derived from the request. |
-| `proxy_cache_min_uses` | `<count>` | — | Minimum number of requests before a response is cached (hot-entry protection). |
+| `proxy_cache_min_uses` | `<count>` | — | Parsed into config snapshots, but runtime enforcement is not implemented yet. |
 | `proxy_cache_valid` | `<status>...` | `200 301 404` | HTTP status codes eligible for caching. |
 | `proxy_cache_max_size` | `<size>` | — | Per-location max cache size. Supports suffixes: `k`/`K`, `m`/`M`, `g`/`G`. |
 
@@ -406,5 +405,7 @@ location /blog/ {
 
 - Cache is per-location: two locations with the same upstream do not share cache unless configured identically.
 - Cache storage is in-memory. `proxy_cache_max_size` caps memory per location.
+- Responses larger than the configured per-location max size are not cached.
 - `proxy_cache off` explicitly disables caching for that location (useful to override a broader config).
-- Upstream `Cache-Control: private`, `no-store`, and `Set-Cookie` may skip caching; exact behavior will be finalized during runtime implementation.
+- Responses with `Cache-Control: private`, `Cache-Control: no-store`, or `Set-Cookie` are not cached.
+- `proxy_cache_valid` applies to the final response status after response plugins run.
