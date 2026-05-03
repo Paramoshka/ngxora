@@ -11,65 +11,120 @@ The rule is simple:
 - one dataplane behavior
 - two ways to feed it
 
-If a feature is meant to be supported from both file config and gRPC snapshots, it should be implemented in both adapters against the same runtime model.
+## Legend
 
-## Core Option Checklist
+- ✅ Done — both adapters + tests + docs
+- 🟡 Partial — text config works, gRPC path missing or stub
+- 🔧 Planned — not yet implemented, needed for production
+- 💤 Deferred — nice to have, not blocking
 
-Use this for options like `proxy_write_timeout`, `client_max_body_size`, `proxy_ssl_verify`, or upstream behavior flags.
+## Core Proxy
 
-1. Add parser constants and syntax support in the text config layer.
-2. Add a typed field in IR, not a raw string.
-3. Carry the field into the compiled/runtime model.
-4. Apply the behavior in the dataplane.
-5. Add the field to `control.proto` if the feature should be visible to the agent/control plane.
-6. Implement `proto -> runtime` conversion.
-7. Implement `runtime -> proto` conversion for `GetSnapshot`.
-8. Update reload semantics:
-   `Live`, `Restart required`, or `Not implemented`.
-9. Add text config tests.
-10. Add gRPC conversion or control-plane tests.
-11. Update examples and docs.
+| Feature | Status | Text Config | gRPC | Reload | Notes |
+|---|---|---|---|---|---|
+| HTTP/1.1 reverse proxy | ✅ | `proxy_pass http://...` | ✅ | Live | Pingora dataplane |
+| HTTPS/TLS reverse proxy | ✅ | `proxy_pass https://...` | ✅ | Live | SNI + upstream TLS |
+| HTTP/2 downstream (TLS) | ✅ | `listen ... http2` | Bootstrap | Restart | ALPN negotiation |
+| HTTP/2 cleartext (h2c) | ✅ | `h2c on;` | Bootstrap | Restart | |
+| Upstream groups | ✅ | `upstream {}` | ✅ | Live | Round-robin, random |
+| Upstream health checks | ✅ | `health_check {}` | ✅ | Live | TCP + HTTP |
+| WebSocket proxying | ✅ | `proxy_pass` | ✅ | Live | Auto upgrade, no extra config |
+| gRPC proxying (h2/h2c) | ✅ | `proxy_upstream_protocol` | ✅ | Live | |
+| **Redirect** `return <status> <url>` | ✅ | `return 301 https://...` | 🟡 | Live | gRPC path is a stub |
+| `try_files` | 🟡 | parsed only | ❌ | — | Runtime NOP |
+| `root` | 🟡 | parsed only | ❌ | — | Runtime NOP |
 
-## Plugin Checklist
+## TLS
 
-Use this for plugins like `headers`, `basic_auth`, `cors`, or `rate_limit`.
+| Feature | Status | Text Config | gRPC | Reload | Notes |
+|---|---|---|---|---|---|
+| Downstream TLS | ✅ | `listen ... ssl` | Bootstrap | Restart | |
+| SNI certificate selection | ✅ | `ssl_certificate{,_key}` | Bootstrap | Restart | Named + default |
+| TLS protocol bounds | ✅ | `ssl_protocols` | Bootstrap | Restart | TLSv1–TLSv1.3 |
+| Client cert verification | ✅ | `ssl_verify_client` | Bootstrap | Restart | off/optional/required |
+| Upstream TLS verification | ✅ | `proxy_ssl_verify` | ✅ | Live | on/off |
+| Upstream custom CA | ✅ | `proxy_ssl_trusted_certificate` | ✅ | Live | Requires `openssl` feature |
+| mTLS to upstream | 🟡 | config parsed | ❌ | — | Client cert not wired in runtime |
 
-1. Define or reuse a `PluginSpec` shape.
-2. Add text config syntax if the plugin should be available from file config.
-3. Add gRPC/proto representation if the plugin should be agent-driven.
-4. Register the plugin factory in the plugin registry.
-5. Validate config during snapshot build, not per request.
-6. Compile plugin chains into the runtime snapshot.
-7. Execute the plugin in the correct hook phase.
-8. Add text config tests.
-9. Add gRPC snapshot tests.
-10. Add at least one example config or example snapshot.
+## Timeouts & Limits
 
-## Bootstrap-Only Rule
+| Feature | Status | Text Config | gRPC | Reload | Notes |
+|---|---|---|---|---|---|
+| `proxy_connect_timeout` | ✅ | ✅ | ✅ | Live | |
+| `proxy_read_timeout` | ✅ | ✅ | ✅ | Live | |
+| `proxy_write_timeout` | ✅ | ✅ | ✅ | Live | |
+| `keepalive_timeout` | ✅ | ✅ | Bootstrap | Restart | |
+| `keepalive_requests` | ✅ | ✅ | Bootstrap | Restart | |
+| `client_max_body_size` | ✅ | ✅ | Bootstrap | Restart | Enforced per-request |
+| `tcp_nodelay` | 🟡 | parsed | 🟡 | — | Stored, not enforced |
 
-Some features belong to listener bootstrap and cannot be applied live with current Pingora wiring.
+## Caching
 
-For those features:
+| Feature | Status | Text Config | gRPC | Reload | Notes |
+|---|---|---|---|---|---|
+| Per-location cache | ✅ | `proxy_cache { ... }` | 🟡 | Live | In-memory LRU |
+| `proxy_cache_ttl` | ✅ | ✅ | 🟡 | Live | |
+| `proxy_cache_stale_if_error` | ✅ | ✅ | 🟡 | Live | `X-Cache: STALE` |
+| `proxy_cache_key` | ✅ | ✅ | 🟡 | Live | uri/uri_and_method/normalized_uri |
+| `proxy_cache_valid` | ✅ | ✅ | 🟡 | Live | Status code allowlist |
+| `proxy_cache_max_size` | ✅ | ✅ | 🟡 | Live | Global + per-location |
+| `proxy_cache_min_uses` | 🟡 | parsed | 🟡 | — | Not enforced |
 
-- still model them in runtime state and proto if the control plane must understand them
-- return `restart_required=true` on `ApplySnapshot`
-- document the behavior in the reload matrix
+## Built-in Plugins
 
-Typical examples:
+| Plugin | Status | Text Config | gRPC | Phase | Notes |
+|---|---|---|---|---|---|
+| `headers` | ✅ | ✅ | ✅ | request/upstream/response | Add/Set/Remove |
+| `cors` | ✅ | ✅ | ✅ | request/response | Preflight + headers |
+| `basic-auth` | ✅ | ✅ | ✅ | request | RFC 7617 |
+| `jwt-auth` | ✅ | ✅ | ✅ | request | HS256/RS256/ES256/EdDSA, jsonwebtoken 10.3 |
+| `rate-limit` | ✅ | ✅ | ✅ | request | Per-IP sliding window |
+| `ext-authz` | ✅ | ✅ | ✅ | request | External HTTP auth |
+| **IP allow/deny** | 🔧 | — | — | request | nginx `allow`/`deny` analog |
 
-- listener sockets
-- ALPN / HTTP protocol policy
-- downstream TLS verification settings
+## Observability
 
-## Done Criteria
+| Feature | Status | Notes |
+|---|---|---|
+| **Prometheus metrics** | 🔧 | Pingora depends on `prometheus` crate; expose `GET /metrics` |
+| **Structured access log (JSON)** | 🔧 | Method, path, status, latency, upstream, cache |
+| Request ID propagation | 💤 | Can be done via `headers` plugin |
+| Tracing (OpenTelemetry) | 💤 | |
 
-A feature is not done when only the parser or only gRPC works.
+## Control Plane
 
-A feature is done when:
+| Feature | Status | Notes |
+|---|---|---|
+| gRPC `ApplySnapshot` | ✅ | Live route updates |
+| gRPC `GetSnapshot` | ✅ | Runtime state export |
+| gRPC over TCP | ✅ | `--grpc-addr` |
+| gRPC over UDS | ✅ | `--grpc-uds` |
+| In-process control plane | ✅ | No gRPC, direct calls |
+| Reload matrix docs | 🟡 | Implicit; needs explicit per-field table |
 
-- text config path is correct
-- gRPC path is correct
-- runtime behavior is correct
-- reload semantics are explicit
-- tests cover both adapters
-- docs and examples match the implementation
+## Operations
+
+| Feature | Status | Notes |
+|---|---|---|
+| Docker image | ✅ | `paramoshka/ngxora:main` |
+| Graceful shutdown | ✅ | Pingora built-in |
+| Dry-run `--check` | ✅ | `ngxora --check ngxora.conf` |
+| Graceful reload (SIGHUP) | 💤 | Use gRPC for live updates |
+| Let's Encrypt / ACME | 💤 | |
+| Admin API endpoint | 💤 | Runtime inspection: routes, stats, cache |
+
+---
+
+# Production Roadmap
+
+Three items to close before calling it production-ready:
+
+1. 🔧 **IP allow/deny plugin** — `allow 10.0.0.0/8; deny all;` inside `location {}`
+2. 🔧 **Prometheus metrics** — connection counts, request rates, cache hit ratio, upstream health
+3. 🔧 **Structured access log** — JSON lines with method, path, status, latency, upstream, cache
+
+Nice to have shortly after:
+
+4. 🟡 Fill in gRPC path for `return`, `proxy_cache`, `try_files`, `root`
+5. 🟡 Document reload matrix explicitly (which fields are Live vs Restart)
+6. 💤 Graceful reload via SIGHUP
