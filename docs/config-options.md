@@ -140,6 +140,22 @@ Supported location directives:
   `off` disables both upstream certificate and hostname verification.
 - `proxy_ssl_trusted_certificate <path>;`
   Sets a custom CA bundle for upstream TLS verification.
+- `return <status> <location>;`
+  Returns an HTTP redirect response (301, 302, 303, 307, or 308) with
+  a `Location` header set to `<location>`. The request is not proxied
+  to an upstream when this directive is present on a matched location.
+
+  Example:
+
+  ```nginx
+  location /old {
+      return 301 https://example.com/new;
+  }
+
+  location /temp {
+      return 302 /temporary-destination;
+  }
+  ```
 
 Notes:
 

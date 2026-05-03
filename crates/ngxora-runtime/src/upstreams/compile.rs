@@ -335,6 +335,7 @@ fn route_target_from_directive(
                 tls,
             }))
         }
+
         LocationDirective::ProxyPass(ProxyPassTarget::UpstreamGroup { name, tls }) => {
             let normalized = normalize_upstream_name(name);
             let group = upstreams
@@ -345,6 +346,12 @@ fn route_target_from_directive(
                 tls: *tls,
             }))
         }
+
+        LocationDirective::Return { status, location } => Ok(Some(RouteTarget::Return {
+            status: *status,
+            location: location.clone(),
+        })),
+
         _ => Ok(None),
     }
 }
@@ -404,6 +411,7 @@ fn compile_upstream_protocol(
     if let Some(protocol) = protocol {
         let target_uses_tls = match target {
             RouteTarget::ProxyPass { tls, .. } | RouteTarget::UpstreamGroup { tls, .. } => *tls,
+            RouteTarget::Return { .. } => return Ok(None),
         };
 
         match protocol {

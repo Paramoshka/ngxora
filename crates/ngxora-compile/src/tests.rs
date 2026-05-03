@@ -802,4 +802,62 @@ http {
         let http = ir.http.expect("http missing");
         assert!(http.servers[0].locations[0].cache.is_none());
     }
+
+    #[test]
+    fn from_ast_parses_return_redirect() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location /old {
+      return 301 https://example.com/new;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+        let location = &ir.http.unwrap().servers[0].locations[0];
+        assert_eq!(
+            location.directives,
+            vec![LocationDirective::Return {
+                status: 301,
+                location: "https://example.com/new".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn from_ast_rejects_return_without_args() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location /old {
+      return;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected return to fail");
+        assert!(err.message.contains("return: expected 2 arguments"));
+    }
+
+    #[test]
+    fn from_ast_rejects_return_non_redirect_status() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location /old {
+      return 200 https://example.com/new;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected return to fail");
+        assert!(err.message.contains("not a redirect"));
+    }
 }

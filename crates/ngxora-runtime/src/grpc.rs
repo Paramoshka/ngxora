@@ -899,6 +899,12 @@ fn proto_upstream_from_runtime(target: &RouteTarget) -> ProtoUpstream {
             port: 0,
             upstream_group: name.clone(),
         },
+        RouteTarget::Return { .. } => ProtoUpstream {
+            scheme: String::new(),
+            host: String::new(),
+            port: 0,
+            upstream_group: String::new(),
+        },
     }
 }
 

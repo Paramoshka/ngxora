@@ -1553,6 +1553,34 @@ fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, 
             }),
         },
 
+        consts::RETURN => match directive.args.as_slice() {
+            [code, location] => {
+                let status = code.parse().map_err(|_| LowerErr {
+                    message: format!("return: invalid status code `{code}`"),
+                })?;
+                if !(300..=399).contains(&status) {
+                    return Err(LowerErr {
+                        message: format!(
+                            "return: status {status} is not a redirect (expected 3xx)"
+                        ),
+                    });
+                }
+
+                Ok(LocationDirective::Return {
+                    status,
+                    location: location.clone(),
+                })
+            }
+
+            [] => Err(LowerErr {
+                message: "return: expected 2 arguments: <status> <location>".into(),
+            }),
+
+            _ => Err(LowerErr {
+                message: "return: expected exactly 2 arguments: <status> <location>".into(),
+            }),
+        },
+
         _ => Err(LowerErr {
             message: format!("unknown directive in location: {}", directive.name),
         }),

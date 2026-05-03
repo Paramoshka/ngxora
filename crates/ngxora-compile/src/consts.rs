@@ -51,6 +51,7 @@ pub const HTTP2_ONLY: &str = "http2_only";
 
 // Listener directives
 pub const PROXY_PASS: &str = "proxy_pass";
+pub const RETURN: &str = "return";
 pub const PROXY_CONNECT_TIMEOUT: &str = "proxy_connect_timeout";
 pub const PROXY_READ_TIMEOUT: &str = "proxy_read_timeout";
 pub const PROXY_WRITE_TIMEOUT: &str = "proxy_write_timeout";

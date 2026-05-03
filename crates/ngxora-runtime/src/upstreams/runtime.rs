@@ -183,10 +183,16 @@ struct SelectedPeer {
     sni: String,
 }
 
+#[derive(Debug, Clone)]
+enum SelectedTarget {
+    Upstream(SelectedPeer),
+    Return { status: u16, location: String },
+}
+
 #[derive(Clone)]
 pub(crate) struct SelectedRoute {
     route_id: u64,
-    peer: SelectedPeer,
+    target: SelectedTarget,
     upstream_timeouts: UpstreamTimeouts,
     upstream_protocol: Option<UpstreamHttpProtocol>,
     upstream_ssl_options: UpstreamSslOptions,
@@ -295,18 +301,33 @@ impl SelectedRoute {
         snapshot: &RuntimeSnapshot,
         resolved: &ResolvedLocation<'_>,
     ) -> PingoraResult<Self> {
-        let peer = match &resolved.location.target {
+        let target = match &resolved.location.target {
+            RouteTarget::Return { status, location } => {
+                return Ok(Self {
+                    route_id: resolved.location.route_id,
+                    target: SelectedTarget::Return {
+                        status: *status,
+                        location: location.clone(),
+                    },
+                    upstream_timeouts: UpstreamTimeouts::default(),
+                    upstream_protocol: None,
+                    upstream_ssl_options: UpstreamSslOptions::default(),
+                    upstream_trusted_ca: None,
+                    plugins: snapshot.plugin_chain(resolved.location.route_id),
+                    cache: resolved.location.cache.clone(),
+                });
+            }
             RouteTarget::ProxyPass {
                 host,
                 port,
                 tls,
                 sni,
-            } => SelectedPeer {
+            } => SelectedTarget::Upstream(SelectedPeer {
                 host: host.clone(),
                 port: *port,
                 tls: *tls,
                 sni: sni.clone(),
-            },
+            }),
             RouteTarget::UpstreamGroup { name, tls } => {
                 let group = snapshot.upstream_group(name).ok_or_else(|| {
                     pingora::Error::explain(
@@ -321,18 +342,18 @@ impl SelectedRoute {
                     )
                 })?;
 
-                SelectedPeer {
+                SelectedTarget::Upstream(SelectedPeer {
                     sni: proxy_pass_sni(&backend.host, *tls),
                     host: backend.host,
                     port: backend.port,
                     tls: *tls,
-                }
+                })
             }
         };
 
         Ok(Self {
             route_id: resolved.location.route_id,
-            peer,
+            target,
             upstream_timeouts: resolved.location.upstream_timeouts,
             upstream_protocol: resolved.location.upstream_protocol,
             upstream_ssl_options: resolved.location.upstream_ssl_options.clone(),
@@ -763,6 +784,31 @@ impl ProxyHttp for DynamicProxy {
             }
         }
 
+        // Handle return/redirect targets
+        if let SelectedTarget::Return { status, location } = &selected.target {
+            let status_code = http::StatusCode::from_u16(*status).map_err(|_| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!("invalid redirect status code: {status}"),
+                )
+            })?;
+
+            let mut response = LocalResponse::new(status_code, "");
+            response.headers.push((
+                http::header::LOCATION,
+                http::HeaderValue::from_str(location).map_err(|_| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::InternalError,
+                        format!("invalid redirect location: {location}"),
+                    )
+                })?,
+            ));
+
+            session.set_keepalive(None);
+            write_local_response(session, response).await?;
+            return Ok(true);
+        }
+
         ctx.selected = Some(selected);
         Ok(false)
     }
@@ -1009,20 +1055,27 @@ impl ProxyHttp for DynamicProxy {
             selected
         };
 
-        let mut peer = HttpPeer::new(
-            (selected.peer.host.as_str(), selected.peer.port),
-            selected.peer.tls,
-            selected.peer.sni.clone(),
-        );
-        apply_upstream_timeouts(&mut peer, selected.upstream_timeouts);
-        apply_upstream_http_protocol(&mut peer, selected.upstream_protocol);
+        let peer = match &selected.target {
+            SelectedTarget::Upstream(peer) => peer,
+            SelectedTarget::Return { .. } => {
+                return Err(pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    "upstream_peer called on a return target — request_filter should have short-circuited",
+                ));
+            }
+        };
+
+        let mut http_peer =
+            HttpPeer::new((peer.host.as_str(), peer.port), peer.tls, peer.sni.clone());
+        apply_upstream_timeouts(&mut http_peer, selected.upstream_timeouts);
+        apply_upstream_http_protocol(&mut http_peer, selected.upstream_protocol);
         apply_upstream_ssl_options(
-            &mut peer,
+            &mut http_peer,
             &selected.upstream_ssl_options,
             selected.upstream_trusted_ca.as_ref(),
         );
 
-        Ok(Box::new(peer))
+        Ok(Box::new(http_peer))
     }
 }
 
@@ -1049,12 +1102,12 @@ mod tests {
     fn cached_route(cache: CacheConfig, plugins: ngxora_plugin_api::PluginChain) -> SelectedRoute {
         SelectedRoute {
             route_id: 1,
-            peer: SelectedPeer {
+            target: SelectedTarget::Upstream(SelectedPeer {
                 host: "127.0.0.1".into(),
                 port: 8080,
                 tls: false,
                 sni: String::new(),
-            },
+            }),
             upstream_timeouts: UpstreamTimeouts::default(),
             upstream_protocol: None,
             upstream_ssl_options: UpstreamSslOptions::default(),
@@ -1106,11 +1159,10 @@ mod tests {
             valid_statuses: vec![302],
             ..CacheConfig::default()
         };
-        let plugins: ngxora_plugin_api::PluginChain =
-            vec![Arc::new(StatusRewritePlugin {
-                status: StatusCode::FOUND,
-            }) as Arc<dyn HttpPlugin>]
-            .into();
+        let plugins: ngxora_plugin_api::PluginChain = vec![Arc::new(StatusRewritePlugin {
+            status: StatusCode::FOUND,
+        }) as Arc<dyn HttpPlugin>]
+        .into();
         let mut ctx = ProxyContext {
             selected: Some(cached_route(cache_cfg.clone(), plugins)),
             cache_key: Some(CacheKey {

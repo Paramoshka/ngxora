@@ -41,6 +41,10 @@ pub enum RouteTarget {
         name: String,
         tls: bool,
     },
+    Return {
+        status: u16,
+        location: String,
+    },
 }
 
 // CompiledUpstreamServer is a backend endpoint already validated during

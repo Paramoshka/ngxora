@@ -266,6 +266,7 @@ pub enum LocationDirective {
     ProxySslTrustedCertificate(PemSource),
     Root(String),
     TryFiles(String),
+    Return { status: u16, location: String },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
