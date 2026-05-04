@@ -109,12 +109,14 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
                         cli.path_prefix.clone(),
                     )),
                 }),
-                upstream: Some(Upstream {
-                    scheme: cli.upstream_scheme.clone(),
-                    host: cli.upstream_host.clone(),
-                    port: cli.upstream_port,
-                    upstream_group: String::new(),
-                }),
+                action: Some(ngxora_runtime::grpc::proto::route::Action::Upstream(
+                    Upstream {
+                        scheme: cli.upstream_scheme.clone(),
+                        host: cli.upstream_host.clone(),
+                        port: cli.upstream_port,
+                        upstream_group: String::new(),
+                    },
+                )),
                 timeouts: Some(RouteTimeouts {
                     connect_timeout_ms: 3_000,
                     read_timeout_ms: 15_000,

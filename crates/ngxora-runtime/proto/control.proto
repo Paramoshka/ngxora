@@ -75,11 +75,19 @@ message PemSource {
 
 message Route {
   Match match = 1;
-  Upstream upstream = 2;
+  oneof action {
+    Upstream upstream = 2;
+    Redirect redirect = 7;
+  }
   RouteTimeouts timeouts = 3;
   repeated Plugin plugins = 4;
   UpstreamTlsOptions tls_options = 5;
   UpstreamHttpProtocol upstream_protocol = 6;
+}
+
+message Redirect {
+  uint32 status = 1;
+  string location = 2;
 }
 
 message RouteTimeouts {

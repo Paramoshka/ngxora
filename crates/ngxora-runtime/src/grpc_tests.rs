@@ -91,12 +91,12 @@ fn proto_snapshot_converts_into_runtime_router() {
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/api".into())),
                 }),
-                upstream: Some(proto::Upstream {
+                action: Some(proto::route::Action::Upstream(proto::Upstream {
                     scheme: "http".into(),
                     host: String::new(),
                     port: 0,
                     upstream_group: "backend-pool".into(),
-                }),
+                })),
                 timeouts: Some(proto::RouteTimeouts {
                     connect_timeout_ms: 1_000,
                     read_timeout_ms: 2_000,
@@ -211,12 +211,12 @@ fn proto_snapshot_defaults_tcp_nodelay_to_on() {
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),
-                upstream: Some(proto::Upstream {
+                action: Some(proto::route::Action::Upstream(proto::Upstream {
                     scheme: "http".into(),
                     host: "127.0.0.1".into(),
                     port: 8080,
                     upstream_group: String::new(),
-                }),
+                })),
                 timeouts: None,
                 plugins: Vec::new(),
                 tls_options: None,
@@ -227,6 +227,65 @@ fn proto_snapshot_defaults_tcp_nodelay_to_on() {
 
     let runtime = runtime_snapshot_from_proto(snapshot).expect("proto snapshot compiles");
     assert!(runtime.router.http_options.tcp_nodelay);
+}
+
+#[test]
+fn proto_redirect_route_converts_into_runtime_return_target() {
+    let snapshot = proto::ConfigSnapshot {
+        version: "v-redirect".into(),
+        http: Some(proto::HttpOptions::default()),
+        listeners: vec![proto::Listener {
+            name: "edge".into(),
+            address: "0.0.0.0".into(),
+            port: 8080,
+            tls: false,
+            http2: false,
+            http2_only: false,
+            tls_options: None,
+        }],
+        upstreams: Vec::new(),
+        virtual_hosts: vec![proto::VirtualHost {
+            listener: "edge".into(),
+            server_names: vec!["example.com".into()],
+            default_server: true,
+            tls: None,
+            routes: vec![proto::Route {
+                r#match: Some(proto::Match {
+                    kind: Some(proto::r#match::Kind::Prefix("/old".into())),
+                }),
+                action: Some(proto::route::Action::Redirect(proto::Redirect {
+                    status: 301,
+                    location: "https://example.com/new".into(),
+                })),
+                timeouts: None,
+                plugins: Vec::new(),
+                tls_options: None,
+                upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
+            }],
+        }],
+    };
+
+    let runtime = runtime_snapshot_from_proto(snapshot).expect("proto snapshot compiles");
+    let listen_key = ListenKey {
+        addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        port: 8080,
+        ssl: false,
+    };
+    let route = runtime
+        .router
+        .listeners
+        .get(&listen_key)
+        .and_then(|routes| routes.default.as_ref())
+        .and_then(|server| server.locations.first())
+        .expect("redirect route exists");
+
+    assert_eq!(
+        route.target,
+        RouteTarget::Return {
+            status: 301,
+            location: "https://example.com/new".into(),
+        }
+    );
 }
 
 #[test]
@@ -289,12 +348,13 @@ fn runtime_snapshot_converts_back_to_proto() {
         Some(&proto::pem_source::Source::InlinePem(TEST_CA_PEM.into(),))
     );
     assert_eq!(
-        vhost.routes[0]
-            .upstream
-            .as_ref()
-            .expect("upstream")
-            .upstream_group,
-        "backend-pool"
+        vhost.routes[0].action.as_ref(),
+        Some(&proto::route::Action::Upstream(proto::Upstream {
+            scheme: "https".into(),
+            host: String::new(),
+            port: 0,
+            upstream_group: "backend-pool".into(),
+        }))
     );
     assert_eq!(
         vhost.routes[0].upstream_protocol,
@@ -321,6 +381,46 @@ fn runtime_snapshot_converts_back_to_proto() {
             .as_ref()
             .map(|health_check| health_check.interval_ms),
         Some(5_000)
+    );
+}
+
+#[test]
+fn runtime_return_route_converts_back_to_proto_redirect() {
+    let http = Http {
+        servers: vec![Server {
+            server_names: vec!["example.com".into()],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/old".into()),
+                directives: vec![LocationDirective::Return {
+                    status: 308,
+                    location: "https://example.com/new".into(),
+                }],
+                plugins: Vec::new(),
+                cache: None,
+            }],
+            listens: vec![Listen {
+                addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                port: 8080,
+                default_server: true,
+                ..Listen::default()
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+    let state = RuntimeState::new(ConfigSnapshot::new("redirect-v1", router));
+    let snapshot = state.snapshot();
+    let proto =
+        proto_snapshot_from_runtime(snapshot.as_ref()).expect("runtime snapshot serializes");
+    let route = &proto.virtual_hosts[0].routes[0];
+
+    assert_eq!(
+        route.action.as_ref(),
+        Some(&proto::route::Action::Redirect(proto::Redirect {
+            status: 308,
+            location: "https://example.com/new".into(),
+        }))
     );
 }
 

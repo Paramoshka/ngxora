@@ -40,8 +40,9 @@ use proto::{
     ApplyResult as ProtoApplyResult, ConfigSnapshot as ProtoConfigSnapshot,
     GetSnapshotRequest as ProtoGetSnapshotRequest, HttpOptions as ProtoHttpOptions,
     Listener as ProtoListener, ListenerTlsOptions as ProtoListenerTlsOptions, Match as ProtoMatch,
-    PemSource as ProtoPemSource, Plugin as ProtoPlugin, Regex as ProtoRegex, Route as ProtoRoute,
-    RouteTimeouts as ProtoRouteTimeouts, Switch as ProtoSwitch, TlsBinding as ProtoTlsBinding,
+    PemSource as ProtoPemSource, Plugin as ProtoPlugin, Redirect as ProtoRedirect,
+    Regex as ProtoRegex, Route as ProtoRoute, RouteTimeouts as ProtoRouteTimeouts,
+    Switch as ProtoSwitch, TlsBinding as ProtoTlsBinding,
     TlsProtocolVersion as ProtoTlsProtocolVersion, TlsVerifyClient as ProtoTlsVerifyClient,
     Upstream as ProtoUpstream, UpstreamBackend as ProtoUpstreamBackend,
     UpstreamGroup as ProtoUpstreamGroup, UpstreamHealthCheck as ProtoUpstreamHealthCheck,
@@ -357,10 +358,6 @@ fn server_from_proto_virtual_host(
 
 fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
     let matcher = matcher_from_proto(route.r#match.as_ref())?;
-    let upstream = route
-        .upstream
-        .as_ref()
-        .ok_or_else(|| "route upstream is required".to_string())?;
     let mut directives = Vec::with_capacity(7);
 
     if let Some(timeouts) = route.timeouts.as_ref() {
@@ -388,9 +385,20 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
         directives.push(LocationDirective::ProxyUpstreamProtocol(protocol));
     }
 
-    directives.push(LocationDirective::ProxyPass(proxy_pass_target_from_proto(
-        upstream,
-    )?));
+    let action = route
+        .action
+        .as_ref()
+        .ok_or_else(|| "route action is required".to_string())?;
+    match action {
+        proto::route::Action::Upstream(upstream) => {
+            directives.push(LocationDirective::ProxyPass(proxy_pass_target_from_proto(
+                upstream,
+            )?));
+        }
+        proto::route::Action::Redirect(redirect) => {
+            directives.push(return_directive_from_proto(redirect)?);
+        }
+    }
 
     Ok(Location {
         matcher,
@@ -519,6 +527,24 @@ fn proxy_pass_target_from_proto(upstream: &ProtoUpstream) -> Result<ProxyPassTar
     let raw = format!("{}://{}:{}", upstream.scheme, upstream.host, upstream.port);
     let url = Url::parse(&raw).map_err(|err| format!("invalid upstream URL `{raw}`: {err}"))?;
     Ok(ProxyPassTarget::Url(url))
+}
+
+fn return_directive_from_proto(redirect: &ProtoRedirect) -> Result<LocationDirective, String> {
+    let status = u16::try_from(redirect.status)
+        .map_err(|_| format!("redirect status {} is out of range", redirect.status))?;
+    if !(300..=399).contains(&status) {
+        return Err(format!(
+            "redirect status {status} is not a redirect (expected 3xx)"
+        ));
+    }
+    if redirect.location.is_empty() {
+        return Err("redirect location cannot be empty".into());
+    }
+
+    Ok(LocationDirective::Return {
+        status,
+        location: redirect.location.clone(),
+    })
 }
 
 fn plugin_spec_from_proto(plugin: &ProtoPlugin) -> Result<PluginSpec, String> {
@@ -855,7 +881,7 @@ fn proto_routes_from_runtime(routes: &ServerRoutes) -> Result<Vec<ProtoRoute>, S
 fn proto_route_from_runtime(route: &CompiledLocation) -> Result<ProtoRoute, String> {
     Ok(ProtoRoute {
         r#match: Some(proto_match_from_runtime(&route.matcher)),
-        upstream: Some(proto_upstream_from_runtime(&route.target)),
+        action: Some(proto_route_action_from_runtime(&route.target)),
         timeouts: Some(proto_timeouts_from_runtime(&route.upstream_timeouts)),
         plugins: route
             .plugins
@@ -885,28 +911,26 @@ fn proto_match_from_runtime(matcher: &CompiledMatcher) -> ProtoMatch {
     ProtoMatch { kind: Some(kind) }
 }
 
-fn proto_upstream_from_runtime(target: &RouteTarget) -> ProtoUpstream {
+fn proto_route_action_from_runtime(target: &RouteTarget) -> proto::route::Action {
     match target {
         RouteTarget::ProxyPass {
             host, port, tls, ..
-        } => ProtoUpstream {
+        } => proto::route::Action::Upstream(ProtoUpstream {
             scheme: if *tls { "https" } else { "http" }.into(),
             host: host.clone(),
             port: u32::from(*port),
             upstream_group: String::new(),
-        },
-        RouteTarget::UpstreamGroup { name, tls } => ProtoUpstream {
+        }),
+        RouteTarget::UpstreamGroup { name, tls } => proto::route::Action::Upstream(ProtoUpstream {
             scheme: if *tls { "https" } else { "http" }.into(),
             host: String::new(),
             port: 0,
             upstream_group: name.clone(),
-        },
-        RouteTarget::Return { .. } => ProtoUpstream {
-            scheme: String::new(),
-            host: String::new(),
-            port: 0,
-            upstream_group: String::new(),
-        },
+        }),
+        RouteTarget::Return { status, location } => proto::route::Action::Redirect(ProtoRedirect {
+            status: u32::from(*status),
+            location: location.clone(),
+        }),
     }
 }
 

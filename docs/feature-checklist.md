@@ -30,7 +30,7 @@ The rule is simple:
 | Upstream health checks | ✅ | `health_check {}` | ✅ | Live | TCP + HTTP |
 | WebSocket proxying | ✅ | `proxy_pass` | ✅ | Live | Auto upgrade, no extra config |
 | gRPC proxying (h2/h2c) | ✅ | `proxy_upstream_protocol` | ✅ | Live | |
-| **Redirect** `return <status> <url>` | ✅ | `return 301 https://...` | 🟡 | Live | gRPC path is a stub |
+| **Redirect** `return <status> <url>` | ✅ | `return 301 https://...` | ✅ | Live | Text config and gRPC snapshots map to the same runtime return target |
 | `try_files` | 🟡 | parsed only | ❌ | — | Runtime NOP |
 | `root` | 🟡 | parsed only | ❌ | — | Runtime NOP |
 
@@ -125,6 +125,6 @@ Three items to close before calling it production-ready:
 
 Nice to have shortly after:
 
-4. 🟡 Fill in gRPC path for `return`, `proxy_cache`, `try_files`, `root`
+4. 🟡 Fill in gRPC path for `proxy_cache`, `try_files`, `root`
 5. 🟡 Document reload matrix explicitly (which fields are Live vs Restart)
 6. 💤 Graceful reload via SIGHUP
