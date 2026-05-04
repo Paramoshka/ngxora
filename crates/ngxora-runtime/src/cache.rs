@@ -142,6 +142,7 @@ impl LocationCache {
 /// one location never block reads from another.
 pub struct CacheBackend {
     stores: DashMap<u64, RwLock<LocationCache>>,
+    request_counts: DashMap<CacheKey, u64>,
     default_max_size: AtomicU64,
 }
 
@@ -150,6 +151,7 @@ impl CacheBackend {
     pub fn new(default_max_size: u64) -> Self {
         Self {
             stores: DashMap::new(),
+            request_counts: DashMap::new(),
             default_max_size: AtomicU64::new(default_max_size),
         }
     }
@@ -173,6 +175,25 @@ impl CacheBackend {
         let store = self.stores.get(&key.route_id)?;
         let guard = store.read().await;
         guard.get(key, ttl).cloned()
+    }
+
+    /// Record a cache miss and decide whether the next cacheable upstream
+    /// response is allowed to be stored for this key.
+    pub fn record_miss(&self, key: &CacheKey, cfg: &CacheConfig) -> bool {
+        if !cfg.enabled {
+            return false;
+        }
+
+        let Some(min_uses) = cfg.min_uses else {
+            return true;
+        };
+        if min_uses <= 1 {
+            return true;
+        }
+
+        let mut count = self.request_counts.entry(key.clone()).or_insert(0);
+        *count = count.saturating_add(1);
+        usize::try_from(*count).unwrap_or(usize::MAX) >= min_uses
     }
 
     /// Look up a cached response **ignoring TTL** — used for stale-if-error.
@@ -213,6 +234,7 @@ impl CacheBackend {
 
         let mut guard = store.write().await;
         guard.sync_limits(ttl, max_size);
+        self.request_counts.remove(&key);
         guard.put(key, response);
     }
 
@@ -227,6 +249,16 @@ impl CacheBackend {
     /// Invalidate all cache entries for a specific route.
     pub fn invalidate_route(&self, route_id: u64) {
         self.stores.remove(&route_id);
+
+        let keys: Vec<CacheKey> = self
+            .request_counts
+            .iter()
+            .filter(|entry| entry.key().route_id == route_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in keys {
+            self.request_counts.remove(&key);
+        }
     }
 
     /// Return the total number of cached entries across all locations.
@@ -395,6 +427,23 @@ mod tests {
 
         let found = backend.get(&key, &cfg).await.expect("entry should exist");
         assert_eq!(found.body, Bytes::from_static(b"hello"));
+    }
+
+    #[test]
+    fn cache_backend_min_uses_requires_repeated_misses() {
+        let backend = CacheBackend::new(10 * 1024 * 1024);
+        let cfg = CacheConfig {
+            min_uses: Some(2),
+            ..CacheConfig::default()
+        };
+        let key = CacheKey {
+            route_id: 3,
+            method: "GET".into(),
+            uri: "/gated".into(),
+        };
+
+        assert!(!backend.record_miss(&key, &cfg));
+        assert!(backend.record_miss(&key, &cfg));
     }
 
     #[tokio::test]

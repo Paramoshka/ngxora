@@ -68,7 +68,7 @@ The rule is simple:
 | `proxy_cache_key` | ✅ | ✅ | 🟡 | Live | uri/uri_and_method/normalized_uri |
 | `proxy_cache_valid` | ✅ | ✅ | 🟡 | Live | Status code allowlist |
 | `proxy_cache_max_size` | ✅ | ✅ | 🟡 | Live | Global + per-location |
-| `proxy_cache_min_uses` | 🟡 | parsed | 🟡 | — | Not enforced |
+| `proxy_cache_min_uses` | 🟡 | ✅ | 🟡 | Live | First N cache misses before initial store |
 
 ## Built-in Plugins
 
@@ -100,7 +100,7 @@ The rule is simple:
 | gRPC over TCP | ✅ | `--grpc-addr` |
 | gRPC over UDS | ✅ | `--grpc-uds` |
 | In-process control plane | ✅ | No gRPC, direct calls |
-| Reload matrix docs | 🟡 | Implicit; needs explicit per-field table |
+| Reload matrix docs | ✅ | See `docs/README.md` reload matrix |
 
 ## Operations
 

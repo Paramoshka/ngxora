@@ -405,7 +405,7 @@ location /blog/ {
 | `proxy_cache_ttl` | `<duration>` | `60s` | How long a cached response stays fresh. |
 | `proxy_cache_stale_if_error` | `<duration>` | — | Serve a stale cached response if proxying to the upstream fails. Adds `X-Cache: STALE`. The cached entry is eligible only while its age is less than `proxy_cache_ttl + proxy_cache_stale_if_error`. |
 | `proxy_cache_key` | `uri`, `uri_and_method`, or `normalized_uri` | `uri` | Controls how the cache key is derived from the request. |
-| `proxy_cache_min_uses` | `<count>` | — | Parsed into config snapshots, but runtime enforcement is not implemented yet. |
+| `proxy_cache_min_uses` | `<count>` | — | Store a response only after the same cache key misses this many times. |
 | `proxy_cache_valid` | `<status>...` | `200 301 404` | HTTP status codes eligible for caching. |
 | `proxy_cache_max_size` | `<size>` | — | Per-location max cache size. Supports suffixes: `k`/`K`, `m`/`M`, `g`/`G`. |
 

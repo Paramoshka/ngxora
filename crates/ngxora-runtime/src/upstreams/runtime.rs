@@ -207,6 +207,10 @@ impl SelectedRoute {
     }
 }
 
+fn cache_store_allowed(cfg: &CacheConfig, threshold_reached: bool) -> bool {
+    cfg.min_uses.unwrap_or(1) <= 1 || threshold_reached
+}
+
 #[derive(Default)]
 pub struct ProxyContext {
     pub(crate) selected: Option<SelectedRoute>,
@@ -214,6 +218,7 @@ pub struct ProxyContext {
     pub(crate) client_max_body_size: Option<u64>,
     pub(crate) received_body_bytes: u64,
     pub(crate) cache_key: Option<CacheKey>,
+    pub(crate) cache_store_allowed: bool,
     pub(crate) cache_status: Option<http::StatusCode>,
     pub(crate) cache_headers: Option<http::HeaderMap>,
     pub(crate) response_body_buf: bytes::Bytes,
@@ -755,6 +760,7 @@ impl ProxyHttp for DynamicProxy {
                 write_cached_response(session, &cached).await?;
                 return Ok(true);
             }
+            ctx.cache_store_allowed = self.cache_backend.record_miss(&cache_key, cache_cfg);
             ctx.cache_key = Some(cache_key);
         }
 
@@ -967,7 +973,9 @@ impl ProxyHttp for DynamicProxy {
         // Cacheability must be evaluated against the final response that the
         // client will actually receive after plugins mutate headers/status.
         if let (Some(_cache_key), Some(cache_cfg)) = (&ctx.cache_key, selected.cache.as_ref()) {
-            if is_cacheable(status, &upstream_response.headers, cache_cfg) {
+            if cache_store_allowed(cache_cfg, ctx.cache_store_allowed)
+                && is_cacheable(status, &upstream_response.headers, cache_cfg)
+            {
                 ctx.cache_status = Some(status);
                 ctx.cache_headers = Some(upstream_response.headers.clone());
             }
@@ -1016,6 +1024,13 @@ impl ProxyHttp for DynamicProxy {
             &ctx.cache_key,
             ctx.selected.as_ref().and_then(|s| s.cache.as_ref()),
         ) {
+            if !cache_store_allowed(cache_cfg, ctx.cache_store_allowed) {
+                ctx.cache_headers = None;
+                ctx.cache_status = None;
+                ctx.response_body_buf = Bytes::new();
+                return;
+            }
+
             if let (Some(status), Some(headers)) = (ctx.cache_status, ctx.cache_headers.take()) {
                 let body = std::mem::take(&mut ctx.response_body_buf);
                 self.cache_backend
@@ -1252,5 +1267,56 @@ mod tests {
             .expect("empty redirect should be cached");
         assert_eq!(cached.status, StatusCode::MOVED_PERMANENTLY);
         assert!(cached.body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn logging_skips_cache_write_until_min_uses_is_reached() {
+        let cache_backend = CacheBackend::new(10 * 1024 * 1024);
+        let proxy = DynamicProxy::new_with_cache(
+            Arc::new(RuntimeState::bootstrap(CompiledRouter::default())),
+            cache_backend,
+        );
+        let mut session = test_session().await;
+        let cache_cfg = CacheConfig {
+            min_uses: Some(2),
+            ..CacheConfig::default()
+        };
+        let key = CacheKey {
+            route_id: 1,
+            method: "GET".into(),
+            uri: "/warming".into(),
+        };
+
+        let mut first_ctx = ProxyContext {
+            selected: Some(cached_route(cache_cfg.clone(), empty_plugin_chain())),
+            cache_key: Some(key.clone()),
+            cache_store_allowed: false,
+            cache_status: Some(StatusCode::OK),
+            cache_headers: Some(http::HeaderMap::new()),
+            response_body_buf: Bytes::from_static(b"first"),
+            ..Default::default()
+        };
+
+        ProxyHttp::logging(&proxy, &mut session, None, &mut first_ctx).await;
+        assert!(proxy.cache_backend.get(&key, &cache_cfg).await.is_none());
+
+        let mut second_ctx = ProxyContext {
+            selected: Some(cached_route(cache_cfg.clone(), empty_plugin_chain())),
+            cache_key: Some(key.clone()),
+            cache_store_allowed: true,
+            cache_status: Some(StatusCode::OK),
+            cache_headers: Some(http::HeaderMap::new()),
+            response_body_buf: Bytes::from_static(b"second"),
+            ..Default::default()
+        };
+
+        ProxyHttp::logging(&proxy, &mut session, None, &mut second_ctx).await;
+
+        let cached = proxy
+            .cache_backend
+            .get(&key, &cache_cfg)
+            .await
+            .expect("response should be cached after min_uses is reached");
+        assert_eq!(cached.body, Bytes::from_static(b"second"));
     }
 }
