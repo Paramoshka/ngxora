@@ -253,7 +253,9 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
         ),
         keepalive_requests: none_if_zero(options.keepalive_requests),
         client_max_body_size: none_if_zero_u64(options.client_max_body_size_bytes),
-        tcp_nodelay: switch_from_bool(options.tcp_nodelay),
+        // Pingora enables TCP_NODELAY on accepted downstream sockets, and
+        // proto3 bool cannot distinguish "unset" from explicit false.
+        tcp_nodelay: Switch::On,
         allow_connect_method_proxying: switch_from_bool(options.allow_connect_method_proxying),
         h2c: switch_from_bool(options.h2c),
         proxy_cache_max_size: none_if_zero_u64(options.proxy_cache_max_size_bytes),

@@ -188,6 +188,48 @@ fn proto_snapshot_converts_into_runtime_router() {
 }
 
 #[test]
+fn proto_snapshot_defaults_tcp_nodelay_to_on() {
+    let snapshot = proto::ConfigSnapshot {
+        version: "v1".into(),
+        http: Some(proto::HttpOptions::default()),
+        listeners: vec![proto::Listener {
+            name: "edge".into(),
+            address: "0.0.0.0".into(),
+            port: 8080,
+            tls: false,
+            http2: false,
+            http2_only: false,
+            tls_options: None,
+        }],
+        upstreams: Vec::new(),
+        virtual_hosts: vec![proto::VirtualHost {
+            listener: "edge".into(),
+            server_names: vec!["example.com".into()],
+            default_server: true,
+            tls: None,
+            routes: vec![proto::Route {
+                r#match: Some(proto::Match {
+                    kind: Some(proto::r#match::Kind::Prefix("/".into())),
+                }),
+                upstream: Some(proto::Upstream {
+                    scheme: "http".into(),
+                    host: "127.0.0.1".into(),
+                    port: 8080,
+                    upstream_group: String::new(),
+                }),
+                timeouts: None,
+                plugins: Vec::new(),
+                tls_options: None,
+                upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
+            }],
+        }],
+    };
+
+    let runtime = runtime_snapshot_from_proto(snapshot).expect("proto snapshot compiles");
+    assert!(runtime.router.http_options.tcp_nodelay);
+}
+
+#[test]
 fn runtime_snapshot_converts_back_to_proto() {
     let router = router_with_tls_and_plugin();
     let state = RuntimeState::new(ConfigSnapshot::new("v1", router));

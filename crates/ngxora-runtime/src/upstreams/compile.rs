@@ -13,6 +13,13 @@ use std::net::IpAddr;
 
 impl CompiledRouter {
     pub fn from_http(http: &Http) -> Result<Self, String> {
+        if matches!(http.tcp_nodelay, Switch::Off) {
+            return Err(
+                "tcp_nodelay off is not supported: Pingora enables TCP_NODELAY on accepted downstream sockets"
+                    .into(),
+            );
+        }
+
         let mut router = Self {
             upstreams: compile_upstreams(&http.upstreams)?,
             http_options: HttpRuntimeOptions {

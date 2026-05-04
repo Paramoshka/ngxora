@@ -79,7 +79,7 @@ http {
 | `ssl_protocols` | TLS listener | Restart required | TLS min/max protocol version is configured in `TlsSettings` at bind time |
 | `ssl_verify_client` | TLS listener | Restart required | Client certificate verification mode is configured at bind time |
 | `ssl_client_certificate` | TLS listener | Restart required | Client CA bundle is configured at bind time |
-| `tcp_nodelay` | http | Not implemented | Parsed in IR, but currently not enforced on downstream sockets |
+| `tcp_nodelay` | http | Bootstrap only | Pingora enables `TCP_NODELAY` on accepted downstream sockets; `tcp_nodelay off` is rejected |
 
 ## Current Rule
 

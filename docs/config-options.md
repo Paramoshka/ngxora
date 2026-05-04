@@ -19,7 +19,7 @@ For `gRPC ApplySnapshot` reload semantics, see [docs/README.md](./README.md).
 - `h2c on|off;`
   Enables or disables cleartext HTTP/2 handling at the service level.
 - `tcp_nodelay on|off;`
-  Parsed and stored in runtime config, but not yet enforced on downstream sockets.
+  `on` is the only supported value. `off` is rejected because Pingora enables `TCP_NODELAY` on accepted downstream sockets.
 - `proxy_cache_max_size <size>;`
   Global default for per-location cache size. Overridden by `proxy_cache_max_size` in a `proxy_cache { ... }` block. Default if omitted: `50m`. Supports size suffixes: `k`/`K`, `m`/`M`, `g`/`G`.
 

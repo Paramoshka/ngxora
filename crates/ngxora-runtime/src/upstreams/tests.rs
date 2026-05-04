@@ -531,6 +531,22 @@ fn compiled_router_maps_client_max_body_size_into_runtime_options() {
 }
 
 #[test]
+fn compiled_router_rejects_tcp_nodelay_off() {
+    let mut http = Http::default();
+    http.tcp_nodelay = Switch::Off;
+    http.servers.push(Server {
+        listens: vec![Listen {
+            default_server: true,
+            ..Listen::default()
+        }],
+        ..Server::default()
+    });
+
+    let err = CompiledRouter::from_http(&http).expect_err("expected tcp_nodelay off rejection");
+    assert!(err.contains("tcp_nodelay off is not supported"));
+}
+
+#[test]
 fn compiled_router_maps_named_upstream_groups() {
     let http = Http {
         upstreams: vec![UpstreamBlock {

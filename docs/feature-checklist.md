@@ -56,7 +56,7 @@ The rule is simple:
 | `keepalive_timeout` | ✅ | ✅ | Bootstrap | Restart | |
 | `keepalive_requests` | ✅ | ✅ | Bootstrap | Restart | |
 | `client_max_body_size` | ✅ | ✅ | Bootstrap | Restart | Enforced per-request |
-| `tcp_nodelay` | 🟡 | parsed | 🟡 | — | Stored, not enforced |
+| `tcp_nodelay` | 🟡 | `on` only | ✅ | Bootstrap | Pingora forces `TCP_NODELAY`; `off` is rejected |
 
 ## Caching
 
