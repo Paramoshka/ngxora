@@ -102,6 +102,15 @@ fn proto_snapshot_converts_into_runtime_router() {
                     read_timeout_ms: 2_000,
                     write_timeout_ms: 3_000,
                 }),
+                cache: Some(proto::RouteCache {
+                    enabled: proto::Switch::On as i32,
+                    max_size_bytes: 256 * 1024,
+                    ttl_ms: 5 * 60 * 1_000,
+                    stale_if_error_ms: 30 * 1_000,
+                    key_mode: proto::CacheKeyMode::NormalizedUri as i32,
+                    min_uses: 2,
+                    valid_statuses: vec![200, 301, 302],
+                }),
                 tls_options: Some(proto::UpstreamTlsOptions {
                     verify: proto::Switch::Off as i32,
                     trusted_certificate: Some(proto::PemSource {
@@ -161,6 +170,17 @@ fn proto_snapshot_converts_into_runtime_router() {
     assert_eq!(route.upstream_timeouts.write, Some(Duration::from_secs(3)));
     assert_eq!(route.upstream_protocol, Some(UpstreamHttpProtocol::H2c));
     assert_eq!(route.upstream_ssl_options.verify_cert, Switch::Off);
+    let cache = route.cache.as_ref().expect("cache config present");
+    assert!(cache.enabled);
+    assert_eq!(cache.max_size, Some(256 * 1024));
+    assert_eq!(cache.ttl, Some(Duration::from_secs(5 * 60)));
+    assert_eq!(cache.stale_if_error, Some(Duration::from_secs(30)));
+    assert_eq!(
+        cache.cache_key,
+        ngxora_compile::ir::CacheKeyMode::NormalizedUri
+    );
+    assert_eq!(cache.min_uses, Some(2));
+    assert_eq!(cache.valid_statuses, vec![200, 301, 302]);
     assert_eq!(
         route.upstream_ssl_options.trusted_certificate,
         Some(PemSource::Path(TRUSTED_UPSTREAM_CA_PATH.into()))
@@ -218,6 +238,7 @@ fn proto_snapshot_defaults_tcp_nodelay_to_on() {
                     upstream_group: String::new(),
                 })),
                 timeouts: None,
+                cache: None,
                 plugins: Vec::new(),
                 tls_options: None,
                 upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
@@ -258,6 +279,7 @@ fn proto_redirect_route_converts_into_runtime_return_target() {
                     location: "https://example.com/new".into(),
                 })),
                 timeouts: None,
+                cache: None,
                 plugins: Vec::new(),
                 tls_options: None,
                 upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
@@ -355,6 +377,18 @@ fn runtime_snapshot_converts_back_to_proto() {
             port: 0,
             upstream_group: "backend-pool".into(),
         }))
+    );
+    assert_eq!(
+        vhost.routes[0].cache.as_ref(),
+        Some(&proto::RouteCache {
+            enabled: proto::Switch::On as i32,
+            max_size_bytes: 256 * 1024,
+            ttl_ms: 5 * 60 * 1_000,
+            stale_if_error_ms: 30 * 1_000,
+            key_mode: proto::CacheKeyMode::NormalizedUri as i32,
+            min_uses: 2,
+            valid_statuses: vec![200, 301, 302],
+        })
     );
     assert_eq!(
         vhost.routes[0].upstream_protocol,
@@ -481,7 +515,15 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                     }),
                 ],
                 plugins: test_route_plugins(),
-                cache: None,
+                cache: Some(ngxora_compile::ir::CacheConfig {
+                    enabled: true,
+                    max_size: Some(256 * 1024),
+                    ttl: Some(Duration::from_secs(5 * 60)),
+                    stale_if_error: Some(Duration::from_secs(30)),
+                    cache_key: ngxora_compile::ir::CacheKeyMode::NormalizedUri,
+                    min_uses: Some(2),
+                    valid_statuses: vec![200, 301, 302],
+                }),
             }],
             listens: vec![Listen {
                 addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),

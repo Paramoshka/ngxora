@@ -7,9 +7,9 @@ use crate::upstreams::{
     ServerRoutes, VirtualHostRoutes,
 };
 use ngxora_compile::ir::{
-    DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
-    LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity, TlsProtocolBounds,
-    TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
+    CacheConfig, CacheKeyMode, DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location,
+    LocationDirective, LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity,
+    TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
     UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
     UpstreamSslOptions, UpstreamTimeouts,
 };
@@ -37,12 +37,13 @@ pub mod proto {
 
 use proto::control_plane_server::{ControlPlane, ControlPlaneServer};
 use proto::{
-    ApplyResult as ProtoApplyResult, ConfigSnapshot as ProtoConfigSnapshot,
-    GetSnapshotRequest as ProtoGetSnapshotRequest, HttpOptions as ProtoHttpOptions,
-    Listener as ProtoListener, ListenerTlsOptions as ProtoListenerTlsOptions, Match as ProtoMatch,
+    ApplyResult as ProtoApplyResult, CacheKeyMode as ProtoCacheKeyMode,
+    ConfigSnapshot as ProtoConfigSnapshot, GetSnapshotRequest as ProtoGetSnapshotRequest,
+    HttpOptions as ProtoHttpOptions, Listener as ProtoListener,
+    ListenerTlsOptions as ProtoListenerTlsOptions, Match as ProtoMatch,
     PemSource as ProtoPemSource, Plugin as ProtoPlugin, Redirect as ProtoRedirect,
-    Regex as ProtoRegex, Route as ProtoRoute, RouteTimeouts as ProtoRouteTimeouts,
-    Switch as ProtoSwitch, TlsBinding as ProtoTlsBinding,
+    Regex as ProtoRegex, Route as ProtoRoute, RouteCache as ProtoRouteCache,
+    RouteTimeouts as ProtoRouteTimeouts, Switch as ProtoSwitch, TlsBinding as ProtoTlsBinding,
     TlsProtocolVersion as ProtoTlsProtocolVersion, TlsVerifyClient as ProtoTlsVerifyClient,
     Upstream as ProtoUpstream, UpstreamBackend as ProtoUpstreamBackend,
     UpstreamGroup as ProtoUpstreamGroup, UpstreamHealthCheck as ProtoUpstreamHealthCheck,
@@ -408,7 +409,7 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
             .iter()
             .map(plugin_spec_from_proto)
             .collect::<Result<Vec<_>, _>>()?,
-        cache: None,
+        cache: route_cache_from_proto(route.cache.as_ref())?,
     })
 }
 
@@ -545,6 +546,54 @@ fn return_directive_from_proto(redirect: &ProtoRedirect) -> Result<LocationDirec
         status,
         location: redirect.location.clone(),
     })
+}
+
+fn route_cache_from_proto(cache: Option<&ProtoRouteCache>) -> Result<Option<CacheConfig>, String> {
+    let Some(cache) = cache else {
+        return Ok(None);
+    };
+
+    let mut config = CacheConfig::default();
+    if matches!(
+        ProtoSwitch::try_from(cache.enabled)
+            .map_err(|_| format!("unknown cache enabled switch value `{}`", cache.enabled))?,
+        ProtoSwitch::Off
+    ) {
+        config.enabled = false;
+    }
+
+    config.max_size = none_if_zero_u64(cache.max_size_bytes);
+    config.ttl = duration_from_millis(cache.ttl_ms).or(config.ttl);
+    config.stale_if_error = duration_from_millis(cache.stale_if_error_ms);
+    config.cache_key = cache_key_mode_from_proto(cache.key_mode)?;
+    config.min_uses = none_if_zero(cache.min_uses)
+        .map(|value| {
+            usize::try_from(value).map_err(|_| "cache min_uses is out of range".to_string())
+        })
+        .transpose()?;
+
+    if !cache.valid_statuses.is_empty() {
+        config.valid_statuses = cache
+            .valid_statuses
+            .iter()
+            .map(|status| {
+                u16::try_from(*status)
+                    .map_err(|_| format!("cache valid status {} is out of range", status))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+
+    Ok(Some(config))
+}
+
+fn cache_key_mode_from_proto(value: i32) -> Result<CacheKeyMode, String> {
+    match ProtoCacheKeyMode::try_from(value)
+        .map_err(|_| format!("unknown cache key mode value `{value}`"))?
+    {
+        ProtoCacheKeyMode::Unspecified | ProtoCacheKeyMode::Uri => Ok(CacheKeyMode::Uri),
+        ProtoCacheKeyMode::UriAndMethod => Ok(CacheKeyMode::UriAndMethod),
+        ProtoCacheKeyMode::NormalizedUri => Ok(CacheKeyMode::NormalizedUri),
+    }
 }
 
 fn plugin_spec_from_proto(plugin: &ProtoPlugin) -> Result<PluginSpec, String> {
@@ -893,6 +942,7 @@ fn proto_route_from_runtime(route: &CompiledLocation) -> Result<ProtoRoute, Stri
         )),
         upstream_protocol: proto_upstream_http_protocol_from_runtime(route.upstream_protocol)
             as i32,
+        cache: route.cache.as_ref().map(proto_route_cache_from_runtime),
     })
 }
 
@@ -934,6 +984,29 @@ fn proto_route_action_from_runtime(target: &RouteTarget) -> proto::route::Action
     }
 }
 
+fn proto_route_cache_from_runtime(value: &CacheConfig) -> ProtoRouteCache {
+    ProtoRouteCache {
+        enabled: proto_switch_from_runtime(if value.enabled {
+            Switch::On
+        } else {
+            Switch::Off
+        }) as i32,
+        max_size_bytes: value.max_size.unwrap_or(0),
+        ttl_ms: duration_to_millis(value.ttl),
+        stale_if_error_ms: duration_to_millis(value.stale_if_error),
+        key_mode: proto_cache_key_mode_from_runtime(value.cache_key.clone()) as i32,
+        min_uses: value
+            .min_uses
+            .and_then(|uses| u32::try_from(uses).ok())
+            .unwrap_or(0),
+        valid_statuses: value
+            .valid_statuses
+            .iter()
+            .map(|status| u32::from(*status))
+            .collect(),
+    }
+}
+
 fn proto_upstream_http_protocol_from_runtime(
     value: Option<UpstreamHttpProtocol>,
 ) -> ProtoUpstreamHttpProtocol {
@@ -942,6 +1015,14 @@ fn proto_upstream_http_protocol_from_runtime(
         Some(UpstreamHttpProtocol::H1) => ProtoUpstreamHttpProtocol::H1,
         Some(UpstreamHttpProtocol::H2) => ProtoUpstreamHttpProtocol::H2,
         Some(UpstreamHttpProtocol::H2c) => ProtoUpstreamHttpProtocol::H2c,
+    }
+}
+
+fn proto_cache_key_mode_from_runtime(value: CacheKeyMode) -> ProtoCacheKeyMode {
+    match value {
+        CacheKeyMode::Uri => ProtoCacheKeyMode::Uri,
+        CacheKeyMode::UriAndMethod => ProtoCacheKeyMode::UriAndMethod,
+        CacheKeyMode::NormalizedUri => ProtoCacheKeyMode::NormalizedUri,
     }
 }
 

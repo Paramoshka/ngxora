@@ -83,11 +83,22 @@ message Route {
   repeated Plugin plugins = 4;
   UpstreamTlsOptions tls_options = 5;
   UpstreamHttpProtocol upstream_protocol = 6;
+  RouteCache cache = 8;
 }
 
 message Redirect {
   uint32 status = 1;
   string location = 2;
+}
+
+message RouteCache {
+  Switch enabled = 1;
+  uint64 max_size_bytes = 2;
+  uint64 ttl_ms = 3;
+  uint64 stale_if_error_ms = 4;
+  CacheKeyMode key_mode = 5;
+  uint32 min_uses = 6;
+  repeated uint32 valid_statuses = 7;
 }
 
 message RouteTimeouts {
@@ -190,4 +201,11 @@ enum Switch {
   SWITCH_UNSPECIFIED = 0;
   SWITCH_ON = 1;
   SWITCH_OFF = 2;
+}
+
+enum CacheKeyMode {
+  CACHE_KEY_MODE_UNSPECIFIED = 0;
+  CACHE_KEY_MODE_URI = 1;
+  CACHE_KEY_MODE_URI_AND_METHOD = 2;
+  CACHE_KEY_MODE_NORMALIZED_URI = 3;
 }

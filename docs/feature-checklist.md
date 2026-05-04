@@ -62,13 +62,13 @@ The rule is simple:
 
 | Feature | Status | Text Config | gRPC | Reload | Notes |
 |---|---|---|---|---|---|
-| Per-location cache | ✅ | `proxy_cache { ... }` | 🟡 | Live | In-memory LRU |
-| `proxy_cache_ttl` | ✅ | ✅ | 🟡 | Live | |
-| `proxy_cache_stale_if_error` | ✅ | ✅ | 🟡 | Live | `X-Cache: STALE` |
-| `proxy_cache_key` | ✅ | ✅ | 🟡 | Live | uri/uri_and_method/normalized_uri |
-| `proxy_cache_valid` | ✅ | ✅ | 🟡 | Live | Status code allowlist |
-| `proxy_cache_max_size` | ✅ | ✅ | 🟡 | Live | Global + per-location |
-| `proxy_cache_min_uses` | 🟡 | ✅ | 🟡 | Live | First N cache misses before initial store |
+| Per-location cache | ✅ | `proxy_cache { ... }` | ✅ | Live | In-memory LRU |
+| `proxy_cache_ttl` | ✅ | ✅ | ✅ | Live | |
+| `proxy_cache_stale_if_error` | ✅ | ✅ | ✅ | Live | `X-Cache: STALE` |
+| `proxy_cache_key` | ✅ | ✅ | ✅ | Live | uri/uri_and_method/normalized_uri |
+| `proxy_cache_valid` | ✅ | ✅ | ✅ | Live | Status code allowlist |
+| `proxy_cache_max_size` | ✅ | ✅ | ✅ | Live | Global + per-location |
+| `proxy_cache_min_uses` | ✅ | ✅ | ✅ | Live | First N cache misses before initial store |
 
 ## Built-in Plugins
 
@@ -125,6 +125,6 @@ Three items to close before calling it production-ready:
 
 Nice to have shortly after:
 
-4. 🟡 Fill in gRPC path for `proxy_cache`, `try_files`, `root`
+4. 🟡 Fill in gRPC path for `try_files`, `root`
 5. 🟡 Document reload matrix explicitly (which fields are Live vs Restart)
 6. 💤 Graceful reload via SIGHUP

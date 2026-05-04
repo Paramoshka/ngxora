@@ -122,6 +122,7 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
                     read_timeout_ms: 15_000,
                     write_timeout_ms: 15_000,
                 }),
+                cache: None,
                 upstream_protocol: ngxora_runtime::grpc::proto::UpstreamHttpProtocol::Unspecified
                     as i32,
                 tls_options: None,
