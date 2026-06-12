@@ -108,10 +108,81 @@ Notes:
 
 ## Downstream TLS Options
 
+### Manual certificates
+
 - `ssl_certificate <path>;`
-  Server certificate for the listener.
+  Server certificate for the listener. When present, the server uses manual
+  certificate management.
 - `ssl_certificate_key <path>;`
   Private key for the listener certificate.
+
+### Let's Encrypt (ACME)
+
+ngxora can automatically obtain and renew TLS certificates from Let's Encrypt.
+Declare a global `ssl_provider letsencrypt` block inside `http`:
+
+```nginx
+http {
+    ssl_provider letsencrypt {
+        email admin@example.com;
+    }
+
+    server {
+        server_name example.com;
+        listen 443 ssl;
+
+        location / {
+            proxy_pass http://127.0.0.1:8080;
+        }
+    }
+}
+```
+
+When `ssl_certificate` and `ssl_certificate_key` are **omitted** from a server
+block, ngxora treats the server as Let's Encrypt-managed.  Certificates are
+stored under the cache directory (`/var/lib/ngxora/certs` by default) and
+renewed automatically.
+
+If a server block explicitly provides `ssl_certificate`, it takes priority over
+the global Let's Encrypt configuration.
+
+`ssl_provider letsencrypt` directives:
+
+| Directive | Arguments | Default | Description |
+|---|---|---|---|
+| `email` | `<address>` | — | Contact email registered with the ACME account. |
+| `acme_directory` | `<url>` | `https://acme-v02.api.letsencrypt.org/directory` | ACME directory endpoint. Use the staging URL for testing. |
+| `cache_dir` | `<path>` | `/var/lib/ngxora/certs` | Directory where obtained certificates are stored. |
+
+Example with staging and custom cache:
+
+```nginx
+http {
+    ssl_provider letsencrypt {
+        acme_directory https://acme-staging-v02.api.letsencrypt.org/directory;
+        email dev@example.com;
+        cache_dir /data/ngxora/certs;
+    }
+
+    server {
+        server_name api.example.com;
+        listen 443 ssl;
+        location / { proxy_pass http://backend; }
+    }
+
+    # This server uses a manually-provided certificate instead of LE:
+    server {
+        server_name internal.example.com;
+        listen 443 ssl;
+        ssl_certificate /etc/certs/internal.pem;
+        ssl_certificate_key /etc/certs/internal-key.pem;
+        location / { proxy_pass http://internal; }
+    }
+}
+```
+
+### TLS protocol and client verification
+
 - `ssl_protocols TLSv1 TLSv1.2 TLSv1.3;`
   Sets downstream TLS protocol bounds.
 - `ssl_verify_client off|optional|required;`

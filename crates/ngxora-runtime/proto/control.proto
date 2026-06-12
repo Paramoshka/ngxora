@@ -24,6 +24,7 @@ message ConfigSnapshot {
   repeated Listener listeners = 3;
   repeated VirtualHost virtual_hosts = 4;
   repeated UpstreamGroup upstreams = 5;
+  LetsEncryptConfig le_config = 6;
 }
 
 message HttpOptions {
@@ -163,6 +164,12 @@ message UpstreamHealthCheck {
 }
 
 message UpstreamTcpHealthCheck {}
+
+message LetsEncryptConfig {
+  string acme_directory = 1;   // empty = Let's Encrypt production
+  string email = 2;
+  string cache_dir = 3;        // empty = /var/lib/ngxora/certs
+}
 
 message UpstreamHttpHealthCheck {
   string host = 1;

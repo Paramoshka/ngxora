@@ -11,8 +11,8 @@ mod tests {
 
     use crate::ir::{
         CacheKeyMode, Ir, KeepaliveTimeout, LocationDirective, LocationMatcher, PemSource,
-        ProxyPassTarget, Switch, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
-        UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy,
+        ProxyPassTarget, SslProvider, Switch, TlsProtocolBounds, TlsProtocolVersion,
+        TlsVerifyClient, UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy,
     };
 
     #[test]
@@ -24,6 +24,8 @@ http {
   server {
     listen 443 ssl default_server;
     server_name example.com www.example.com;
+    ssl_certificate /tmp/cert.pem;
+    ssl_certificate_key /tmp/key.pem;
     location / {
       proxy_pass http://127.0.0.1:8080;
     }
@@ -34,6 +36,7 @@ http {
         let ir = Ir::from_ast(&ast).expect("from_ast failed");
 
         let http = ir.http.expect("http missing");
+        assert_eq!(http.ssl_provider, None);
         assert_eq!(
             http.keepalive_timeout,
             KeepaliveTimeout::Timeout {
@@ -59,6 +62,8 @@ http {
         assert!(server.listens[0].default_server);
         assert!(!server.listens[0].http2);
         assert!(!server.listens[0].http2_only);
+
+        assert!(matches!(server.tls, Some(SslProvider::Custom(_))));
 
         assert_eq!(server.locations.len(), 1);
         let location = &server.locations[0];
@@ -133,6 +138,8 @@ http {
   server {
     listen 443 ssl http2;
     server_name example.com;
+    ssl_certificate /tmp/cert.pem;
+    ssl_certificate_key /tmp/key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_verify_client optional;
     ssl_client_certificate /etc/ssl/clients/ca.pem;
@@ -859,5 +866,186 @@ http {
         let ast = Ast::parse_config(input).unwrap();
         let err = Ir::from_ast(&ast).expect_err("expected return to fail");
         assert!(err.message.contains("not a redirect"));
+    }
+
+    // --- ssl_provider letsencrypt tests ---
+
+    #[test]
+    fn from_ast_parses_ssl_provider_letsencrypt() {
+        let input = r#"
+http {
+  ssl_provider letsencrypt {
+    acme_directory https://acme-staging-v02.api.letsencrypt.org/directory;
+    email admin@example.com;
+    cache_dir /var/lib/ngxora/certs;
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let le = http.ssl_provider.expect("ssl_provider missing");
+        assert_eq!(
+            le.acme_directory,
+            Some("https://acme-staging-v02.api.letsencrypt.org/directory".into())
+        );
+        assert_eq!(le.email, Some("admin@example.com".into()));
+        assert_eq!(le.cache_dir, Some(PathBuf::from("/var/lib/ngxora/certs")));
+    }
+
+    #[test]
+    fn from_ast_ssl_provider_defaults_to_production() {
+        let input = r#"
+http {
+  ssl_provider letsencrypt {
+    email admin@example.com;
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let le = http.ssl_provider.expect("ssl_provider missing");
+        assert_eq!(le.acme_directory, None);
+        assert_eq!(le.cache_dir, None);
+    }
+
+    #[test]
+    fn from_ast_server_uses_letsencrypt_without_ssl_certificate() {
+        let input = r#"
+http {
+  ssl_provider letsencrypt {
+    email admin@example.com;
+  }
+  server {
+    listen 443 ssl;
+    server_name example.com;
+    location / {
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let server = &http.servers[0];
+        assert!(matches!(server.tls, Some(SslProvider::LetsEncrypt)));
+    }
+
+    #[test]
+    fn from_ast_custom_certificate_wins_over_letsencrypt() {
+        let input = r#"
+http {
+  ssl_provider letsencrypt {
+    email admin@example.com;
+  }
+  server {
+    listen 443 ssl;
+    server_name example.com;
+    ssl_certificate /tmp/cert.pem;
+    ssl_certificate_key /tmp/key.pem;
+    location / {
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let server = &http.servers[0];
+        // Explicit ssl_certificate takes priority over LE.
+        assert!(matches!(server.tls, Some(SslProvider::Custom(_))));
+    }
+
+    #[test]
+    fn from_ast_rejects_ssl_listener_without_certificate_or_le() {
+        let input = r#"
+http {
+  server {
+    listen 443 ssl;
+    server_name example.com;
+    location / {
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected ssl without cert to fail");
+        assert!(err.message.contains("ssl listener requires a certificate"));
+    }
+
+    #[test]
+    fn from_ast_rejects_letsencrypt_without_server_name() {
+        let input = r#"
+http {
+  ssl_provider letsencrypt {
+    email admin@example.com;
+  }
+  server {
+    listen 443 ssl;
+    location / {
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected LE without server_name to fail");
+        assert!(err.message.contains("requires at least one server_name"));
+    }
+
+    #[test]
+    fn from_ast_rejects_duplicate_ssl_provider() {
+        let input = r#"
+http {
+  ssl_provider letsencrypt {
+    email a@example.com;
+  }
+  ssl_provider letsencrypt {
+    email b@example.com;
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected duplicate ssl_provider to fail");
+        assert!(err.message.contains("duplicate ssl_provider"));
+    }
+
+    #[test]
+    fn from_ast_rejects_ssl_provider_unknown_name() {
+        let input = r#"
+http {
+  ssl_provider zerossl {
+    email admin@example.com;
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected unknown provider to fail");
+        assert!(err.message.contains("only 'letsencrypt' is supported"));
+    }
+
+    #[test]
+    fn from_ast_rejects_ssl_provider_unexpected_block() {
+        let input = r#"
+http {
+  ssl_provider letsencrypt {
+    email admin@example.com;
+    nested {
+      value on;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected nested block to fail");
+        assert!(err.message.contains("unexpected block"));
     }
 }

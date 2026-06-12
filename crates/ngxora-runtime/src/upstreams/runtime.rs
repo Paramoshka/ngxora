@@ -6,6 +6,7 @@ use super::types::{
 };
 use crate::cache::{CacheBackend, CacheKey, build_cache_key, is_cacheable};
 use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState};
+use crate::le::ChallengeTokens;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::FutureExt;
@@ -672,6 +673,8 @@ async fn write_cached_response(
 pub struct DynamicProxy {
     state: Arc<RuntimeState>,
     cache_backend: CacheBackend,
+    /// Shared HTTP-01 challenge token store for Let's Encrypt certificate issuance.
+    challenge_tokens: ChallengeTokens,
 }
 
 impl DynamicProxy {
@@ -679,6 +682,7 @@ impl DynamicProxy {
         Self {
             state,
             cache_backend: CacheBackend::new(50 * 1024 * 1024), // 50MB default
+            challenge_tokens: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -686,7 +690,13 @@ impl DynamicProxy {
         Self {
             state,
             cache_backend,
+            challenge_tokens: Arc::new(dashmap::DashMap::new()),
         }
+    }
+
+    /// Set the challenge token store (called after LE manager is created).
+    pub fn set_challenge_tokens(&mut self, tokens: ChallengeTokens) {
+        self.challenge_tokens = tokens;
     }
 
     pub fn from_router(routing: CompiledRouter) -> Self {
@@ -740,6 +750,28 @@ impl ProxyHttp for DynamicProxy {
 
         if restrict_client_max_body_size(session, ctx).await? {
             return Ok(true);
+        }
+
+        // Let's Encrypt HTTP-01 challenge responder.
+        if let Some(token) = session
+            .req_header()
+            .uri
+            .path()
+            .strip_prefix("/.well-known/acme-challenge/")
+        {
+            if !token.is_empty() && !token.contains('/') {
+                if let Some(key_auth) = self.challenge_tokens.get(token).map(|v| v.clone()) {
+                    let mut response = LocalResponse::new(http::StatusCode::OK, "");
+                    response.headers.push((
+                        http::header::CONTENT_TYPE,
+                        http::HeaderValue::from_static("text/plain"),
+                    ));
+                    response.body = key_auth.into_bytes().into();
+                    session.set_keepalive(None);
+                    write_local_response(session, response).await?;
+                    return Ok(true);
+                }
+            }
         }
 
         let Some((selected, host)) = select_runtime_route(&snapshot, session)? else {

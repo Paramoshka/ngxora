@@ -7,6 +7,27 @@ use std::time::Duration;
 
 use url::Url;
 
+/// How the server obtains its TLS certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SslProvider {
+    /// Manually provided certificate and key paths (ssl_certificate / ssl_certificate_key).
+    Custom(TlsIdentity),
+    /// Automatically issued and renewed via ACME (Let's Encrypt).
+    LetsEncrypt,
+}
+
+/// Global Let's Encrypt / ACME configuration declared inside `ssl_provider letsencrypt { ... }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LetsEncryptConfig {
+    /// ACME directory URL.  If omitted the Let's Encrypt production endpoint is used.
+    pub acme_directory: Option<String>,
+    /// Contact email registered with the ACME account (required).
+    pub email: Option<String>,
+    /// Directory where obtained certificates are stored on disk.
+    /// Default: `/var/lib/ngxora/certs`.
+    pub cache_dir: Option<PathBuf>,
+}
+
 #[derive(Debug, Eq, PartialEq, Default)]
 pub struct Ir {
     pub http: Option<Http>,
@@ -24,6 +45,7 @@ pub struct Http {
     pub tcp_nodelay: Switch,
     pub allow_connect_method_proxying: Switch,
     pub h2c: Switch,
+    pub ssl_provider: Option<LetsEncryptConfig>,
 }
 
 impl Default for Http {
@@ -38,6 +60,7 @@ impl Default for Http {
             tcp_nodelay: Switch::On,
             allow_connect_method_proxying: Switch::Off,
             h2c: Switch::Off,
+            ssl_provider: None,
         }
     }
 }
@@ -65,7 +88,9 @@ pub struct Server {
     pub server_names: Vec<String>,
     pub locations: Vec<Location>,
     pub listens: Vec<Listen>,
-    pub tls: Option<TlsIdentity>,
+    /// How TLS certificates are obtained for this server.
+    /// `None` means the server does not require TLS (no `ssl` listener).
+    pub tls: Option<SslProvider>,
     pub tls_options: DownstreamTlsOptions,
 }
 

@@ -4,6 +4,7 @@ use ngxora_runtime::control::{
     ConfigSnapshot, InProcessControlPlane, RuntimeState, RuntimeUpstreamHealthChecks,
 };
 use ngxora_runtime::grpc::{spawn_control_plane, spawn_control_plane_uds};
+use ngxora_runtime::le::{self, LeReconcilerService};
 use ngxora_runtime::server::bind_listeners_from_state;
 use ngxora_runtime::upstreams::{CompiledRouter, DynamicProxy};
 use pingora::server::Server;
@@ -24,6 +25,12 @@ struct CliArgs {
 
 fn main() -> ExitCode {
     env_logger::init();
+
+    // Install the rustls crypto provider early — needed by background services
+    // running in Pingora worker threads.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
 
     let cli = match parse_cli_args(env::args_os()) {
         Ok(Some(cli)) => cli,
@@ -66,10 +73,22 @@ fn run(cli: CliArgs) -> Result<(), String> {
         .map_err(|err| format!("failed to create pingora server: {err}"))?;
     server.bootstrap();
 
-    let mut proxy = pingora_proxy::http_proxy_service(
-        &server.configuration,
-        DynamicProxy::new(Arc::clone(control.state())),
-    );
+    let mut dynamic_proxy = DynamicProxy::new(Arc::clone(control.state()));
+
+    // Shared token store for Let's Encrypt HTTP-01 challenges.
+    let le_tokens: le::ChallengeTokens = Arc::new(dashmap::DashMap::new());
+
+    // Start Let's Encrypt reconciler if configured.
+    if snapshot.router.le_config.is_some() {
+        dynamic_proxy.set_challenge_tokens(Arc::clone(&le_tokens));
+        let le_service = background_service(
+            "le-reconciler",
+            LeReconcilerService::new(Arc::clone(&state), le_tokens),
+        );
+        server.add_service(le_service);
+    }
+
+    let mut proxy = pingora_proxy::http_proxy_service(&server.configuration, dynamic_proxy);
     let upstream_health_checks = background_service(
         "upstream health checks",
         RuntimeUpstreamHealthChecks::new(Arc::clone(&state)),

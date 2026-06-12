@@ -3,7 +3,7 @@ use crate::control::{ConfigSnapshot, RuntimeState};
 use crate::upstreams::{CompiledMatcher, CompiledRouter, ListenKey, RouteTarget};
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
-    ProxyPassTarget, Server, Switch, TlsIdentity, UpstreamBlock, UpstreamHealthCheck,
+    ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity, UpstreamBlock, UpstreamHealthCheck,
     UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
 };
 use ngxora_plugin_api::PluginSpec;
@@ -126,6 +126,7 @@ fn proto_snapshot_converts_into_runtime_router() {
                 }],
             }],
         }],
+        le_config: None,
     };
 
     let runtime = runtime_snapshot_from_proto(snapshot).expect("proto snapshot compiles");
@@ -244,6 +245,7 @@ fn proto_snapshot_defaults_tcp_nodelay_to_on() {
                 upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
             }],
         }],
+        le_config: None,
     };
 
     let runtime = runtime_snapshot_from_proto(snapshot).expect("proto snapshot compiles");
@@ -285,6 +287,7 @@ fn proto_redirect_route_converts_into_runtime_return_target() {
                 upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
             }],
         }],
+        le_config: None,
     };
 
     let runtime = runtime_snapshot_from_proto(snapshot).expect("proto snapshot compiles");
@@ -533,10 +536,10 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                 http2: true,
                 http2_only: false,
             }],
-            tls: Some(TlsIdentity {
+            tls: Some(SslProvider::Custom(TlsIdentity {
                 cert: PemSource::Path("/etc/ngxora/tls/example.crt".into()),
                 key: PemSource::Path("/etc/ngxora/tls/example.key".into()),
-            }),
+            })),
             ..Server::default()
         }],
         keepalive_timeout: KeepaliveTimeout::Timeout {
@@ -549,6 +552,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
         allow_connect_method_proxying: Switch::Off,
         h2c: Switch::Off,
         proxy_cache_max_size: None,
+        ssl_provider: None,
     };
 
     CompiledRouter::from_http(&http).expect("router compiles")

@@ -84,3 +84,10 @@ pub const SSL_CERTIFICATE_KEY: &str = "ssl_certificate_key";
 pub const SSL_PROTOCOLS: &str = "ssl_protocols";
 pub const SSL_VERIFY_CLIENT: &str = "ssl_verify_client";
 pub const SSL_CLIENT_CERTIFICATE: &str = "ssl_client_certificate";
+
+// SSL Provider (Let's Encrypt / ACME)
+pub const SSL_PROVIDER: &str = "ssl_provider";
+pub const LETSENCRYPT: &str = "letsencrypt";
+pub const ACME_DIRECTORY: &str = "acme_directory";
+pub const EMAIL: &str = "email";
+pub const CACHE_DIR: &str = "cache_dir";

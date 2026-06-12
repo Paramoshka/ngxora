@@ -7,11 +7,11 @@ use crate::upstreams::{
     ServerRoutes, VirtualHostRoutes,
 };
 use ngxora_compile::ir::{
-    CacheConfig, CacheKeyMode, DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location,
-    LocationDirective, LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity,
-    TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
-    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
-    UpstreamSslOptions, UpstreamTimeouts,
+    CacheConfig, CacheKeyMode, DownstreamTlsOptions, Http, KeepaliveTimeout, LetsEncryptConfig,
+    Listen, Location, LocationDirective, LocationMatcher, PemSource, ProxyPassTarget, Server,
+    SslProvider, Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
+    UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol,
+    UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use serde_json::Value;
@@ -39,8 +39,8 @@ use proto::control_plane_server::{ControlPlane, ControlPlaneServer};
 use proto::{
     ApplyResult as ProtoApplyResult, CacheKeyMode as ProtoCacheKeyMode,
     ConfigSnapshot as ProtoConfigSnapshot, GetSnapshotRequest as ProtoGetSnapshotRequest,
-    HttpOptions as ProtoHttpOptions, Listener as ProtoListener,
-    ListenerTlsOptions as ProtoListenerTlsOptions, Match as ProtoMatch,
+    HttpOptions as ProtoHttpOptions, LetsEncryptConfig as ProtoLetsEncryptConfig,
+    Listener as ProtoListener, ListenerTlsOptions as ProtoListenerTlsOptions, Match as ProtoMatch,
     PemSource as ProtoPemSource, Plugin as ProtoPlugin, Redirect as ProtoRedirect,
     Regex as ProtoRegex, Route as ProtoRoute, RouteCache as ProtoRouteCache,
     RouteTimeouts as ProtoRouteTimeouts, Switch as ProtoSwitch, TlsBinding as ProtoTlsBinding,
@@ -261,6 +261,7 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
         allow_connect_method_proxying: switch_from_bool(options.allow_connect_method_proxying),
         h2c: switch_from_bool(options.h2c),
         proxy_cache_max_size: none_if_zero_u64(options.proxy_cache_max_size_bytes),
+        ssl_provider: snapshot.le_config.as_ref().map(le_config_from_proto),
     })
 }
 
@@ -352,7 +353,8 @@ fn server_from_proto_virtual_host(
             .tls
             .as_ref()
             .map(tls_identity_from_proto)
-            .transpose()?,
+            .transpose()?
+            .map(SslProvider::Custom),
         tls_options: listener.tls_options.clone(),
     })
 }
@@ -697,6 +699,28 @@ fn upstream_tls_options_from_proto(
     }))
 }
 
+// ── LetsEncryptConfig ↔ proto ──
+
+fn le_config_from_proto(value: &ProtoLetsEncryptConfig) -> LetsEncryptConfig {
+    LetsEncryptConfig {
+        acme_directory: none_if_empty(value.acme_directory.clone()),
+        email: none_if_empty(value.email.clone()),
+        cache_dir: none_if_empty(value.cache_dir.clone()).map(PathBuf::from),
+    }
+}
+
+fn proto_le_config_from_ir(value: &LetsEncryptConfig) -> ProtoLetsEncryptConfig {
+    ProtoLetsEncryptConfig {
+        acme_directory: value.acme_directory.clone().unwrap_or_default(),
+        email: value.email.clone().unwrap_or_default(),
+        cache_dir: value
+            .cache_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+    }
+}
+
 // Export the active runtime snapshot back to the protobuf shape used by the
 // local control-plane. This path is primarily for GetSnapshot and tests.
 fn proto_snapshot_from_runtime(snapshot: &RuntimeSnapshot) -> Result<ProtoConfigSnapshot, String> {
@@ -741,6 +765,11 @@ fn proto_snapshot_from_runtime(snapshot: &RuntimeSnapshot) -> Result<ProtoConfig
         listeners,
         virtual_hosts,
         upstreams: proto_upstreams_from_runtime(&snapshot.router.upstreams),
+        le_config: snapshot
+            .router
+            .le_config
+            .as_ref()
+            .map(proto_le_config_from_ir),
     })
 }
 
@@ -1207,6 +1236,10 @@ fn none_if_zero(value: u32) -> Option<u32> {
 
 fn none_if_zero_u64(value: u64) -> Option<u64> {
     (value > 0).then_some(value)
+}
+
+fn none_if_empty(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
 }
 
 fn sorted_named_routes(routes: &HashMap<String, ServerRoutes>) -> Vec<(&String, &ServerRoutes)> {

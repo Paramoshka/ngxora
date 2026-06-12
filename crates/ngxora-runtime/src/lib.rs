@@ -9,5 +9,6 @@
 pub mod cache;
 pub mod control;
 pub mod grpc;
+pub mod le;
 pub mod server;
 pub mod upstreams;

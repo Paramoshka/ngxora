@@ -14,6 +14,7 @@ It aims for a simple split:
 
 - familiar `server` / `listen` / `location` / `proxy_pass`
 - shared `:443` listeners with SNI-based certificate selection
+- **automatic Let's Encrypt TLS** — declare `ssl_provider letsencrypt`, forget about cert files
 - atomic route updates through runtime snapshots
 - location-level in-memory response caching with stale-on-upstream-error fallback
 - compile-time plugins for policy and request/response behavior
@@ -90,6 +91,53 @@ cargo run -- examples/ngxora.conf
 
 Supported directives, upstream policies, and built-in plugin config are documented in [Config Options](./docs/config-options.md).
 
+## Let's Encrypt (automatic TLS)
+
+`ngxora` can obtain and renew TLS certificates from Let's Encrypt automatically.
+Add `ssl_provider letsencrypt` to the `http` block and omit `ssl_certificate` /
+`ssl_certificate_key` — the proxy handles the rest.
+
+```nginx
+http {
+    ssl_provider letsencrypt {
+        email admin@example.com;
+        # cache_dir /var/lib/ngxora/certs;                     # optional, default shown
+        # acme_directory https://acme-staging-v02.api.letsencrypt.org/directory;  # optional: staging for tests, omit for production
+    }
+
+    # HTTP-01 validation requires port 80 (TLS-ALPN-01 on 443 is planned)
+    server {
+        listen 80;
+        server_name example.com;
+        location / { return 301 https://$host$request_uri; }
+    }
+
+    server {
+        listen 443 ssl;
+        server_name example.com;
+        # No ssl_certificate — LE manages it automatically
+
+        location / {
+            proxy_pass http://127.0.0.1:8080;
+        }
+    }
+}
+```
+
+How it works:
+
+- On startup, ngxora creates (or restores) an ACME account in `cache_dir/account.json`.
+- Omit `acme_directory` for production; set it to the staging URL for testing without rate limits.
+- For each server with `listen 443 ssl` and no explicit `ssl_certificate`, a certificate
+  is obtained via HTTP-01 challenge.
+- Certificates are stored as `{cache_dir}/{domain}/fullchain.pem` and
+  `{cache_dir}/{domain}/privkey.pem`.
+- A background task checks every hour and renews certificates expiring within 30 days.
+- Explicit `ssl_certificate` in a `server` block takes priority over Let's Encrypt —
+  useful when mixing LE and custom certificates.
+
+See [Config Options](./docs/config-options.md) for all `ssl_provider letsencrypt` directives.
+
 ## WebSocket proxying
 
 Classic HTTP/1.1 WebSocket proxying works with plain `proxy_pass`; `ngxora` does not require extra `Upgrade` or `Connection` rewrite directives for the common case.
@@ -159,6 +207,7 @@ The runtime is built around atomic snapshot apply:
 - routing can be swapped live
 - upstreams can be changed live
 - SNI certificate maps can be changed live on existing listeners
+- Let's Encrypt configuration can be applied via snapshot
 - listener topology changes are detected and reported as `restart_required`
 
 The gRPC transport for the control plane is the intended next layer on top of this runtime model.
@@ -261,6 +310,7 @@ It leans on Pingora for the data plane:
 - classic WebSocket proxying over HTTP/1.1 upgrade
 - connection reuse and pooling
 - TLS termination and upstream TLS
+- automatic Let's Encrypt certificate issuance and renewal
 - efficient async request handling
 - a programmable proxy lifecycle
 

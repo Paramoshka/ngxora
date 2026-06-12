@@ -132,6 +132,7 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
                 }],
             }],
         }],
+        le_config: None,
     }
 }
 

@@ -3,15 +3,17 @@ use ngxora_plugin_api::PluginSpec;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use url::Url;
 
 use crate::{
     consts,
     ir::{
-        CacheConfig, Http, Ir, KeepaliveTimeout, Listen, Location, LocationDirective,
-        LocationMatcher, PemSource, ProxyPassTarget, Server, Switch, TlsIdentity,
-        TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHealthCheck,
-        UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
+        CacheConfig, Http, Ir, KeepaliveTimeout, LetsEncryptConfig, Listen, Location,
+        LocationDirective, LocationMatcher, PemSource, ProxyPassTarget, Server, SslProvider,
+        Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock,
+        UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol,
+        UpstreamSelectionPolicy, UpstreamServer,
     },
 };
 
@@ -126,12 +128,75 @@ fn lower_http(block: &Block) -> Result<Http, LowerErr> {
                     let upstream = lower_upstream(block)?;
                     http.upstreams.push(upstream);
                 }
+                consts::SSL_PROVIDER => {
+                    if http.ssl_provider.is_some() {
+                        return Err(LowerErr {
+                            message: "duplicate ssl_provider block".into(),
+                        });
+                    }
+                    http.ssl_provider = Some(lower_ssl_provider(block)?);
+                }
                 _ => {
                     return Err(LowerErr {
                         message: format!("Unknown block name: {:?}", block.name),
                     });
                 }
             },
+        }
+    }
+
+    // Assign LetsEncrypt to servers that have an SSL listener but no explicit
+    // ssl_certificate when a global ssl_provider letsencrypt is configured.
+    if http.ssl_provider.is_some() {
+        for server in &mut http.servers {
+            let has_ssl_listener = server.listens.iter().any(|l| l.ssl);
+            if has_ssl_listener && server.tls.is_none() {
+                server.tls = Some(SslProvider::LetsEncrypt);
+            }
+        }
+    }
+
+    for server in &http.servers {
+        let has_ssl_listener = server.listens.iter().any(|l| l.ssl);
+        if !has_ssl_listener {
+            continue;
+        }
+
+        match &server.tls {
+            Some(SslProvider::Custom(tls)) => {
+                if tls.cert == PemSource::Path(PathBuf::new()) {
+                    return Err(LowerErr {
+                        message: "ssl listener requires ssl_certificate".into(),
+                    });
+                }
+                if tls.key == PemSource::Path(PathBuf::new()) {
+                    return Err(LowerErr {
+                        message: "ssl listener requires ssl_certificate_key".into(),
+                    });
+                }
+            }
+            Some(SslProvider::LetsEncrypt) => {
+                if http.ssl_provider.is_none() {
+                    return Err(LowerErr {
+                        message:
+                            "ssl listener with LetsEncrypt provider requires an ssl_provider letsencrypt { ... } block in http"
+                                .into(),
+                    });
+                }
+                if server.server_names.is_empty() {
+                    return Err(LowerErr {
+                        message:
+                            "ssl listener with LetsEncrypt requires at least one server_name for certificate issuance"
+                                .into(),
+                    });
+                }
+            }
+            None => {
+                return Err(LowerErr {
+                    message: "ssl listener requires a certificate: use ssl_certificate / ssl_certificate_key, or enable ssl_provider letsencrypt"
+                        .into(),
+                });
+            }
         }
     }
 
@@ -168,6 +233,61 @@ fn apply_http_directive(http: &mut Http, d: &Directive) -> Result<(), LowerErr> 
     }
 
     Ok(())
+}
+
+fn lower_ssl_provider(block: &Block) -> Result<LetsEncryptConfig, LowerErr> {
+    match block.args.as_slice() {
+        [name] if name == consts::LETSENCRYPT => {}
+        [] => {
+            return Err(LowerErr {
+                message: "ssl_provider: expected provider name (letsencrypt)".into(),
+            });
+        }
+        _ => {
+            return Err(LowerErr {
+                message: "ssl_provider: only 'letsencrypt' is supported as a provider name".into(),
+            });
+        }
+    }
+
+    let mut config = LetsEncryptConfig {
+        acme_directory: None,
+        email: None,
+        cache_dir: None,
+    };
+
+    for child in &block.children {
+        let directive = match child {
+            Node::Directive(d) => d,
+            Node::Block(b) => {
+                return Err(LowerErr {
+                    message: format!("ssl_provider: unexpected block `{}`", b.name),
+                });
+            }
+        };
+
+        match directive.name.as_str() {
+            consts::ACME_DIRECTORY => {
+                let raw = parse_exactly_one_argument(&directive.args, consts::ACME_DIRECTORY)?;
+                config.acme_directory = Some(raw);
+            }
+            consts::EMAIL => {
+                let raw = parse_exactly_one_argument(&directive.args, consts::EMAIL)?;
+                config.email = Some(raw);
+            }
+            consts::CACHE_DIR => {
+                let raw = parse_exactly_one_argument(&directive.args, consts::CACHE_DIR)?;
+                config.cache_dir = Some(PathBuf::from(raw));
+            }
+            _ => {
+                return Err(LowerErr {
+                    message: format!("ssl_provider: unsupported directive `{}`", directive.name),
+                });
+            }
+        }
+    }
+
+    Ok(config)
 }
 
 fn lower_server(block: &Block) -> Result<Server, LowerErr> {
@@ -269,8 +389,12 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
                         message: "ssl_certificate: invalid certificate source".into(),
                     })?;
 
-                let tls = server.tls.get_or_insert_with(TlsIdentity::default);
-                tls.cert = ps;
+                let provider = server
+                    .tls
+                    .get_or_insert_with(|| SslProvider::Custom(TlsIdentity::default()));
+                if let SslProvider::Custom(tls) = provider {
+                    tls.cert = ps;
+                }
             }
             [] => {
                 return Err(LowerErr {
@@ -291,8 +415,12 @@ fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), Lowe
                         message: "ssl_certificate_key: invalid key source".into(),
                     })?;
 
-                let tls = server.tls.get_or_insert_with(TlsIdentity::default);
-                tls.key = ps;
+                let provider = server
+                    .tls
+                    .get_or_insert_with(|| SslProvider::Custom(TlsIdentity::default()));
+                if let SslProvider::Custom(tls) = provider {
+                    tls.key = ps;
+                }
             }
             [] => {
                 return Err(LowerErr {

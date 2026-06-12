@@ -4,12 +4,14 @@ use super::types::{
     ListenerTlsConfig, ListenerTlsSettings, RouteTarget, ServerRoutes,
 };
 use ngxora_compile::ir::{
-    DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
-    ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType,
-    UpstreamHttpProtocol, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
+    DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective, PemSource,
+    ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity, UpstreamBlock, UpstreamHealthCheck,
+    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamServer, UpstreamSslOptions,
+    UpstreamTimeouts,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 impl CompiledRouter {
     pub fn from_http(http: &Http) -> Result<Self, String> {
@@ -36,6 +38,7 @@ impl CompiledRouter {
                 ),
                 h2c: matches!(http.h2c, Switch::On),
             },
+            le_config: http.ssl_provider.clone(),
             ..Self::default()
         };
         let mut next_route_id = 1;
@@ -79,18 +82,37 @@ impl CompiledRouter {
                             ..ListenerTlsConfig::default()
                         });
 
-                if let Some(tls) = server.tls.as_ref() {
+                if let Some(provider) = server.tls.as_ref() {
+                    let tls_identity = match provider {
+                        SslProvider::Custom(tls) => tls.clone(),
+                        SslProvider::LetsEncrypt => {
+                            let cache_dir = self
+                                .le_config
+                                .as_ref()
+                                .and_then(|c| c.cache_dir.clone())
+                                .unwrap_or_else(|| PathBuf::from("/var/lib/ngxora/certs"));
+                            // Use the first server_name as the primary domain.
+                            let domain = server.server_names.first().cloned().unwrap_or_default();
+                            TlsIdentity {
+                                cert: PemSource::Path(
+                                    cache_dir.join(&domain).join("fullchain.pem"),
+                                ),
+                                key: PemSource::Path(cache_dir.join(&domain).join("privkey.pem")),
+                            }
+                        }
+                    };
+
                     for name in &server.server_names {
                         listener_tls
                             .named
-                            .insert(name.to_ascii_lowercase(), tls.clone());
+                            .insert(name.to_ascii_lowercase(), tls_identity.clone());
                     }
 
                     if listen.default_server
                         || listener_tls.default.is_none()
                         || server.server_names.is_empty()
                     {
-                        listener_tls.default = Some(tls.clone());
+                        listener_tls.default = Some(tls_identity.clone());
                     }
                 }
             }

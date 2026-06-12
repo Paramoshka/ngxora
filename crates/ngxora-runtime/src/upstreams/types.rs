@@ -1,7 +1,7 @@
 use ngxora_compile::ir::{
-    DownstreamTlsOptions, Listen, LocationMatcher, PemSource, TlsIdentity, TlsProtocolBounds,
-    TlsVerifyClient, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamSslOptions,
-    UpstreamTimeouts,
+    DownstreamTlsOptions, LetsEncryptConfig, Listen, LocationMatcher, PemSource, TlsIdentity,
+    TlsProtocolBounds, TlsVerifyClient, UpstreamHttpProtocol, UpstreamSelectionPolicy,
+    UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use regex::{Regex, RegexBuilder};
@@ -237,6 +237,8 @@ pub struct CompiledRouter {
     pub listener_protocols: HashMap<ListenKey, ListenerProtocolConfig>,
     pub listener_tls: HashMap<ListenKey, ListenerTlsConfig>,
     pub http_options: HttpRuntimeOptions,
+    /// Global Let's Encrypt configuration from `ssl_provider letsencrypt { ... }`.
+    pub le_config: Option<LetsEncryptConfig>,
 }
 
 // Alias to keep compatibility with the misspelled name used in discussion.

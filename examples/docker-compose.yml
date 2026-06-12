@@ -1,0 +1,25 @@
+services:
+  ngxora:
+    image: paramoshka/ngxora:main
+    container_name: ngxora
+    volumes:
+      - ./ngxora-le.conf:/etc/ngxora/ngxora.conf:ro
+      - ngxora-certs:/var/lib/ngxora/certs
+    network_mode: host
+    restart: unless-stopped
+
+  3x-ui:
+    image: ghcr.io/mhsanaei/3x-ui:latest
+    container_name: 3x-ui
+    hostname: yourhostname
+    volumes:
+      - ./db/:/etc/x-ui/
+      - ./cert/:/root/cert/
+    environment:
+      XRAY_VMESS_AEAD_FORCED: "false"
+    tty: true
+    network_mode: host
+    restart: unless-stopped
+
+volumes:
+  ngxora-certs:

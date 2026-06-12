@@ -2,7 +2,7 @@ use super::{
     default_listener_tls, listener_addr, listener_has_multiple_identities, select_listener_tls,
 };
 use crate::upstreams::{CompiledRouter, ListenKey, ListenerTlsConfig};
-use ngxora_compile::ir::{Http, Listen, PemSource, Server, TlsIdentity};
+use ngxora_compile::ir::{Http, Listen, PemSource, Server, SslProvider, TlsIdentity};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
@@ -32,13 +32,13 @@ fn compiled_router_deduplicates_shared_tls_listener() {
             Server {
                 server_names: vec!["example.com".into()],
                 listens: vec![tls_listener(443, true)],
-                tls: Some(shared_tls.clone()),
+                tls: Some(SslProvider::Custom(shared_tls.clone())),
                 ..Server::default()
             },
             Server {
                 server_names: vec!["www.example.com".into()],
                 listens: vec![tls_listener(443, false)],
-                tls: Some(shared_tls),
+                tls: Some(SslProvider::Custom(shared_tls)),
                 ..Server::default()
             },
         ],
@@ -82,13 +82,19 @@ fn compiled_router_rejects_conflicting_shared_listener_protocols() {
                     http2: true,
                     ..tls_listener(443, true)
                 }],
-                tls: Some(tls_identity("/tmp/example.crt", "/tmp/example.key")),
+                tls: Some(SslProvider::Custom(tls_identity(
+                    "/tmp/example.crt",
+                    "/tmp/example.key",
+                ))),
                 ..Server::default()
             },
             Server {
                 server_names: vec!["www.example.com".into()],
                 listens: vec![tls_listener(443, false)],
-                tls: Some(tls_identity("/tmp/example.crt", "/tmp/example.key")),
+                tls: Some(SslProvider::Custom(tls_identity(
+                    "/tmp/example.crt",
+                    "/tmp/example.key",
+                ))),
                 ..Server::default()
             },
         ],

@@ -25,6 +25,7 @@ plugin-jwt-auth = ["ngxora-runtime/plugin-jwt-auth"]
 
 [dependencies]
 arc-swap = "1.8.2"
+dashmap = "6"
 env_logger = "0.11"
 ngxora-config = {path = "crates/ngxora-config"}
 ngxora-compile = {path = "crates/ngxora-compile"}
@@ -32,6 +33,7 @@ ngxora-runtime = {path = "crates/ngxora-runtime"}
 pingora = { version = "0.8.1", default-features = false, features = ["lb", "openssl"] }
 pingora-proxy = { version = "0.8.1", default-features = false, features = ["openssl"] }
 pingora-cache = "0.8.1"
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 
 [[bin]]
 name = "ngxora"
