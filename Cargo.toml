@@ -29,13 +29,12 @@ env_logger = "0.11"
 ngxora-config = {path = "crates/ngxora-config"}
 ngxora-compile = {path = "crates/ngxora-compile"}
 ngxora-runtime = {path = "crates/ngxora-runtime"}
-pingora = { version = "0.8.0", default-features = false, features = ["lb", "openssl"] }
-pingora-proxy = { version = "0.8.0", default-features = false, features = ["openssl"] }
-pingora-cache = "0.8.0"
+pingora = { version = "0.8.1", default-features = false, features = ["lb", "openssl"] }
+pingora-proxy = { version = "0.8.1", default-features = false, features = ["openssl"] }
+pingora-cache = "0.8.1"
 
 [[bin]]
 name = "ngxora"
 test = false
 bench = false
-path = "crates/ngxora-cli/src/main.rs" 
-
+path = "crates/ngxora-cli/src/main.rs"
