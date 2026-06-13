@@ -9,9 +9,9 @@ use super::{
 use bytes::Bytes;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
-    ProxyPassTarget, Server, Switch, UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType,
-    UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
-    UpstreamTimeouts,
+    ProxyPassTarget, Server, SslProvider, Switch, UpstreamBlock, UpstreamHealthCheck,
+    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
+    UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use pingora::http::ResponseHeader;
@@ -258,6 +258,40 @@ fn compiled_router_rejects_invalid_location_regex() {
 
     let err = CompiledRouter::from_http(&http).expect_err("expected invalid regex to fail");
     assert!(err.contains("invalid location regex"));
+}
+
+#[test]
+fn compiled_router_rejects_letsencrypt_with_multiple_server_names() {
+    let http = Http {
+        ssl_provider: Some(ngxora_compile::ir::LetsEncryptConfig {
+            acme_directory: None,
+            email: Some("admin@example.com".into()),
+            cache_dir: None,
+        }),
+        servers: vec![Server {
+            listens: vec![Listen {
+                port: 443,
+                ssl: true,
+                default_server: true,
+                ..Listen::default()
+            }],
+            server_names: vec!["example.com".into(), "www.example.com".into()],
+            tls: Some(SslProvider::LetsEncrypt),
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/".into()),
+                directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    "http://127.0.0.1:8080".parse().unwrap(),
+                ))],
+                plugins: Vec::new(),
+                cache: None,
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let err = CompiledRouter::from_http(&http).expect_err("expected LE alias rejection");
+    assert!(err.contains("supports exactly one server_name"));
 }
 
 #[test]

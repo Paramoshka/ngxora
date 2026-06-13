@@ -7,16 +7,16 @@
 use pingora::apps::prometheus_http_app::PrometheusServer;
 use pingora::services::listening::Service;
 use pingora_proxy::Session;
-use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry};
+use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts};
 use serde::Serialize;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 // ---- Registry ----
 
-fn metrics_registry() -> &'static Registry {
-    static REGISTRY: OnceLock<Registry> = OnceLock::new();
-    REGISTRY.get_or_init(|| Registry::new_custom(Some("ngxora".into()), None).unwrap())
+fn metrics_registry() -> &'static prometheus::Registry {
+    prometheus::default_registry()
 }
 
 // ---- Metrics definitions ----
@@ -227,9 +227,10 @@ pub(crate) fn write_access_log(
         request_id,
     };
 
-    // Write to stdout so the access log is always on, separate from stderr diagnostics.
+    // Write to stdout (explicit flush — Docker buffers non-tty stdout).
     if let Ok(json) = serde_json::to_string(&entry) {
         println!("{json}");
+        std::io::stdout().flush().ok();
     }
 }
 
@@ -251,4 +252,56 @@ pub fn spawn_metrics_service(
     svc.add_tcp(&addr.to_string());
     server.add_service(svc);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CacheStatus, RequestLabels, record_metrics};
+
+    #[test]
+    fn record_metrics_registers_collectors_in_default_registry() {
+        record_metrics(
+            &RequestLabels {
+                method: "GET".into(),
+                status: "200".into(),
+                cache_status: CacheStatus::Miss,
+                has_upstream: true,
+                route_id: 7,
+            },
+            0.125,
+            32,
+            64,
+        );
+
+        let metric_names = prometheus::gather()
+            .into_iter()
+            .map(|family| family.get_name().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(
+            metric_names
+                .iter()
+                .any(|name| name == "ngxora_requests_total")
+        );
+        assert!(
+            metric_names
+                .iter()
+                .any(|name| name == "ngxora_request_duration_seconds")
+        );
+        assert!(
+            metric_names
+                .iter()
+                .any(|name| name == "ngxora_upstream_request_bytes_total")
+        );
+        assert!(
+            metric_names
+                .iter()
+                .any(|name| name == "ngxora_upstream_response_bytes_total")
+        );
+        assert!(
+            metric_names
+                .iter()
+                .any(|name| name == "ngxora_cache_misses_total")
+        );
+    }
 }

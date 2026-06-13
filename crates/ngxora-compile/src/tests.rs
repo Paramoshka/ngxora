@@ -1002,6 +1002,27 @@ http {
     }
 
     #[test]
+    fn from_ast_rejects_letsencrypt_with_multiple_server_names() {
+        let input = r#"
+http {
+  ssl_provider letsencrypt {
+    email admin@example.com;
+  }
+  server {
+    listen 443 ssl;
+    server_name example.com www.example.com;
+    location / {
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected multi-name LE server to fail");
+        assert!(err.message.contains("supports exactly one server_name"));
+    }
+
+    #[test]
     fn from_ast_rejects_duplicate_ssl_provider() {
         let input = r#"
 http {

@@ -76,9 +76,9 @@ fn run(cli: CliArgs) -> Result<(), String> {
         .map_err(|err| format!("failed to create pingora server: {err}"))?;
     server.bootstrap();
 
-    // Initialize OpenTelemetry if configured.
+    // Configure OpenTelemetry if an endpoint is given (exporter built lazily).
     if let Some(ref endpoint) = cli.otel_endpoint {
-        ngxora_runtime::tracing::init_tracer(endpoint, "ngxora");
+        ngxora_runtime::tracing::configure(endpoint, "ngxora");
         println!("OpenTelemetry tracing enabled, exporting to {endpoint}");
     }
 
@@ -86,16 +86,15 @@ fn run(cli: CliArgs) -> Result<(), String> {
 
     // Shared token store for Let's Encrypt HTTP-01 challenges.
     let le_tokens: le::ChallengeTokens = Arc::new(dashmap::DashMap::new());
+    dynamic_proxy.set_challenge_tokens(Arc::clone(&le_tokens));
 
-    // Start Let's Encrypt reconciler if configured.
-    if snapshot.router.le_config.is_some() {
-        dynamic_proxy.set_challenge_tokens(Arc::clone(&le_tokens));
-        let le_service = background_service(
-            "le-reconciler",
-            LeReconcilerService::new(Arc::clone(&state), le_tokens),
-        );
-        server.add_service(le_service);
-    }
+    // Keep the LE lifecycle service running even before LE is configured so
+    // later live snapshots can enable issuance without a process restart.
+    let le_service = background_service(
+        "le-reconciler",
+        LeReconcilerService::new(Arc::clone(&state), le_tokens),
+    );
+    server.add_service(le_service);
 
     let mut proxy = pingora_proxy::http_proxy_service(&server.configuration, dynamic_proxy);
     let upstream_health_checks = background_service(

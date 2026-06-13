@@ -143,6 +143,10 @@ block, ngxora treats the server as Let's Encrypt-managed.  Certificates are
 stored under the cache directory (`/var/lib/ngxora/certs` by default) and
 renewed automatically.
 
+Current limitation: a Let's Encrypt-managed `server` block must declare exactly
+one `server_name`. Use separate `server` blocks for aliases, or provide a
+manual certificate when one certificate must cover multiple names.
+
 If a server block explicitly provides `ssl_certificate`, it takes priority over
 the global Let's Encrypt configuration.
 

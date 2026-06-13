@@ -51,6 +51,13 @@ impl CompiledRouter {
     }
 
     fn add_server(&mut self, server: &Server, next_route_id: &mut u64) -> Result<(), String> {
+        if matches!(server.tls, Some(SslProvider::LetsEncrypt)) && server.server_names.len() != 1 {
+            return Err(
+                "ssl listener with LetsEncrypt currently supports exactly one server_name; split aliases into separate server blocks or use a manual certificate"
+                    .into(),
+            );
+        }
+
         let routes = ServerRoutes {
             locations: compile_locations(&server.locations, &self.upstreams, next_route_id)?,
         };

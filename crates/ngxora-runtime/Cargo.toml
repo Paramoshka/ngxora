@@ -47,6 +47,7 @@ opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "trace"] }
 
 [dev-dependencies]
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
 [build-dependencies]
 protoc-bin-vendored = "3"

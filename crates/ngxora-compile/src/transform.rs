@@ -190,6 +190,13 @@ fn lower_http(block: &Block) -> Result<Http, LowerErr> {
                                 .into(),
                     });
                 }
+                if server.server_names.len() > 1 {
+                    return Err(LowerErr {
+                        message:
+                            "ssl listener with LetsEncrypt currently supports exactly one server_name; split aliases into separate server blocks or use a manual certificate"
+                                .into(),
+                    });
+                }
             }
             None => {
                 return Err(LowerErr {

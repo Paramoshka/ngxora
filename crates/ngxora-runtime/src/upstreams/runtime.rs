@@ -18,7 +18,7 @@ use ngxora_plugin_api::{
     HeaderMapMut, LocalResponse, PluginError, PluginFlow, PluginState, RequestCtx, ResponseCtx,
     UpstreamRequestCtx,
 };
-use opentelemetry::trace::Span;
+use opentelemetry::trace::{Span, TraceContextExt};
 use pingora::Result as PingoraResult;
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::lb::{Backend, Backends, LoadBalancer, discovery, selection};
@@ -231,6 +231,8 @@ pub struct ProxyContext {
     pub(crate) span: Option<opentelemetry::global::BoxedSpan>,
     /// Extracted W3C TraceContext from downstream headers.
     pub(crate) parent_ctx: opentelemetry::Context,
+    /// Trace context derived from the current proxy span for upstream propagation.
+    pub(crate) upstream_trace_ctx: opentelemetry::Context,
 }
 
 impl Default for ProxyContext {
@@ -249,8 +251,20 @@ impl Default for ProxyContext {
             cache_hit: false,
             span: None,
             parent_ctx: opentelemetry::Context::new(),
+            upstream_trace_ctx: opentelemetry::Context::new(),
         }
     }
+}
+
+fn should_mark_span_as_error(e: Option<&pingora::Error>, status: u16) -> bool {
+    if status >= 500 {
+        return true;
+    }
+
+    matches!(
+        e,
+        Some(err) if !matches!(err.etype, pingora::ErrorType::HTTPStatus(_))
+    )
 }
 
 fn header_editor_error(action: &str, name: &http::HeaderName, err: impl Display) -> PluginError {
@@ -769,11 +783,10 @@ impl ProxyHttp for DynamicProxy {
         ctx.parent_ctx = crate::tracing::extract_context(&session.req_header().headers);
         let method = session.req_header().method.to_string();
         let path = session.req_header().uri.path().to_string();
-        ctx.span = Some(crate::tracing::start_request_span(
-            &method,
-            &path,
-            &ctx.parent_ctx,
-        ));
+        let span = crate::tracing::start_request_span(&method, &path, &ctx.parent_ctx);
+        ctx.upstream_trace_ctx =
+            opentelemetry::Context::new().with_remote_span_context(span.span_context().clone());
+        ctx.span = Some(span);
 
         let snapshot = self.state.snapshot();
         session.set_keepalive(snapshot.router.http_options.downstream_keepalive_timeout);
@@ -937,7 +950,7 @@ impl ProxyHttp for DynamicProxy {
         }
 
         // ── Inject W3C TraceContext into upstream headers ──
-        crate::tracing::inject_context(&ctx.parent_ctx, &mut upstream_request.headers);
+        crate::tracing::inject_context(&ctx.upstream_trace_ctx, &mut upstream_request.headers);
 
         Ok(())
     }
@@ -1137,7 +1150,7 @@ impl ProxyHttp for DynamicProxy {
                 "cache.status",
                 cache_status.to_string(),
             ));
-            if e.is_some() {
+            if should_mark_span_as_error(e, status) {
                 span.set_status(opentelemetry::trace::Status::error("proxy error"));
             }
             span.end();
@@ -1482,5 +1495,24 @@ mod tests {
             .await
             .expect("response should be cached after min_uses is reached");
         assert_eq!(cached.body, Bytes::from_static(b"second"));
+    }
+
+    #[test]
+    fn span_status_ignores_http_4xx_error_responses() {
+        let err = pingora::Error::explain(pingora::ErrorType::HTTPStatus(404), "not found");
+        assert!(!should_mark_span_as_error(Some(err.as_ref()), 404));
+    }
+
+    #[test]
+    fn span_status_marks_http_5xx_responses_as_errors() {
+        let err = pingora::Error::explain(pingora::ErrorType::HTTPStatus(503), "unavailable");
+        assert!(should_mark_span_as_error(Some(err.as_ref()), 503));
+        assert!(should_mark_span_as_error(None, 502));
+    }
+
+    #[test]
+    fn span_status_marks_non_http_errors_as_failures() {
+        let err = pingora::Error::explain(pingora::ErrorType::InternalError, "boom");
+        assert!(should_mark_span_as_error(Some(err.as_ref()), 0));
     }
 }

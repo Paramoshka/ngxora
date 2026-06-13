@@ -460,9 +460,10 @@ async fn reconcile_once(
 ) {
     let snapshot = state.snapshot();
     let current = snapshot.router.le_config.clone();
+    let needs_refresh = current != *last_config || (current.is_some() && manager.is_none());
 
-    if current != *last_config {
-        *manager = match current.as_ref() {
+    if needs_refresh {
+        match current.as_ref() {
             Some(config) => match LeManager::with_tokens(config, Arc::clone(tokens)).await {
                 Ok(m) => {
                     log::info!(
@@ -472,16 +473,19 @@ async fn reconcile_once(
                             .as_deref()
                             .unwrap_or(std::path::Path::new("/var/lib/ngxora/certs"))
                     );
-                    Some(Arc::new(m))
+                    *manager = Some(Arc::new(m));
+                    *last_config = current;
                 }
                 Err(e) => {
                     log::error!("failed to create LE manager: {e}");
-                    None
+                    *manager = None;
                 }
             },
-            None => None,
-        };
-        *last_config = current;
+            None => {
+                *manager = None;
+                *last_config = None;
+            }
+        }
     }
 
     if let Some(m) = manager {
