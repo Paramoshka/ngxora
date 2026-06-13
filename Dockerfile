@@ -18,7 +18,7 @@ RUN ARCH="$(uname -m)" \
     && rustup target add "${RUST_TARGET}" \
     && cargo build --release --bin ngxora --target "${RUST_TARGET}" ${CARGO_BUILD_FLAGS} \
     && cp "target/${RUST_TARGET}/release/ngxora" /usr/local/bin/ngxora
-RUN /usr/local/bin/ngxora --check /app/examples/ngxora.conf
+RUN /usr/local/bin/ngxora --check /app/examples/basic/ngxora.conf
 
 FROM scratch
 
@@ -26,7 +26,7 @@ WORKDIR /etc/ngxora
 
 COPY --from=builder /usr/local/bin/ngxora /usr/local/bin/ngxora
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY examples/ngxora.conf /etc/ngxora/ngxora.conf
+COPY examples/basic/ngxora.conf /etc/ngxora/ngxora.conf
 
 EXPOSE 8080
 

@@ -45,7 +45,7 @@ Run it with your own config:
 ```bash
 docker run --rm \
   -p 8080:8080 \
-  -v "$(pwd)/examples/ngxora.conf:/etc/ngxora/ngxora.conf:ro" \
+  -v "$(pwd)/examples/basic/ngxora.conf:/etc/ngxora/ngxora.conf:ro" \
   paramoshka/ngxora:latest
 ```
 
@@ -80,13 +80,13 @@ http {
 Check config:
 
 ```bash
-cargo run -- --check examples/ngxora.conf
+cargo run -- --check examples/basic/ngxora.conf
 ```
 
 Run proxy:
 
 ```bash
-cargo run -- examples/ngxora.conf
+cargo run -- examples/basic/ngxora.conf
 ```
 
 Supported directives, upstream policies, and built-in plugin config are documented in [Config Options](./docs/config-options.md).
@@ -215,13 +215,13 @@ The gRPC transport for the control plane is the intended next layer on top of th
 You can now start the built-in Rust gRPC control plane alongside the proxy:
 
 ```bash
-cargo run -- --grpc-addr 127.0.0.1:50051 examples/ngxora.conf
+cargo run -- --grpc-addr 127.0.0.1:50051 examples/basic/ngxora.conf
 ```
 
 For sidecar-style local control, use a Unix domain socket instead:
 
 ```bash
-cargo run -- --grpc-uds /tmp/ngxora-control.sock examples/ngxora.conf
+cargo run -- --grpc-uds /tmp/ngxora-control.sock examples/basic/ngxora.conf
 ```
 
 And inspect the current snapshot with the example Rust client:
