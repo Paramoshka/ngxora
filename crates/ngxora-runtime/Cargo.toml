@@ -42,6 +42,9 @@ protoc-bin-vendored = "3"
 pingora-cache = "0.8.1"
 serde = { version = "1", features = ["derive"] }
 instant-acme = { version = "0.8", default-features = false, features = ["hyper-rustls", "aws-lc-rs"] }
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "trace"] }
 
 [dev-dependencies]
 

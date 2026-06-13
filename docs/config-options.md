@@ -555,3 +555,61 @@ To write to a file, redirect stdout:
 ```bash
 ngxora ngxora.conf > /var/log/ngxora/access.log
 ```
+
+### Distributed Tracing (OpenTelemetry)
+
+Enable with the `--otel-endpoint` CLI flag:
+
+```bash
+ngxora --otel-endpoint http://localhost:4317 ngxora.conf
+```
+
+ngxora creates a span per proxied request and propagates W3C TraceContext
+headers (`traceparent`) to upstream servers.  When the downstream request
+already carries a `traceparent` header, ngxora creates a child span.
+
+Span attributes:
+
+| Attribute | Type | Description |
+|---|---|---|
+| `http.method` | string | HTTP method. |
+| `http.route` | string | Request URI path. |
+| `http.status_code` | i64 | Response status code. |
+| `upstream` | string | Upstream `host:port`. |
+| `cache.status` | string | `hit`, `miss`, or `bypass`. |
+| `service.name` | string | Always `ngxora`. |
+
+Errors are marked with span status `Error`.  Traces are exported via OTLP/gRPC
+to the configured endpoint (e.g., an OpenTelemetry Collector or Jaeger).
+
+#### Full observability stack with Docker Compose
+
+`examples/observability/docker-compose.yml` bundles ngxora with Prometheus, Jaeger,
+and an OpenTelemetry Collector:
+
+```bash
+cd examples/observability && docker compose up
+```
+
+This starts:
+
+| Service | Port | Purpose |
+|---|---|---|
+| `ngxora` | `:8080` | Proxy, listening on `:8080` |
+| `ngxora` | `:9090` | `GET /metrics` (Prometheus scrape target) |
+| `otel-collector` | `:4317` | OTLP/gRPC ingest (traces) |
+| `jaeger` | `:16686` | Jaeger UI for viewing traces |
+| `prometheus` | `:9091` | Prometheus UI |
+| `backend` | — | Demo HTTP backend (internal only) |
+
+Traces flow: `ngxora` -> OTLP/gRPC -> `otel-collector` -> `jaeger`
+
+Metrics flow: `prometheus` scrapes `ngxora:9090/metrics`
+
+Test with:
+
+```bash
+curl http://localhost:8080/
+# Open Jaeger:    http://localhost:16686
+# Open Prometheus: http://localhost:9091
+```

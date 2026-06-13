@@ -18,6 +18,7 @@ use ngxora_plugin_api::{
     HeaderMapMut, LocalResponse, PluginError, PluginFlow, PluginState, RequestCtx, ResponseCtx,
     UpstreamRequestCtx,
 };
+use opentelemetry::trace::Span;
 use pingora::Result as PingoraResult;
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::lb::{Backend, Backends, LoadBalancer, discovery, selection};
@@ -226,6 +227,10 @@ pub struct ProxyContext {
     pub(crate) start_time: std::time::Instant,
     /// True when the request was served from cache (set in request_filter).
     pub(crate) cache_hit: bool,
+    /// OpenTelemetry span for this request (None if tracing is not configured).
+    pub(crate) span: Option<opentelemetry::global::BoxedSpan>,
+    /// Extracted W3C TraceContext from downstream headers.
+    pub(crate) parent_ctx: opentelemetry::Context,
 }
 
 impl Default for ProxyContext {
@@ -242,6 +247,8 @@ impl Default for ProxyContext {
             response_body_buf: bytes::Bytes::new(),
             start_time: std::time::Instant::now(),
             cache_hit: false,
+            span: None,
+            parent_ctx: opentelemetry::Context::new(),
         }
     }
 }
@@ -758,6 +765,16 @@ impl ProxyHttp for DynamicProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> PingoraResult<bool> {
+        // ── Tracing: extract parent context from downstream headers ──
+        ctx.parent_ctx = crate::tracing::extract_context(&session.req_header().headers);
+        let method = session.req_header().method.to_string();
+        let path = session.req_header().uri.path().to_string();
+        ctx.span = Some(crate::tracing::start_request_span(
+            &method,
+            &path,
+            &ctx.parent_ctx,
+        ));
+
         let snapshot = self.state.snapshot();
         session.set_keepalive(snapshot.router.http_options.downstream_keepalive_timeout);
         ctx.client_max_body_size = snapshot.router.http_options.client_max_body_size;
@@ -918,6 +935,9 @@ impl ProxyHttp for DynamicProxy {
                 .map_err(|err| map_plugin_error("upstream_request_filter", err))?;
             respond_from_plugin_flow(flow, "upstream_request_filter")?;
         }
+
+        // ── Inject W3C TraceContext into upstream headers ──
+        crate::tracing::inject_context(&ctx.parent_ctx, &mut upstream_request.headers);
 
         Ok(())
     }
@@ -1101,6 +1121,27 @@ impl ProxyHttp for DynamicProxy {
         } else {
             "bypass"
         };
+
+        // ── Set trace span attributes ──
+        if let Some(ref mut span) = ctx.span {
+            span.set_attribute(opentelemetry::KeyValue::new(
+                "http.status_code",
+                status as i64,
+            ));
+            span.set_attribute(opentelemetry::KeyValue::new("http.method", method.clone()));
+            span.set_attribute(opentelemetry::KeyValue::new("http.route", path.clone()));
+            if let Some(ref u) = upstream {
+                span.set_attribute(opentelemetry::KeyValue::new("upstream", u.clone()));
+            }
+            span.set_attribute(opentelemetry::KeyValue::new(
+                "cache.status",
+                cache_status.to_string(),
+            ));
+            if e.is_some() {
+                span.set_status(opentelemetry::trace::Status::error("proxy error"));
+            }
+            span.end();
+        }
 
         // ── Write structured JSON access log ──
         if method != "GET" || path != "/metrics" {

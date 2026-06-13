@@ -1,0 +1,58 @@
+services:
+  # ── Demo backend ──
+  backend:
+    image: nginx:alpine
+    volumes:
+      - ./backend.conf:/etc/nginx/conf.d/default.conf:ro
+
+  # ── ngxora proxy ──
+  ngxora:
+    image: paramoshka/ngxora:main
+    container_name: ngxora
+    command:
+      - "--metrics-addr"
+      - "0.0.0.0:9090"
+      - "--otel-endpoint"
+      - "http://otel-collector:4317"
+      - "/etc/ngxora/ngxora.conf"
+    volumes:
+      - ./ngxora.conf:/etc/ngxora/ngxora.conf:ro
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    restart: unless-stopped
+
+  # ── OpenTelemetry Collector ──
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  # ── Jaeger (trace viewer) ──
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # Jaeger UI
+    restart: unless-stopped
+
+  # ── Prometheus ──
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    ports:
+      - "9091:9090"
+    restart: unless-stopped

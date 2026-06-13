@@ -23,6 +23,7 @@ struct CliArgs {
     grpc_addr: Option<SocketAddr>,
     grpc_uds: Option<PathBuf>,
     metrics_addr: Option<SocketAddr>,
+    otel_endpoint: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -74,6 +75,12 @@ fn run(cli: CliArgs) -> Result<(), String> {
     let mut server = Server::new(None::<Opt>)
         .map_err(|err| format!("failed to create pingora server: {err}"))?;
     server.bootstrap();
+
+    // Initialize OpenTelemetry if configured.
+    if let Some(ref endpoint) = cli.otel_endpoint {
+        ngxora_runtime::tracing::init_tracer(endpoint, "ngxora");
+        println!("OpenTelemetry tracing enabled, exporting to {endpoint}");
+    }
 
     let mut dynamic_proxy = DynamicProxy::new(Arc::clone(control.state()));
 
@@ -174,6 +181,7 @@ where
     let mut grpc_addr: Option<SocketAddr> = None;
     let mut grpc_uds: Option<PathBuf> = None;
     let mut metrics_addr: Option<SocketAddr> = None;
+    let mut otel_endpoint: Option<String> = None;
 
     let mut args = args.into_iter().skip(1).map(Into::into);
     while let Some(arg) = args.next() {
@@ -207,6 +215,17 @@ where
                     return Err("--metrics-addr specified more than once".into());
                 }
             }
+            "--otel-endpoint" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--otel-endpoint requires a URL".to_string())?;
+                if otel_endpoint
+                    .replace(value.to_string_lossy().into_owned())
+                    .is_some()
+                {
+                    return Err("--otel-endpoint specified more than once".into());
+                }
+            }
             "-h" | "--help" => {
                 print_usage();
                 return Ok(None);
@@ -236,11 +255,12 @@ where
         grpc_addr,
         grpc_uds,
         metrics_addr,
+        otel_endpoint,
     }))
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage: ngxora [--check] [--metrics-addr <host:port>] [--grpc-addr <host:port> | --grpc-uds <path>] <config-path>"
+        "Usage: ngxora [--check] [--metrics-addr <host:port>] [--otel-endpoint <url>] [--grpc-addr <host:port> | --grpc-uds <path>] <config-path>"
     );
 }

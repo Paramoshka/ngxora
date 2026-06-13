@@ -89,7 +89,7 @@ The rule is simple:
 | **Prometheus metrics** | ✅ | `prometheus` 0.13; `GET /metrics` via `--metrics-addr <host:port>` |
 | **Structured access log (JSON)** | ✅ | Method, path, status, latency, upstream, cache; `ngxora_access` log target |
 | Request ID propagation | 💤 | Can be done via `headers` plugin |
-| Tracing (OpenTelemetry) | 💤 | |
+| Tracing (OpenTelemetry) | ✅ | W3C TraceContext, OTLP/gRPC via `--otel-endpoint` |
 
 ## Control Plane
 

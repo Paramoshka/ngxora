@@ -3,7 +3,7 @@ services:
     image: paramoshka/ngxora:main
     container_name: ngxora
     volumes:
-      - ./ngxora-le.conf:/etc/ngxora/ngxora.conf:ro
+      - ./ngxora.conf:/etc/ngxora/ngxora.conf:ro
       - ngxora-certs:/var/lib/ngxora/certs
     network_mode: host
     restart: unless-stopped
