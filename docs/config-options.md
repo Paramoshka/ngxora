@@ -496,3 +496,62 @@ location /blog/ {
 - `proxy_cache off` explicitly disables caching for that location (useful to override a broader config).
 - Responses with `Cache-Control: private`, `Cache-Control: no-store`, or `Set-Cookie` are not cached.
 - `proxy_cache_valid` applies to the final response status after response plugins run.
+
+## Observability
+
+### Prometheus Metrics
+
+Enable with the `--metrics-addr` CLI flag:
+
+```bash
+ngxora --metrics-addr 0.0.0.0:9090 ngxora.conf
+```
+
+This exposes `GET /metrics` in Prometheus text format with the following custom metrics
+(prefixed `ngxora_`):
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `ngxora_requests_total` | counter | `method`, `status`, `cache`, `has_upstream`, `route_id` | Total HTTP requests processed. |
+| `ngxora_request_duration_seconds` | histogram | same | Request latency from first byte to final byte. |
+| `ngxora_upstream_request_bytes_total` | counter | same | Bytes sent in upstream request bodies. |
+| `ngxora_upstream_response_bytes_total` | counter | same | Bytes received from upstream response bodies. |
+| `ngxora_cache_hits_total` | counter | same | Total cache hits. |
+| `ngxora_cache_misses_total` | counter | same | Total cache misses. |
+
+Label values:
+- `method` — HTTP method (`GET`, `POST`, ...)
+- `status` — response status code (`200`, `404`, `502`, ...)
+- `cache` — `hit`, `miss`, or `bypass`
+- `has_upstream` — `true` if proxied to upstream, `false` for cache hits / redirects / errors
+- `route_id` — numeric route identifier (per-location)
+
+### Structured Access Log (JSON)
+
+The JSON access log is written to stdout on every request (always on):
+
+Each line is a JSON object:
+
+```json
+{"method":"GET","path":"/api/users","status":200,"latency_secs":0.042,"upstream":"10.0.0.5:8080","cache_status":"miss","client_ip":"192.168.1.1:54321","route_id":1}
+```
+
+Fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `method` | string | HTTP method. |
+| `path` | string | Request URI path. |
+| `status` | u16 | Response status code. |
+| `latency_secs` | f64 | Request duration in seconds. |
+| `upstream` | string? | Upstream `host:port` (absent for redirects/cache hits). |
+| `cache_status` | string? | `hit`, `miss`, or `bypass`. |
+| `client_ip` | string? | Client socket address. |
+| `route_id` | u64? | Matched location route ID. |
+| `request_id` | string? | Value of `X-Request-Id` header, if present. |
+
+To write to a file, redirect stdout:
+
+```bash
+ngxora ngxora.conf > /var/log/ngxora/access.log
+```

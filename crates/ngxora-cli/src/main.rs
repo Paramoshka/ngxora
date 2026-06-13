@@ -5,6 +5,7 @@ use ngxora_runtime::control::{
 };
 use ngxora_runtime::grpc::{spawn_control_plane, spawn_control_plane_uds};
 use ngxora_runtime::le::{self, LeReconcilerService};
+use ngxora_runtime::metrics::spawn_metrics_service;
 use ngxora_runtime::server::bind_listeners_from_state;
 use ngxora_runtime::upstreams::{CompiledRouter, DynamicProxy};
 use pingora::server::Server;
@@ -21,6 +22,7 @@ struct CliArgs {
     check_only: bool,
     grpc_addr: Option<SocketAddr>,
     grpc_uds: Option<PathBuf>,
+    metrics_addr: Option<SocketAddr>,
 }
 
 fn main() -> ExitCode {
@@ -112,6 +114,12 @@ fn run(cli: CliArgs) -> Result<(), String> {
         println!("gRPC control plane listening on unix://{}", path.display());
     }
 
+    if let Some(addr) = cli.metrics_addr {
+        spawn_metrics_service(&mut server, addr)
+            .map_err(|err| format!("failed to spawn metrics service: {err}"))?;
+        println!("Prometheus metrics listening on {addr}");
+    }
+
     server.add_service(proxy);
     server.add_service(upstream_health_checks);
     server.run_forever();
@@ -165,6 +173,7 @@ where
     let mut check_only = false;
     let mut grpc_addr: Option<SocketAddr> = None;
     let mut grpc_uds: Option<PathBuf> = None;
+    let mut metrics_addr: Option<SocketAddr> = None;
 
     let mut args = args.into_iter().skip(1).map(Into::into);
     while let Some(arg) = args.next() {
@@ -185,6 +194,18 @@ where
                     .next()
                     .ok_or_else(|| "--grpc-uds requires a filesystem path".to_string())?;
                 grpc_uds = Some(PathBuf::from(value));
+            }
+            "--metrics-addr" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--metrics-addr requires a socket address".to_string())?;
+                let value = value.to_string_lossy();
+                let addr = value
+                    .parse()
+                    .map_err(|err| format!("invalid --metrics-addr `{value}`: {err}"))?;
+                if metrics_addr.replace(addr).is_some() {
+                    return Err("--metrics-addr specified more than once".into());
+                }
             }
             "-h" | "--help" => {
                 print_usage();
@@ -214,11 +235,12 @@ where
         check_only,
         grpc_addr,
         grpc_uds,
+        metrics_addr,
     }))
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage: ngxora [--check] [--grpc-addr <host:port> | --grpc-uds <path>] <config-path>"
+        "Usage: ngxora [--check] [--metrics-addr <host:port>] [--grpc-addr <host:port> | --grpc-uds <path>] <config-path>"
     );
 }

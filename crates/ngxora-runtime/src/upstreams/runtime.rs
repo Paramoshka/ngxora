@@ -212,7 +212,6 @@ fn cache_store_allowed(cfg: &CacheConfig, threshold_reached: bool) -> bool {
     cfg.min_uses.unwrap_or(1) <= 1 || threshold_reached
 }
 
-#[derive(Default)]
 pub struct ProxyContext {
     pub(crate) selected: Option<SelectedRoute>,
     pub(crate) plugin_state: PluginState,
@@ -223,6 +222,28 @@ pub struct ProxyContext {
     pub(crate) cache_status: Option<http::StatusCode>,
     pub(crate) cache_headers: Option<http::HeaderMap>,
     pub(crate) response_body_buf: bytes::Bytes,
+    /// Timestamp when the request was created; used for latency calculation.
+    pub(crate) start_time: std::time::Instant,
+    /// True when the request was served from cache (set in request_filter).
+    pub(crate) cache_hit: bool,
+}
+
+impl Default for ProxyContext {
+    fn default() -> Self {
+        Self {
+            selected: None,
+            plugin_state: PluginState::default(),
+            client_max_body_size: None,
+            received_body_bytes: 0,
+            cache_key: None,
+            cache_store_allowed: false,
+            cache_status: None,
+            cache_headers: None,
+            response_body_buf: bytes::Bytes::new(),
+            start_time: std::time::Instant::now(),
+            cache_hit: false,
+        }
+    }
 }
 
 fn header_editor_error(action: &str, name: &http::HeaderName, err: impl Display) -> PluginError {
@@ -789,6 +810,7 @@ impl ProxyHttp for DynamicProxy {
                 cache_cfg,
             );
             if let Some(cached) = self.cache_backend.get(&cache_key, cache_cfg).await {
+                ctx.cache_hit = true;
                 write_cached_response(session, &cached).await?;
                 return Ok(true);
             }
@@ -951,6 +973,7 @@ impl ProxyHttp for DynamicProxy {
             http::HeaderValue::from_static("STALE"),
         );
 
+        ctx.cache_hit = true;
         if write_cached_response(session, &cached).await.is_err() {
             return pingora_proxy::FailToProxy {
                 can_reuse_downstream: false,
@@ -1038,13 +1061,81 @@ impl ProxyHttp for DynamicProxy {
         Ok(None)
     }
 
-    /// Store cacheable responses when the request completes.
+    /// Store cacheable responses when the request completes, record metrics,
+    /// and emit the structured access log.
     async fn logging(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         e: Option<&pingora::Error>,
         ctx: &mut Self::CTX,
     ) {
+        // ── Collect observability data ──
+        let method = session.req_header().method.to_string();
+        let path = session.req_header().uri.path().to_string();
+        let status = e
+            .and_then(|err| match &err.etype {
+                pingora::ErrorType::HTTPStatus(code) => Some(*code),
+                _ => None,
+            })
+            .or_else(|| session.response_written().map(|r| r.status.as_u16()))
+            .unwrap_or(0);
+        let latency = ctx.start_time.elapsed();
+        let upstream = ctx.selected.as_ref().and_then(|s| match &s.target {
+            SelectedTarget::Upstream(peer) => Some(format!("{}:{}", peer.host, peer.port)),
+            SelectedTarget::Return { .. } => None,
+        });
+        let route_id = ctx.selected.as_ref().map(|s| s.route_id());
+
+        // Cache status: hit when served from cache in request_filter, miss
+        // when a cache key exists but we went upstream, bypass otherwise.
+        let had_upstream = !matches!(
+            ctx.selected.as_ref().map(|s| &s.target),
+            Some(SelectedTarget::Return { .. }) | None
+        ) && e.is_none();
+        let cache_status = if ctx.cache_hit {
+            "hit"
+        } else if e.is_some() {
+            "bypass"
+        } else if ctx.cache_key.is_some() {
+            "miss"
+        } else {
+            "bypass"
+        };
+
+        // ── Write structured JSON access log ──
+        if method != "GET" || path != "/metrics" {
+            crate::metrics::write_access_log(
+                session,
+                &method,
+                &path,
+                status,
+                Some(latency),
+                upstream.as_deref(),
+                Some(cache_status),
+                route_id,
+            );
+        }
+
+        // ── Record Prometheus metrics ──
+        let cache_metric_status = match cache_status {
+            "hit" => crate::metrics::CacheStatus::Hit,
+            "miss" => crate::metrics::CacheStatus::Miss,
+            _ => crate::metrics::CacheStatus::Bypass,
+        };
+        crate::metrics::record_metrics(
+            &crate::metrics::RequestLabels {
+                method: method.clone(),
+                status: status.to_string(),
+                cache_status: cache_metric_status,
+                has_upstream: had_upstream,
+                route_id: route_id.unwrap_or(0),
+            },
+            latency.as_secs_f64(),
+            0,
+            ctx.response_body_buf.len() as u64,
+        );
+
+        // ── Original cache-store logic ──
         if e.is_some() {
             ctx.cache_headers = None;
             ctx.cache_status = None;

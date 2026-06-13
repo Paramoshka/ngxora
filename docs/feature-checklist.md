@@ -86,8 +86,8 @@ The rule is simple:
 
 | Feature | Status | Notes |
 |---|---|---|
-| **Prometheus metrics** | 🔧 | Pingora depends on `prometheus` crate; expose `GET /metrics` |
-| **Structured access log (JSON)** | 🔧 | Method, path, status, latency, upstream, cache |
+| **Prometheus metrics** | ✅ | `prometheus` 0.13; `GET /metrics` via `--metrics-addr <host:port>` |
+| **Structured access log (JSON)** | ✅ | Method, path, status, latency, upstream, cache; `ngxora_access` log target |
 | Request ID propagation | 💤 | Can be done via `headers` plugin |
 | Tracing (OpenTelemetry) | 💤 | |
 
@@ -110,7 +110,7 @@ The rule is simple:
 | Graceful shutdown | ✅ | Pingora built-in |
 | Dry-run `--check` | ✅ | `ngxora --check ngxora.conf` |
 | Graceful reload (SIGHUP) | 💤 | Use gRPC for live updates |
-| Let's Encrypt / ACME | 💤 | |
+| Let's Encrypt / ACME | ✅ | `instant-acme`, HTTP-01 challenges, background reconciler every 1h |
 | Admin API endpoint | 💤 | Runtime inspection: routes, stats, cache |
 
 ---
@@ -120,8 +120,8 @@ The rule is simple:
 Three items to close before calling it production-ready:
 
 1. 🔧 **IP allow/deny plugin** — `allow 10.0.0.0/8; deny all;` inside `location {}`
-2. 🔧 **Prometheus metrics** — connection counts, request rates, cache hit ratio, upstream health
-3. 🔧 **Structured access log** — JSON lines with method, path, status, latency, upstream, cache
+2. ✅ **Prometheus metrics** — `GET /metrics` via `--metrics-addr`, counters + histogram
+3. ✅ **Structured access log** — JSON lines with method, path, status, latency, upstream, cache
 
 Nice to have shortly after:
 

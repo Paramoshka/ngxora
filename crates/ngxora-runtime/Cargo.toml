@@ -37,8 +37,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
 tower = "0.5"
 url = "2"
+prometheus = "0.13"
 protoc-bin-vendored = "3"
 pingora-cache = "0.8.1"
+serde = { version = "1", features = ["derive"] }
 instant-acme = { version = "0.8", default-features = false, features = ["hyper-rustls", "aws-lc-rs"] }
 
 [dev-dependencies]
