@@ -1,6 +1,6 @@
 services:
   ngxora:
-    image: paramoshka/ngxora:main
+    image: paramoshka/ngxora:latest
     container_name: ngxora
     volumes:
       - ./ngxora.conf:/etc/ngxora/ngxora.conf:ro

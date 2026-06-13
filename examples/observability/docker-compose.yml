@@ -7,7 +7,7 @@ services:
 
   # ── ngxora proxy ──
   ngxora:
-    image: paramoshka/ngxora:main
+    image: paramoshka/ngxora:latest
     container_name: ngxora
     command:
       - "--metrics-addr"

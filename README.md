@@ -25,13 +25,13 @@ It aims for a simple split:
 Pull the published image:
 
 ```bash
-docker pull paramoshka/ngxora:main
+docker pull paramoshka/ngxora:latest
 ```
 
 Run it with the bundled example config:
 
 ```bash
-docker run --rm -p 8080:8080 paramoshka/ngxora:main
+docker run --rm -p 8080:8080 paramoshka/ngxora:latest
 ```
 
 Then check the default route:
@@ -46,7 +46,7 @@ Run it with your own config:
 docker run --rm \
   -p 8080:8080 \
   -v "$(pwd)/examples/ngxora.conf:/etc/ngxora/ngxora.conf:ro" \
-  paramoshka/ngxora:main
+  paramoshka/ngxora:latest
 ```
 
 
