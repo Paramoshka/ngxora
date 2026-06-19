@@ -44,7 +44,7 @@ The rule is simple:
 | Client cert verification | ✅ | `ssl_verify_client` | Bootstrap | Restart | off/optional/required |
 | Upstream TLS verification | ✅ | `proxy_ssl_verify` | ✅ | Live | on/off |
 | Upstream custom CA | ✅ | `proxy_ssl_trusted_certificate` | ✅ | Live | Requires `openssl` feature |
-| mTLS to upstream | 🟡 | config parsed | ❌ | — | Client cert not wired in runtime |
+| mTLS to upstream | ✅ | ✅ | ✅ | Live | Client cert wired via `proxy_ssl_certificate`/`proxy_ssl_certificate_key` |
 
 ## Timeouts & Limits
 

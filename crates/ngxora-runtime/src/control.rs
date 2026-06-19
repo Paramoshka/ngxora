@@ -1,6 +1,7 @@
 use crate::upstreams::{
-    CompiledRouter, ListenKey, ListenerProtocolConfig, ListenerTlsSettings, RuntimeTrustedCa,
-    RuntimeUpstreamGroup, ServerRoutes, VirtualHostRoutes, build_runtime_trusted_cas,
+    ClientIdentityKey, CompiledRouter, ListenKey, ListenerProtocolConfig, ListenerTlsSettings,
+    RuntimeClientIdentity, RuntimeTrustedCa, RuntimeUpstreamGroup, ServerRoutes, VirtualHostRoutes,
+    build_runtime_client_identities, build_runtime_trusted_cas,
 };
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -57,6 +58,7 @@ pub struct RuntimeSnapshot {
     plugin_chains: HashMap<u64, PluginChain>,
     upstream_groups: HashMap<String, Arc<RuntimeUpstreamGroup>>,
     trusted_cas: HashMap<PemSource, RuntimeTrustedCa>,
+    client_identities: HashMap<ClientIdentityKey, RuntimeClientIdentity>,
 }
 
 impl RuntimeSnapshot {
@@ -76,6 +78,19 @@ impl RuntimeSnapshot {
 
     pub fn trusted_ca(&self, source: &PemSource) -> Option<RuntimeTrustedCa> {
         self.trusted_cas.get(source).cloned()
+    }
+
+    pub fn client_identity(
+        &self,
+        cert: &PemSource,
+        key: &PemSource,
+    ) -> Option<RuntimeClientIdentity> {
+        self.client_identities
+            .get(&ClientIdentityKey {
+                cert: cert.clone(),
+                key: key.clone(),
+            })
+            .cloned()
     }
 }
 
@@ -188,6 +203,7 @@ impl RuntimeState {
         let plugin_chains = build_plugin_chains(&router, registry)?;
         let upstream_groups = build_runtime_upstream_groups(&router)?;
         let trusted_cas = build_runtime_trusted_cas(&router)?;
+        let client_identities = build_runtime_client_identities(&router)?;
 
         Ok(RuntimeSnapshot {
             generation,
@@ -196,6 +212,7 @@ impl RuntimeState {
             plugin_chains,
             upstream_groups,
             trusted_cas,
+            client_identities,
         })
     }
 }

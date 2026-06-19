@@ -64,6 +64,7 @@ http {
 | `proxy_upstream_protocol` | route | Live | Applies upstream H1/H2/H2C selection per route; downstream listener HTTP/2 policy is still bootstrap-only |
 | `proxy_ssl_verify` | route | Live | Applied to upstream certificate and hostname verification flags per selected route |
 | `proxy_ssl_trusted_certificate` | route | Live | Custom upstream CA bundle is loaded per snapshot and attached to the selected upstream peer |
+| `proxy_ssl_certificate` / `proxy_ssl_certificate_key` | route | Live | Upstream mTLS client identity is loaded per snapshot and attached to the selected upstream peer |
 | `server_name` | virtual host | Live | Host routing updates without restart |
 | `ssl_certificate` / `ssl_certificate_key` | TLS identity | Live | Works for existing TLS listeners through runtime SNI cert lookup |
 | plugin config | route | Live | Only if plugin code is already compiled into the binary |
@@ -89,6 +90,7 @@ http {
 - upstream target selection
 - upstream HTTP protocol selection (`h1`, `h2`, `h2c`)
 - upstream TLS verification policy and trusted CA bundle
+- upstream mTLS client identity (`proxy_ssl_certificate` / `proxy_ssl_certificate_key`)
 - plugin chains
 - downstream request body limit
 - downstream keepalive timeout

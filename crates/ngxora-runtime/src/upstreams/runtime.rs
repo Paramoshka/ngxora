@@ -26,7 +26,10 @@ use pingora::protocols::l4::socket::SocketAddr as PingoraSocketAddr;
 use pingora::protocols::tls::CaType;
 #[cfg(feature = "openssl")]
 use pingora::tls::x509::X509;
+#[cfg(feature = "openssl")]
+use pingora::tls::pkey::PKey;
 use pingora::upstreams::peer::HttpPeer;
+use pingora::utils::tls::CertKey;
 use pingora_proxy::{ProxyHttp, Session};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Display;
@@ -36,6 +39,14 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 pub(crate) type RuntimeTrustedCa = Arc<CaType>;
+pub(crate) type RuntimeClientIdentity = Arc<CertKey>;
+
+/// Key identifying one (cert, key) pair so identical identities are loaded once.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub(crate) struct ClientIdentityKey {
+    pub cert: PemSource,
+    pub key: PemSource,
+}
 
 pub struct RuntimeUpstreamGroup {
     selector: RuntimeUpstreamSelector,
@@ -199,6 +210,7 @@ pub(crate) struct SelectedRoute {
     upstream_protocol: Option<UpstreamHttpProtocol>,
     upstream_ssl_options: UpstreamSslOptions,
     upstream_trusted_ca: Option<RuntimeTrustedCa>,
+    upstream_client_identity: Option<RuntimeClientIdentity>,
     plugins: ngxora_plugin_api::PluginChain,
     cache: Option<CacheConfig>,
 }
@@ -361,6 +373,7 @@ impl SelectedRoute {
                     upstream_protocol: None,
                     upstream_ssl_options: UpstreamSslOptions::default(),
                     upstream_trusted_ca: None,
+                    upstream_client_identity: None,
                     plugins: snapshot.plugin_chain(resolved.location.route_id),
                     cache: resolved.location.cache.clone(),
                 });
@@ -399,6 +412,31 @@ impl SelectedRoute {
             }
         };
 
+        let upstream_client_identity = match (
+            resolved
+                .location
+                .upstream_ssl_options
+                .client_certificate
+                .as_ref(),
+            resolved
+                .location
+                .upstream_ssl_options
+                .client_certificate_key
+                .as_ref(),
+        ) {
+            (Some(cert), Some(key)) => Some(
+                snapshot
+                    .client_identity(cert, key)
+                    .ok_or_else(|| {
+                        pingora::Error::explain(
+                            pingora::ErrorType::InternalError,
+                            "compiled upstream client identity is missing at runtime",
+                        )
+                    })?,
+            ),
+            _ => None,
+        };
+
         Ok(Self {
             route_id: resolved.location.route_id,
             target,
@@ -419,6 +457,7 @@ impl SelectedRoute {
                     })
                 })
                 .transpose()?,
+            upstream_client_identity,
             plugins: snapshot.plugin_chain(resolved.location.route_id),
             cache: resolved.location.cache.clone(),
         })
@@ -550,6 +589,7 @@ pub(crate) fn apply_upstream_ssl_options(
     peer: &mut HttpPeer,
     options: &UpstreamSslOptions,
     trusted_ca: Option<&RuntimeTrustedCa>,
+    client_identity: Option<&RuntimeClientIdentity>,
 ) {
     match options.verify_cert {
         Switch::On => {
@@ -563,6 +603,7 @@ pub(crate) fn apply_upstream_ssl_options(
     }
 
     peer.options.ca = trusted_ca.cloned();
+    peer.client_cert_key = client_identity.cloned();
 }
 
 pub(crate) fn build_runtime_trusted_cas(
@@ -629,6 +670,88 @@ fn load_runtime_trusted_ca(source: &PemSource) -> Result<RuntimeTrustedCa, Strin
 #[cfg(not(feature = "openssl"))]
 fn load_runtime_trusted_ca(_source: &PemSource) -> Result<RuntimeTrustedCa, String> {
     Err("proxy_ssl_trusted_certificate requires build with feature `openssl`".into())
+}
+
+// Collect every distinct upstream client identity declared in the router so
+// each (cert, key) pair is parsed exactly once per snapshot build.
+pub(crate) fn build_runtime_client_identities(
+    router: &CompiledRouter,
+) -> Result<HashMap<ClientIdentityKey, RuntimeClientIdentity>, String> {
+    let mut identities = HashMap::new();
+
+    for routes in router.listeners.values() {
+        collect_client_identities_from_vhosts(routes, &mut identities)?;
+    }
+
+    Ok(identities)
+}
+
+fn collect_client_identities_from_vhosts(
+    routes: &VirtualHostRoutes,
+    identities: &mut HashMap<ClientIdentityKey, RuntimeClientIdentity>,
+) -> Result<(), String> {
+    for server_routes in routes.named.values().chain(routes.default.iter()) {
+        collect_client_identities_from_server(server_routes, identities)?;
+    }
+
+    Ok(())
+}
+
+fn collect_client_identities_from_server(
+    routes: &super::ServerRoutes,
+    identities: &mut HashMap<ClientIdentityKey, RuntimeClientIdentity>,
+) -> Result<(), String> {
+    for location in &routes.locations {
+        let (Some(cert), Some(key)) = (
+            location.upstream_ssl_options.client_certificate.as_ref(),
+            location.upstream_ssl_options.client_certificate_key.as_ref(),
+        ) else {
+            continue;
+        };
+
+        let identity_key = ClientIdentityKey {
+            cert: cert.clone(),
+            key: key.clone(),
+        };
+        if identities.contains_key(&identity_key) {
+            continue;
+        }
+
+        identities.insert(
+            identity_key,
+            load_runtime_client_identity(cert, key)?,
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "openssl")]
+fn load_runtime_client_identity(
+    cert_source: &PemSource,
+    key_source: &PemSource,
+) -> Result<RuntimeClientIdentity, String> {
+    let cert_pem = read_pem_source(cert_source, "proxy_ssl_certificate")?;
+    let certs = X509::stack_from_pem(&cert_pem)
+        .map_err(|err| format!("failed to parse proxy_ssl_certificate: {err}"))?;
+    if certs.is_empty() {
+        return Err("proxy_ssl_certificate does not contain any certificates".into());
+    }
+
+    let key_pem = read_pem_source(key_source, "proxy_ssl_certificate_key")?;
+    let key = PKey::private_key_from_pem(&key_pem).map_err(|err| {
+        format!("failed to parse proxy_ssl_certificate_key: {err}")
+    })?;
+
+    Ok(Arc::new(CertKey::new(certs, key)))
+}
+
+#[cfg(not(feature = "openssl"))]
+fn load_runtime_client_identity(
+    _cert_source: &PemSource,
+    _key_source: &PemSource,
+) -> Result<RuntimeClientIdentity, String> {
+    Err("proxy_ssl_certificate requires build with feature `openssl`".into())
 }
 
 // Content-Length is only a fast path. Chunked and h2 bodies are enforced later
@@ -1265,6 +1388,7 @@ impl ProxyHttp for DynamicProxy {
             &mut http_peer,
             &selected.upstream_ssl_options,
             selected.upstream_trusted_ca.as_ref(),
+            selected.upstream_client_identity.as_ref(),
         );
 
         Ok(Box::new(http_peer))
@@ -1304,6 +1428,7 @@ mod tests {
             upstream_protocol: None,
             upstream_ssl_options: UpstreamSslOptions::default(),
             upstream_trusted_ca: None,
+            upstream_client_identity: None,
             plugins,
             cache: Some(cache),
         }

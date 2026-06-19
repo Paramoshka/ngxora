@@ -111,6 +111,8 @@ message RouteTimeouts {
 message UpstreamTlsOptions {
   Switch verify = 1;
   PemSource trusted_certificate = 2;
+  PemSource client_certificate = 3;
+  PemSource client_certificate_key = 4;
 }
 
 message Plugin {

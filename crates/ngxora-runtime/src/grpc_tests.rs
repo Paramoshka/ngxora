@@ -33,6 +33,56 @@ mwJ6GCLsLHpwW/yjyvn8iEltnJvByM/eeRnfXV6WDObyiZsE/n6DxIRJodQzFqy9
 GA==
 -----END CERTIFICATE-----
 ";
+const MTLS_CLIENT_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIDDTCCAfWgAwIBAgIUdKGZt5gNE2+avoqPrpa66Y0RggEwDQYJKoZIhvcNAQEL
+BQAwFjEUMBIGA1UEAwwLdGVzdC1jbGllbnQwHhcNMjYwNjE5MDA0OTIyWhcNMjYw
+NjIwMDA0OTIyWjAWMRQwEgYDVQQDDAt0ZXN0LWNsaWVudDCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBAIdHdBZd95zhLHNjKf7UgFLIDj36wPTATIS561z/
+ZonGRxMtL+FKrjylzGJiej6dxkKpCxQc6zP/R9Kd1ct+Nt2svlHtDsDJGRmty4Aq
+6/ZMIWL1CuXLeL394OoDuUMqxayBpwSRnXk+yidJBxeJqKqpdRiOOgpaM5IpErVS
+Vf8O5DbqKT9CZ98lzl3pzRRTdg+BsuINYVcrW2CTMogZmvEF0gOXgXv6kmhmyHgR
+rT0AJDhUKSZADMPTqq6+LAIxeu45x+qxJfCVPgrE3gYarSRqGACegShbE29y3Cxq
+5PPLVdTGUOXL/K1fmWqW2rhpT9fthSrAZ0kD4w099Fk69c8CAwEAAaNTMFEwHQYD
+VR0OBBYEFAcA73Yd5ygCwTAHyrt2PK3hbsxGMB8GA1UdIwQYMBaAFAcA73Yd5ygC
+wTAHyrt2PK3hbsxGMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEB
+ADc4AidSHfy1o9mW9CPQDO/Aw/1TT9VNR57esqZRKXjVrwK+VvHyWrafLQSRIgDy
+tgaOWl/MTDCCeULrNiknDqalSbJXBEI/vjcOEE2EVYQPadCzC0Jd6YDykwf9P8Ye
+wnRokag0QEr3qV1DLQHSxDKTEsgsG0gWcvYDhyOUVw2YUgLYr/Q0XPOJceVinmlT
+pPruQljMd3sVb9E00sr6kLlLqgZU5iDFF1aUvoYrVgY9dYXNdZhzXI2gOYFHkZx4
+pn/sQAnRNSrJ6Jz0JqcuAsH5vyLX16EA0OhB5Ta96nAvplnpAkUq6iCJPtC+KAgB
+Jstr72HAqISmzpFePtqDflE=
+-----END CERTIFICATE-----
+"#;
+const MTLS_CLIENT_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCHR3QWXfec4Sxz
+Yyn+1IBSyA49+sD0wEyEuetc/2aJxkcTLS/hSq48pcxiYno+ncZCqQsUHOsz/0fS
+ndXLfjbdrL5R7Q7AyRkZrcuAKuv2TCFi9Qrly3i9/eDqA7lDKsWsgacEkZ15Pson
+SQcXiaiqqXUYjjoKWjOSKRK1UlX/DuQ26ik/QmffJc5d6c0UU3YPgbLiDWFXK1tg
+kzKIGZrxBdIDl4F7+pJoZsh4Ea09ACQ4VCkmQAzD06quviwCMXruOcfqsSXwlT4K
+xN4GGq0kahgAnoEoWxNvctwsauTzy1XUxlDly/ytX5lqltq4aU/X7YUqwGdJA+MN
+PfRZOvXPAgMBAAECggEADJFo3u3FTr/kv1DxL9785QlNDsO4dYSqwedRTzHd4Y2Y
+QNcr4ZnB7O8tDomTozRJR8bTY/+jzRA501QdRBXqcayA1LUExTMUWpG48aQLNAtd
+TAeesZFhGwBL4FyO3lyfl31Gz7faPM9xPIvJADjRK2R+9Sm8NAYD+zTxq1gw68yL
+IdA+LbUqr7Jx3deBJjlwjrrDk9wT3kTCN7amlMvnnJX/q0xLX1XHG/j9NfnanDcL
+Ufss9Tft1v42K9HgweD4eKqcNnOipZRmMc1zPvxKu4qFFjBwZpgNlykt7k6aH238
+AeN2pnlZAu6PqtNJbW4kmhdatd14HAyFzxnAKp4FgQKBgQC6R5aJy5+44gSmizpS
+MqJgiqfuodT63/i9hjQ/v4z57KbUICCVkeGj02dDPBY93IpRzCUtPGlNMrzP8FYG
+OFuC2qJXmTc2GmgitWXMIYfZP3biWt0VELYyUAl8D3OT4OB/95N1yGXEtgajnhHp
+drVJ8ZK8OC35yZTeHLoVQLTULwKBgQC56T4KOIwaR7n3dXSTKsw9kSgKxtX/Ykny
+AgZxz8K8+Hl/Y8KotqttX4pVGAfbGBKdUXpYiWfYI3X/A3iiFatDqUiUr1PwENsE
+CCm9iBfe+SnJOY0CSnjHtE3GnPxYFIKy4z9VsZEuu4Vc5E4McZ/65vHyPahK2Dwf
+VPAZU75wYQKBgB0l/JFdUoXsoAurd5nLIIt4xuRZYGlNSK/nYx+iip3FASnqSQ7+
+f89R0jO8IELX0rEP/7U/Yb7ZtJ/ZHKzmfrNQIN0SNYh6w1bDCcXSbV56RtEOpM+a
+CNiAm6tVA6HdK2P6ypFApWQNk6Zgoq7ki2OhsHNRWyhd+bRzzE5tDJ6zAoGBAIs3
+MhINTjzPwV6hQe6CefcQn9+SDeX0AFONWK4ZWkaP+st+NOKKB80bYkdee2OBn07X
+GLr8Chs8UrvoKYmWmG1Oct+Ee2Kl/JwEUN1w8A80ninlQsaYZeGGD0fPftemZEj5
+CxBsq79HBRMOk7OV0qrcDgnMSh3h1wPPYwxUPaOBAoGAY4taNHE51y1+3odo+05f
+1Mhdp7khfxgN9FUKRKeWLRVtRuV6DR/6/iN8meRTvy6xTJ4vzjVdZ5uv++TVkzSm
+rRX/YrvfqflFs03gj35mGkWt6KBX2ckBEzgGlohOJFnt7qY+t1FrPhtjQFnJ9azA
+URSca2xnSfE3tGjoFkbktp4=
+-----END PRIVATE KEY-----
+"#;
+
 #[test]
 fn proto_snapshot_converts_into_runtime_router() {
     let snapshot = proto::ConfigSnapshot {
@@ -118,6 +168,8 @@ fn proto_snapshot_converts_into_runtime_router() {
                             TRUSTED_UPSTREAM_CA_PATH.into(),
                         )),
                     }),
+                    client_certificate: None,
+                    client_certificate_key: None,
                 }),
                 upstream_protocol: proto::UpstreamHttpProtocol::H2c as i32,
                 plugins: vec![proto::Plugin {
@@ -476,6 +528,142 @@ fn test_route_plugins() -> Vec<PluginSpec> {
     }
 }
 
+#[test]
+fn proto_snapshot_roundtrips_upstream_client_certificate() {
+    const CLIENT_CERT_PATH: &str = "/etc/ngxora/upstreams/client.crt";
+    const CLIENT_KEY_PATH: &str = "/etc/ngxora/upstreams/client.key";
+
+    let snapshot = proto::ConfigSnapshot {
+        version: "mtls-v1".into(),
+        http: Some(proto::HttpOptions::default()),
+        listeners: vec![proto::Listener {
+            name: "edge".into(),
+            address: "0.0.0.0".into(),
+            port: 8080,
+            tls: false,
+            http2: false,
+            http2_only: false,
+            tls_options: None,
+        }],
+        upstreams: Vec::new(),
+        virtual_hosts: vec![proto::VirtualHost {
+            listener: "edge".into(),
+            server_names: vec!["example.com".into()],
+            default_server: true,
+            tls: None,
+            routes: vec![proto::Route {
+                r#match: Some(proto::Match {
+                    kind: Some(proto::r#match::Kind::Prefix("/".into())),
+                }),
+                action: Some(proto::route::Action::Upstream(proto::Upstream {
+                    scheme: "https".into(),
+                    host: "127.0.0.1".into(),
+                    port: 8443,
+                    upstream_group: String::new(),
+                })),
+                timeouts: None,
+                cache: None,
+                plugins: Vec::new(),
+                tls_options: Some(proto::UpstreamTlsOptions {
+                    verify: proto::Switch::On as i32,
+                    trusted_certificate: None,
+                    client_certificate: Some(proto::PemSource {
+                        source: Some(proto::pem_source::Source::Path(
+                            CLIENT_CERT_PATH.into(),
+                        )),
+                    }),
+                    client_certificate_key: Some(proto::PemSource {
+                        source: Some(proto::pem_source::Source::Path(
+                            CLIENT_KEY_PATH.into(),
+                        )),
+                    }),
+                }),
+                upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
+            }],
+        }],
+        le_config: None,
+    };
+
+    let runtime = runtime_snapshot_from_proto(snapshot).expect("proto snapshot compiles");
+    let listen_key = ListenKey {
+        addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        port: 8080,
+        ssl: false,
+    };
+    let route = runtime
+        .router
+        .listeners
+        .get(&listen_key)
+        .and_then(|routes| routes.default.as_ref())
+        .and_then(|server| server.locations.first())
+        .expect("route exists");
+
+    assert_eq!(
+        route.upstream_ssl_options.client_certificate,
+        Some(PemSource::Path(CLIENT_CERT_PATH.into()))
+    );
+    assert_eq!(
+        route.upstream_ssl_options.client_certificate_key,
+        Some(PemSource::Path(CLIENT_KEY_PATH.into()))
+    );
+}
+
+#[test]
+fn proto_snapshot_rejects_client_cert_without_key() {
+    const CLIENT_CERT_PATH: &str = "/etc/ngxora/upstreams/client.crt";
+
+    let snapshot = proto::ConfigSnapshot {
+        version: "mtls-broken".into(),
+        http: Some(proto::HttpOptions::default()),
+        listeners: vec![proto::Listener {
+            name: "edge".into(),
+            address: "0.0.0.0".into(),
+            port: 8080,
+            tls: false,
+            http2: false,
+            http2_only: false,
+            tls_options: None,
+        }],
+        upstreams: Vec::new(),
+        virtual_hosts: vec![proto::VirtualHost {
+            listener: "edge".into(),
+            server_names: vec!["example.com".into()],
+            default_server: true,
+            tls: None,
+            routes: vec![proto::Route {
+                r#match: Some(proto::Match {
+                    kind: Some(proto::r#match::Kind::Prefix("/".into())),
+                }),
+                action: Some(proto::route::Action::Upstream(proto::Upstream {
+                    scheme: "https".into(),
+                    host: "127.0.0.1".into(),
+                    port: 8443,
+                    upstream_group: String::new(),
+                })),
+                timeouts: None,
+                cache: None,
+                plugins: Vec::new(),
+                tls_options: Some(proto::UpstreamTlsOptions {
+                    verify: proto::Switch::On as i32,
+                    trusted_certificate: None,
+                    client_certificate: Some(proto::PemSource {
+                        source: Some(proto::pem_source::Source::Path(
+                            CLIENT_CERT_PATH.into(),
+                        )),
+                    }),
+                    client_certificate_key: None,
+                }),
+                upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
+            }],
+        }],
+        le_config: None,
+    };
+
+    let err = runtime_snapshot_from_proto(snapshot)
+        .expect_err("expected cert-without-key rejection");
+    assert!(err.contains("client_certificate requires client_certificate_key"));
+}
+
 fn router_with_tls_and_plugin() -> CompiledRouter {
     let http = Http {
         upstreams: vec![UpstreamBlock {
@@ -556,4 +744,163 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
     };
 
     CompiledRouter::from_http(&http).expect("router compiles")
+}
+
+#[test]
+fn proto_upstream_tls_options_roundtrips_client_certificate() {
+    use crate::control::{ConfigSnapshot, RuntimeState};
+
+    let cert_pem = MTLS_CLIENT_CERT_PEM.to_string();
+    let key_pem = MTLS_CLIENT_KEY_PEM.to_string();
+
+    let snapshot = proto::ConfigSnapshot {
+        version: "v-mtls".into(),
+        http: Some(proto::HttpOptions::default()),
+        listeners: vec![proto::Listener {
+            name: "edge".into(),
+            address: "0.0.0.0".into(),
+            port: 8080,
+            tls: false,
+            http2: false,
+            http2_only: false,
+            tls_options: None,
+        }],
+        upstreams: Vec::new(),
+        virtual_hosts: vec![proto::VirtualHost {
+            listener: "edge".into(),
+            server_names: vec!["example.com".into()],
+            default_server: true,
+            tls: None,
+            routes: vec![proto::Route {
+                r#match: Some(proto::Match {
+                    kind: Some(proto::r#match::Kind::Prefix("/".into())),
+                }),
+                action: Some(proto::route::Action::Upstream(proto::Upstream {
+                    scheme: "https".into(),
+                    host: "127.0.0.1".into(),
+                    port: 8443,
+                    upstream_group: String::new(),
+                })),
+                timeouts: None,
+                cache: None,
+                plugins: Vec::new(),
+                tls_options: Some(proto::UpstreamTlsOptions {
+                    verify: proto::Switch::On as i32,
+                    trusted_certificate: None,
+                    client_certificate: Some(proto::PemSource {
+                        source: Some(proto::pem_source::Source::InlinePem(cert_pem.clone())),
+                    }),
+                    client_certificate_key: Some(proto::PemSource {
+                        source: Some(proto::pem_source::Source::InlinePem(key_pem.clone())),
+                    }),
+                }),
+                upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
+            }],
+        }],
+        le_config: None,
+    };
+
+    let runtime = runtime_snapshot_from_proto(snapshot).expect("proto snapshot compiles");
+    let listen_key = ListenKey {
+        addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        port: 8080,
+        ssl: false,
+    };
+    let route = runtime
+        .router
+        .listeners
+        .get(&listen_key)
+        .and_then(|routes| routes.default.as_ref())
+        .and_then(|server| server.locations.first())
+        .expect("route exists");
+
+    assert_eq!(
+        route.upstream_ssl_options.client_certificate,
+        Some(PemSource::InlinePem(cert_pem.clone()))
+    );
+    assert_eq!(
+        route.upstream_ssl_options.client_certificate_key,
+        Some(PemSource::InlinePem(key_pem.clone()))
+    );
+
+    // Round-trip back to proto via the runtime snapshot path.
+    let router = runtime.router.clone();
+    let state = RuntimeState::new(ConfigSnapshot::new("v-mtls", router));
+    let snap = state.snapshot();
+    let proto = proto_snapshot_from_runtime(snap.as_ref()).expect("serializes");
+    let tls_opts = proto.virtual_hosts[0].routes[0]
+        .tls_options
+        .as_ref()
+        .expect("tls options present");
+    let cert_src = tls_opts
+        .client_certificate
+        .as_ref()
+        .and_then(|s| s.source.as_ref())
+        .expect("client_certificate present");
+    let key_src = tls_opts
+        .client_certificate_key
+        .as_ref()
+        .and_then(|s| s.source.as_ref())
+        .expect("client_certificate_key present");
+    assert!(
+        matches!(cert_src, proto::pem_source::Source::InlinePem(p) if p == &cert_pem),
+        "cert inline roundtrips"
+    );
+    assert!(
+        matches!(key_src, proto::pem_source::Source::InlinePem(p) if p == &key_pem),
+        "key inline roundtrips"
+    );
+}
+
+#[test]
+fn proto_rejects_client_certificate_without_key() {
+    let snapshot = proto::ConfigSnapshot {
+        version: "v-bad".into(),
+        http: Some(proto::HttpOptions::default()),
+        listeners: vec![proto::Listener {
+            name: "edge".into(),
+            address: "0.0.0.0".into(),
+            port: 8080,
+            tls: false,
+            http2: false,
+            http2_only: false,
+            tls_options: None,
+        }],
+        upstreams: Vec::new(),
+        virtual_hosts: vec![proto::VirtualHost {
+            listener: "edge".into(),
+            server_names: vec!["example.com".into()],
+            default_server: true,
+            tls: None,
+            routes: vec![proto::Route {
+                r#match: Some(proto::Match {
+                    kind: Some(proto::r#match::Kind::Prefix("/".into())),
+                }),
+                action: Some(proto::route::Action::Upstream(proto::Upstream {
+                    scheme: "https".into(),
+                    host: "127.0.0.1".into(),
+                    port: 8443,
+                    upstream_group: String::new(),
+                })),
+                timeouts: None,
+                cache: None,
+                plugins: Vec::new(),
+                tls_options: Some(proto::UpstreamTlsOptions {
+                    verify: proto::Switch::On as i32,
+                    trusted_certificate: None,
+                    client_certificate: Some(proto::PemSource {
+                        source: Some(proto::pem_source::Source::Path(
+                            "/etc/ngxora/upstreams/client.crt".into(),
+                        )),
+                    }),
+                    client_certificate_key: None,
+                }),
+                upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
+            }],
+        }],
+        le_config: None,
+    };
+
+    let err = runtime_snapshot_from_proto(snapshot).expect_err("expected rejection");
+    assert!(err.contains("client_certificate requires client_certificate_key"));
 }

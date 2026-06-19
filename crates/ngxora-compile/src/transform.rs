@@ -1688,6 +1688,38 @@ fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, 
             }),
         },
 
+        consts::PROXY_SSL_CERTIFICATE => match directive.args.as_slice() {
+            [path] => {
+                let ps =
+                    PemSource::new(std::slice::from_ref(path), false).map_err(|_| LowerErr {
+                        message: "proxy_ssl_certificate: invalid certificate source".into(),
+                    })?;
+                Ok(LocationDirective::ProxySslCertificate(ps))
+            }
+            [] => Err(LowerErr {
+                message: "proxy_ssl_certificate: expected 1 argument".into(),
+            }),
+            _ => Err(LowerErr {
+                message: "proxy_ssl_certificate: expected exactly 1 argument".into(),
+            }),
+        },
+
+        consts::PROXY_SSL_CERTIFICATE_KEY => match directive.args.as_slice() {
+            [path] => {
+                let ps =
+                    PemSource::new(std::slice::from_ref(path), false).map_err(|_| LowerErr {
+                        message: "proxy_ssl_certificate_key: invalid key source".into(),
+                    })?;
+                Ok(LocationDirective::ProxySslCertificateKey(ps))
+            }
+            [] => Err(LowerErr {
+                message: "proxy_ssl_certificate_key: expected 1 argument".into(),
+            }),
+            _ => Err(LowerErr {
+                message: "proxy_ssl_certificate_key: expected exactly 1 argument".into(),
+            }),
+        },
+
         consts::RETURN => match directive.args.as_slice() {
             [code, location] => {
                 let status = code.parse().map_err(|_| LowerErr {

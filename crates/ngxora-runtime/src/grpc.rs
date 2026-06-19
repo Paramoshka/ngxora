@@ -382,6 +382,12 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
                 trusted_certificate,
             ));
         }
+        if let Some(client_certificate) = tls_options.client_certificate {
+            directives.push(LocationDirective::ProxySslCertificate(client_certificate));
+        }
+        if let Some(client_certificate_key) = tls_options.client_certificate_key {
+            directives.push(LocationDirective::ProxySslCertificateKey(client_certificate_key));
+        }
     }
 
     if let Some(protocol) = upstream_http_protocol_from_proto(route.upstream_protocol)? {
@@ -689,6 +695,31 @@ fn upstream_tls_options_from_proto(
         return Ok(None);
     };
 
+    let client_certificate = value
+        .client_certificate
+        .as_ref()
+        .map(|source| pem_source_from_proto(Some(source), "route upstream client certificate"))
+        .transpose()?;
+    let client_certificate_key = value
+        .client_certificate_key
+        .as_ref()
+        .map(|source| pem_source_from_proto(Some(source), "route upstream client certificate key"))
+        .transpose()?;
+
+    match (client_certificate.is_some(), client_certificate_key.is_some()) {
+        (true, false) => {
+            return Err(
+                "UpstreamTlsOptions: client_certificate requires client_certificate_key".into(),
+            );
+        }
+        (false, true) => {
+            return Err(
+                "UpstreamTlsOptions: client_certificate_key requires client_certificate".into(),
+            );
+        }
+        _ => {}
+    }
+
     Ok(Some(UpstreamSslOptions {
         verify_cert: switch_from_proto(value.verify),
         trusted_certificate: value
@@ -696,6 +727,8 @@ fn upstream_tls_options_from_proto(
             .as_ref()
             .map(|source| pem_source_from_proto(Some(source), "route upstream trusted certificate"))
             .transpose()?,
+        client_certificate,
+        client_certificate_key,
     }))
 }
 
@@ -1068,6 +1101,14 @@ fn proto_upstream_tls_options_from_runtime(value: &UpstreamSslOptions) -> ProtoU
         verify: proto_switch_from_runtime(value.verify_cert) as i32,
         trusted_certificate: value
             .trusted_certificate
+            .as_ref()
+            .map(proto_pem_source_from_runtime),
+        client_certificate: value
+            .client_certificate
+            .as_ref()
+            .map(proto_pem_source_from_runtime),
+        client_certificate_key: value
+            .client_certificate_key
             .as_ref()
             .map(proto_pem_source_from_runtime),
     }

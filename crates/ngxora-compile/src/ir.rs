@@ -266,6 +266,11 @@ pub struct UpstreamTimeouts {
 pub struct UpstreamSslOptions {
     pub verify_cert: Switch,
     pub trusted_certificate: Option<PemSource>,
+    /// Client certificate presented to the upstream during mTLS
+    /// (`proxy_ssl_certificate`).
+    pub client_certificate: Option<PemSource>,
+    /// Private key for `client_certificate` (`proxy_ssl_certificate_key`).
+    pub client_certificate_key: Option<PemSource>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -289,6 +294,8 @@ pub enum LocationDirective {
     ProxyUpstreamProtocol(UpstreamHttpProtocol),
     ProxySslVerify(Switch),
     ProxySslTrustedCertificate(PemSource),
+    ProxySslCertificate(PemSource),
+    ProxySslCertificateKey(PemSource),
     Root(String),
     TryFiles(String),
     Return { status: u16, location: String },

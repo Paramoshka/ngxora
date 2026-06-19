@@ -215,6 +215,12 @@ Supported location directives:
   `off` disables both upstream certificate and hostname verification.
 - `proxy_ssl_trusted_certificate <path>;`
   Sets a custom CA bundle for upstream TLS verification.
+- `proxy_ssl_certificate <path>;`
+  Client certificate presented to the upstream during mTLS. Must be paired
+  with `proxy_ssl_certificate_key`.
+- `proxy_ssl_certificate_key <path>;`
+  Private key for `proxy_ssl_certificate`. Must be paired with
+  `proxy_ssl_certificate`.
 - `return <status> <location>;`
   Returns an HTTP redirect response (301, 302, 303, 307, or 308) with
   a `Location` header set to `<location>`. The request is not proxied
@@ -261,6 +267,18 @@ Disable upstream verification only for local or disposable environments:
 location /lab/ {
     proxy_ssl_verify off;
     proxy_pass https://127.0.0.1:9443;
+}
+```
+
+Upstream mTLS (present a client certificate to the upstream):
+
+```nginx
+location /secure/ {
+    proxy_ssl_verify on;
+    proxy_ssl_trusted_certificate /etc/ngxora/tls/upstream-ca.pem;
+    proxy_ssl_certificate /etc/ngxora/tls/client.crt;
+    proxy_ssl_certificate_key /etc/ngxora/tls/client.key;
+    proxy_pass https://app.internal:8443;
 }
 ```
 

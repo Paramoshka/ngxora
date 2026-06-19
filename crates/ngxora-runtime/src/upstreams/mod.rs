@@ -21,7 +21,10 @@ pub use types::{
     RouteTarget, ServerRoutes, VirtualHostRoutes,
 };
 
-pub(crate) use runtime::{RuntimeTrustedCa, build_runtime_trusted_cas};
+pub(crate) use runtime::{
+    ClientIdentityKey, RuntimeClientIdentity, RuntimeTrustedCa, build_runtime_client_identities,
+    build_runtime_trusted_cas,
+};
 
 #[cfg(test)]
 pub(crate) use compile::downstream_keepalive_timeout_secs;

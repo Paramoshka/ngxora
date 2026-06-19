@@ -473,6 +473,8 @@ fn compile_upstream_protocol(
 
 fn compile_upstream_ssl_options(location: &Location) -> Result<UpstreamSslOptions, String> {
     let mut options = UpstreamSslOptions::default();
+    let mut seen_cert = false;
+    let mut seen_key = false;
 
     for directive in &location.directives {
         match directive {
@@ -482,8 +484,41 @@ fn compile_upstream_ssl_options(location: &Location) -> Result<UpstreamSslOption
             LocationDirective::ProxySslTrustedCertificate(pem_source) => {
                 options.trusted_certificate = Some(pem_source.clone());
             }
+            LocationDirective::ProxySslCertificate(pem_source) => {
+                if seen_cert {
+                    return Err(
+                        "proxy_ssl_certificate is duplicated in the same location".into(),
+                    );
+                }
+                seen_cert = true;
+                options.client_certificate = Some(pem_source.clone());
+            }
+            LocationDirective::ProxySslCertificateKey(pem_source) => {
+                if seen_key {
+                    return Err(
+                        "proxy_ssl_certificate_key is duplicated in the same location".into(),
+                    );
+                }
+                seen_key = true;
+                options.client_certificate_key = Some(pem_source.clone());
+            }
             _ => {}
         }
+    }
+
+    // mTLS to upstream requires both the client certificate and its private key.
+    match (options.client_certificate.is_some(), options.client_certificate_key.is_some()) {
+        (true, false) => {
+            return Err(
+                "proxy_ssl_certificate requires proxy_ssl_certificate_key".into(),
+            );
+        }
+        (false, true) => {
+            return Err(
+                "proxy_ssl_certificate_key requires proxy_ssl_certificate".into(),
+            );
+        }
+        _ => {}
     }
 
     Ok(options)

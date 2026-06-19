@@ -31,7 +31,7 @@ The snapshot is responsible for carrying:
 - route matchers
 - upstream groups
 - TLS bindings and listener TLS options
-- upstream TLS configurations (including inline CA certificate payloads)
+- upstream TLS configurations (including inline CA certificate payloads and mTLS client identities)
 - plugin configuration already compiled for runtime use
 
 ## What Must Not Cross The Boundary
