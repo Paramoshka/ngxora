@@ -109,6 +109,7 @@ The rule is simple:
 | Docker image | ✅ | `paramoshka/ngxora:main` |
 | Graceful shutdown | ✅ | Pingora built-in |
 | Dry-run `--check` | ✅ | `ngxora --check ngxora.conf` |
+| Liveness probe (`GET /healthz`) | ✅ | Served by `--metrics-addr` alongside `/metrics` |
 | Graceful reload (SIGHUP) | 💤 | Use gRPC for live updates |
 | Let's Encrypt / ACME | ✅ | `instant-acme`, HTTP-01 challenges, background reconciler every 1h |
 | Admin API endpoint | 💤 | Runtime inspection: routes, stats, cache |
@@ -117,14 +118,19 @@ The rule is simple:
 
 # Production Roadmap
 
-Three items to close before calling it production-ready:
+## Blockers for serious production
 
-1. 🔧 **IP allow/deny plugin** — `allow 10.0.0.0/8; deny all;` inside `location {}`
-2. ✅ **Prometheus metrics** — `GET /metrics` via `--metrics-addr`, counters + histogram
-3. ✅ **Structured access log** — JSON lines with method, path, status, latency, upstream, cache
+1. 🔴 **Remove dead `todo!()` in `Ir::validate()`** — `validate.rs` is never called; either implement or delete to avoid a panic trap.
+2. 🔴 **Externalize rate-limit and cache backends** — both are in-process (`DashMap`), not shared across replicas. Add optional Redis backend for horizontal scaling.
 
-Nice to have shortly after:
+## Useful before real load
 
-4. 🟡 Fill in gRPC path for `try_files`, `root`
-5. 🟡 Document reload matrix explicitly (which fields are Live vs Restart)
-6. 💤 Graceful reload via SIGHUP
+3. ✅ **Liveness/readiness endpoint** — `GET /healthz` on the `--metrics-addr` port (k8s liveness/readiness, docker `HEALTHCHECK`).
+4. 🔧 **IP allow/deny** — `allow 10.0.0.0/8; deny all;` inside `location {}`.
+5. 🔧 **SIGHUP live-reload for text config** — currently only gRPC `ApplySnapshot` or full restart.
+
+## Nice to have
+
+6. 💤 **HTTP/3 (QUIC)** — blocked on Pingora upstream support.
+7. 💤 **Admin API** — runtime inspection: routes, stats, cache state.
+8. 🟡 **gRPC path for `try_files`, `root`** — currently runtime NOPs, text-only.

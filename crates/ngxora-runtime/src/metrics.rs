@@ -4,8 +4,8 @@
 //! - Counter for cumulative counts (requests, bytes, cache events)
 //! - Histogram for distributions (latency, response size)
 
-use pingora::apps::prometheus_http_app::PrometheusServer;
 use pingora::services::listening::Service;
+use crate::admin::admin_server;
 use pingora_proxy::Session;
 use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts};
 use serde::Serialize;
@@ -236,19 +236,15 @@ pub(crate) fn write_access_log(
 
 // ---- Prometheus metrics service ----
 
-/// Create a Pingora [Service] that serves `GET /metrics` with Prometheus metrics.
+/// Convenience: build and bind the admin service to `addr`.
 ///
-/// Bind it to an address via `Service::add_tcp()`.
-pub fn prometheus_metrics_service() -> Service<PrometheusServer> {
-    Service::prometheus_http_service()
-}
-
-/// Convenience: build and bind the metrics service to `addr`.
+/// Serves both `GET /metrics` (Prometheus exposition) and `GET /healthz`
+/// (liveness) on the same listener.
 pub fn spawn_metrics_service(
     server: &mut pingora::server::Server,
     addr: SocketAddr,
 ) -> pingora::Result<()> {
-    let mut svc = prometheus_metrics_service();
+    let mut svc = Service::new("Admin HTTP".to_string(), admin_server());
     svc.add_tcp(&addr.to_string());
     server.add_service(svc);
     Ok(())

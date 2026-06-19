@@ -8,6 +8,7 @@
 //! - `metrics`: Prometheus metrics and JSON access log
 //! - `tracing`: OpenTelemetry distributed tracing
 
+pub mod admin;
 pub mod cache;
 pub mod control;
 pub mod grpc;
