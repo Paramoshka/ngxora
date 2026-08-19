@@ -20,14 +20,20 @@ use openssl::nid::Nid;
 #[cfg(feature = "openssl")]
 use openssl::pkey::PKey;
 #[cfg(feature = "openssl")]
+use openssl::ssl::{Ssl, SslConnector, SslContextBuilder, SslMethod, SslStream, SslVerifyMode};
+#[cfg(feature = "openssl")]
 use openssl::x509::{X509, X509NameBuilder};
 use std::collections::HashMap;
 #[cfg(feature = "openssl")]
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+#[cfg(feature = "openssl")]
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 #[cfg(feature = "openssl")]
 use std::sync::Arc;
+#[cfg(feature = "openssl")]
+use std::thread;
 
 fn tls_identity(cert: &str, key: &str) -> TlsIdentity {
     TlsIdentity {
@@ -137,6 +143,81 @@ fn sni_cache_reloads_certificate_after_tls_material_invalidation() {
         .selected_cert_der_for_test(Some("example.com"))
         .expect("load renewed certificate");
     assert_ne!(renewed, first);
+}
+
+#[cfg(feature = "openssl")]
+#[test]
+fn sni_resolver_sends_full_certificate_chain() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let cert_path = dir.path().join("fullchain.pem");
+    let key_path = dir.path().join("privkey.pem");
+    let intermediate_cert_path = dir.path().join("intermediate.pem");
+    let intermediate_key_path = dir.path().join("intermediate-key.pem");
+
+    write_self_signed_certificate(&cert_path, &key_path, 1);
+    write_self_signed_certificate(&intermediate_cert_path, &intermediate_key_path, 2);
+
+    let mut fullchain = fs::read(&cert_path).expect("read leaf certificate");
+    fullchain.extend_from_slice(
+        &fs::read(&intermediate_cert_path).expect("read intermediate certificate"),
+    );
+    fs::write(&cert_path, fullchain).expect("write certificate chain");
+
+    let listen_key = ListenKey {
+        addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port: 443,
+        ssl: true,
+    };
+    let identity = TlsIdentity {
+        cert: PemSource::Path(cert_path),
+        key: PemSource::Path(key_path),
+    };
+    let router = CompiledRouter {
+        listener_tls: HashMap::from([(
+            listen_key.clone(),
+            ListenerTlsConfig {
+                named: HashMap::from([("example.com".into(), identity.clone())]),
+                default: Some(identity),
+                ..ListenerTlsConfig::default()
+            },
+        )]),
+        ..CompiledRouter::default()
+    };
+    let state = Arc::new(RuntimeState::bootstrap(router));
+    let resolver = SniCertResolver::new(state, listen_key);
+
+    let context = SslContextBuilder::new(SslMethod::tls_server())
+        .expect("create server TLS context")
+        .build();
+    let mut ssl = Ssl::new(&context).expect("create server TLS session");
+    resolver
+        .install_selected_identity_for_test(&mut ssl, Some("example.com"))
+        .expect("install server identity");
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind test listener");
+    let addr = listener.local_addr().expect("get test listener address");
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept test connection");
+        let mut stream = SslStream::new(ssl, stream).expect("create server TLS stream");
+        stream.accept().expect("accept TLS handshake");
+    });
+
+    let mut connector =
+        SslConnector::builder(SslMethod::tls_client()).expect("create client TLS connector");
+    connector.set_verify(SslVerifyMode::NONE);
+    let stream = TcpStream::connect(addr).expect("connect to test listener");
+    let stream = connector
+        .build()
+        .connect("example.com", stream)
+        .expect("connect TLS client");
+
+    let peer_chain = stream
+        .ssl()
+        .peer_cert_chain()
+        .expect("server should send a certificate chain");
+    assert_eq!(peer_chain.len(), 2);
+
+    server.join().expect("join test server");
 }
 
 #[test]

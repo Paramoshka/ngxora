@@ -61,6 +61,7 @@ mod openssl_listener_tls {
 
     struct LoadedTlsIdentity {
         cert: X509,
+        chain: Vec<X509>,
         key: PKey<Private>,
     }
 
@@ -98,7 +99,7 @@ mod openssl_listener_tls {
 
         fn load(key: &ListenKey, cert_source: &PemSource, key_source: &PemSource) -> Result<Self> {
             let cert_bytes = Self::read_source(key, cert_source, "ssl certificate")?;
-            let cert = X509::from_pem(&cert_bytes).map_err(|err| {
+            let certs = X509::stack_from_pem(&cert_bytes).map_err(|err| {
                 let origin = match cert_source {
                     PemSource::Path(path) => path.display().to_string(),
                     PemSource::InlinePem(_) => "inline PEM".to_owned(),
@@ -112,6 +113,17 @@ mod openssl_listener_tls {
                     ),
                 )
             })?;
+            let mut certs = certs.into_iter();
+            let cert = certs.next().ok_or_else(|| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!(
+                        "ssl certificate for listener {} does not contain any certificates",
+                        listener_addr(key)
+                    ),
+                )
+            })?;
+            let chain = certs.collect();
 
             let key_bytes = Self::read_source(key, key_source, "ssl private key")?;
             let key = PKey::private_key_from_pem(&key_bytes).map_err(|err| {
@@ -129,7 +141,7 @@ mod openssl_listener_tls {
                 )
             })?;
 
-            Ok(Self { cert, key })
+            Ok(Self { cert, chain, key })
         }
     }
 
@@ -246,7 +258,28 @@ mod openssl_listener_tls {
                     ),
                 )
             })?;
+            for cert in &identity.chain {
+                ext::ssl_add_chain_cert(ssl, cert).map_err(|err| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::InternalError,
+                        format!(
+                            "failed to install ssl certificate chain for listener {}: {err}",
+                            listener_addr(&self.listen_key)
+                        ),
+                    )
+                })?;
+            }
             Ok(())
+        }
+
+        #[cfg(test)]
+        pub(super) fn install_selected_identity_for_test(
+            &self,
+            ssl: &mut SslRef,
+            server_name: Option<&str>,
+        ) -> Result<()> {
+            let identity = self.select(server_name)?;
+            self.install_identity(ssl, &identity)
         }
     }
 
