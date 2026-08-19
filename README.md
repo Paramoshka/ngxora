@@ -160,6 +160,8 @@ How it works:
 - Certificates are stored as `{cache_dir}/{domain}/fullchain.pem` and
   `{cache_dir}/{domain}/privkey.pem`.
 - A background task checks every hour and renews certificates expiring within 30 days.
+- After a successful renewal, new TLS handshakes use the renewed certificate
+  without restarting ngxora; existing TLS sessions continue normally.
 - Explicit `ssl_certificate` in a `server` block takes priority over Let's Encrypt —
   useful when mixing LE and custom certificates.
 

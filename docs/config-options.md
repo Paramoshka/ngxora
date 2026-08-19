@@ -141,7 +141,11 @@ http {
 When `ssl_certificate` and `ssl_certificate_key` are **omitted** from a server
 block, ngxora treats the server as Let's Encrypt-managed.  Certificates are
 stored under the cache directory (`/var/lib/ngxora/certs` by default) and
-renewed automatically.
+renewed automatically. After a successful renewal, new TLS handshakes use the
+renewed certificate without restarting ngxora; already established TLS sessions
+continue normally with the certificate negotiated when they connected.
+Certificate files configured manually are not watched for same-path content
+changes; apply a new snapshot after replacing them.
 
 Current limitation: a Let's Encrypt-managed `server` block must declare exactly
 one `server_name`. Use separate `server` blocks for aliases, or provide a

@@ -103,6 +103,7 @@ pub struct RuntimeState {
     bootstrap_config: RestartConfigFingerprint,
     registry: Arc<PluginRegistry>,
     generation: AtomicU64,
+    tls_material_generation: AtomicU64,
 }
 
 impl RuntimeState {
@@ -122,6 +123,7 @@ impl RuntimeState {
             bootstrap_config,
             registry,
             generation: AtomicU64::new(1),
+            tls_material_generation: AtomicU64::new(1),
         }
     }
 
@@ -138,6 +140,14 @@ impl RuntimeState {
     /// Returns the current monotonic runtime generation.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn tls_material_generation(&self) -> u64 {
+        self.tls_material_generation.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn invalidate_tls_material(&self) -> u64 {
+        self.tls_material_generation.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     /// Applies a new snapshot if only live-reloadable state changed.

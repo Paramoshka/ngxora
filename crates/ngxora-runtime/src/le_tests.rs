@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 fn install_rustls_provider() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -24,6 +27,50 @@ fn unique_test_dir(name: &str) -> PathBuf {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("ngxora-{name}-{id}"))
+}
+
+#[test]
+fn write_secure_atomically_replaces_file_with_private_permissions() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let path = dir.path().join("certificate.pem");
+    fs::write(&path, b"old").expect("write old content");
+
+    write_secure(&path, b"new certificate").expect("replace file");
+
+    assert_eq!(
+        fs::read(&path).expect("read replaced file"),
+        b"new certificate"
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        fs::metadata(&path)
+            .expect("read file metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn challenge_token_guard_removes_token_on_early_return() {
+    fn fail_after_insert(tokens: &ChallengeTokens) -> Result<(), ()> {
+        let _guard = ChallengeTokenGuard::insert(
+            tokens,
+            "challenge-token".into(),
+            "key-authorization".into(),
+        );
+        assert_eq!(
+            lookup_challenge(tokens, "challenge-token").as_deref(),
+            Some("key-authorization")
+        );
+        Err(())
+    }
+
+    let tokens: ChallengeTokens = Arc::new(DashMap::new());
+
+    assert!(fail_after_insert(&tokens).is_err());
+    assert!(lookup_challenge(&tokens, "challenge-token").is_none());
 }
 
 #[tokio::test]

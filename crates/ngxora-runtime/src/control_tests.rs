@@ -98,6 +98,21 @@ fn runtime_state_applies_compatible_snapshot() {
 }
 
 #[test]
+fn tls_material_invalidation_does_not_change_active_snapshot() {
+    let state = RuntimeState::new(ConfigSnapshot::new("v1", router_on_listener(8080)));
+    let snapshot_generation = state.generation();
+    let tls_material_generation = state.tls_material_generation();
+
+    let updated_tls_material_generation = state.invalidate_tls_material();
+    let snapshot = state.snapshot();
+
+    assert_eq!(updated_tls_material_generation, tls_material_generation + 1);
+    assert_eq!(state.generation(), snapshot_generation);
+    assert_eq!(snapshot.generation, snapshot_generation);
+    assert_eq!(snapshot.version, "v1");
+}
+
+#[test]
 fn runtime_state_rejects_listener_topology_change() {
     let state = RuntimeState::new(ConfigSnapshot::new("v1", router_on_listener(8080)));
     let result = state.apply_snapshot(ConfigSnapshot::new("v2", router_on_listener(8443)));

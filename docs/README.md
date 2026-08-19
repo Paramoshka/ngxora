@@ -66,7 +66,7 @@ http {
 | `proxy_ssl_trusted_certificate` | route | Live | Custom upstream CA bundle is loaded per snapshot and attached to the selected upstream peer |
 | `proxy_ssl_certificate` / `proxy_ssl_certificate_key` | route | Live | Upstream mTLS client identity is loaded per snapshot and attached to the selected upstream peer |
 | `server_name` | virtual host | Live | Host routing updates without restart |
-| `ssl_certificate` / `ssl_certificate_key` | TLS identity | Live | Works for existing TLS listeners through runtime SNI cert lookup |
+| `ssl_certificate` / `ssl_certificate_key` | TLS identity | Live | Works for existing TLS listeners through runtime SNI cert lookup; successful Let's Encrypt renewals are used by new TLS handshakes without restart |
 | plugin config | route | Live | Only if plugin code is already compiled into the binary |
 | `client_max_body_size` | http | Live | Prechecked via `Content-Length` and enforced while streaming request body |
 | `keepalive_timeout` | http | Live | Applied per downstream session in request path |

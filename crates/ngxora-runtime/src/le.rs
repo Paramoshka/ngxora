@@ -17,22 +17,41 @@ use instant_acme::{
 use ngxora_compile::ir::{LetsEncryptConfig, PemSource};
 use pingora::tls::x509;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::NamedTempFile;
 use tokio::time;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-/// Write `data` to `path` and set permissions to 0o600 (owner-only).
+/// Atomically write `data` to `path` with 0o600 permissions (owner-only).
 fn write_secure(path: &Path, data: &[u8]) -> Result<(), String> {
-    fs::write(path, data).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temp = NamedTempFile::new_in(parent).map_err(|e| {
+        format!(
+            "failed to create temporary file for {}: {e}",
+            path.display()
+        )
+    })?;
     #[cfg(unix)]
     {
-        fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("failed to set permissions on {}: {e}", path.display()))?;
     }
+    temp.write_all(data)
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|e| format!("failed to sync {}: {e}", path.display()))?;
+    temp.persist(path)
+        .map_err(|e| format!("failed to persist {}: {}", path.display(), e.error))?;
     Ok(())
 }
 
@@ -44,6 +63,27 @@ pub type ChallengeTokens = Arc<DashMap<String, String>>;
 
 pub fn lookup_challenge(tokens: &ChallengeTokens, token: &str) -> Option<String> {
     tokens.get(token).map(|v| v.clone())
+}
+
+struct ChallengeTokenGuard {
+    tokens: ChallengeTokens,
+    token: String,
+}
+
+impl ChallengeTokenGuard {
+    fn insert(tokens: &ChallengeTokens, token: String, key_authorization: String) -> Self {
+        tokens.insert(token.clone(), key_authorization);
+        Self {
+            tokens: Arc::clone(tokens),
+            token,
+        }
+    }
+}
+
+impl Drop for ChallengeTokenGuard {
+    fn drop(&mut self) {
+        self.tokens.remove(&self.token);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +159,8 @@ impl LeManager {
     }
 
     /// Reconcile all LE-managed domains in the given router.
-    pub async fn reconcile(&self, router: &CompiledRouter) {
+    pub async fn reconcile(&self, router: &CompiledRouter) -> bool {
+        let mut updated = false;
         for tls in router.listener_tls.values() {
             for (domain, identity) in &tls.named {
                 let cert_path = match &identity.cert {
@@ -129,14 +170,16 @@ impl LeManager {
                 if !cert_path.starts_with(&self.cache_dir) {
                     continue;
                 }
-                if let Err(e) = self
+                match self
                     .ensure_certificate(domain, &cert_path, &identity.key)
                     .await
                 {
-                    log::error!("LE certificate error for {domain}: {e}");
+                    Ok(changed) => updated |= changed,
+                    Err(e) => log::error!("LE certificate error for {domain}: {e}"),
                 }
             }
         }
+        updated
     }
 
     // ------------------------------------------------------------------
@@ -210,15 +253,17 @@ impl LeManager {
         domain: &str,
         cert_path: &Path,
         key_source: &PemSource,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         match self.check_cert(cert_path) {
-            CertStatus::Fresh => return Ok(()),
+            CertStatus::Fresh => return Ok(false),
             CertStatus::ExpiringSoon => {
                 log::info!("{domain}: certificate expiring soon, renewing…")
             }
             CertStatus::Missing => log::info!("{domain}: no certificate found, obtaining…"),
         }
-        self.issue_certificate(domain, cert_path, key_source).await
+        self.issue_certificate(domain, cert_path, key_source)
+            .await?;
+        Ok(true)
     }
 
     fn check_cert(&self, cert_path: &Path) -> CertStatus {
@@ -274,8 +319,8 @@ impl LeManager {
         // 4. Compute key authorization and store it for the proxy.
         let key_auth = challenge.key_authorization();
         let token = challenge.token.clone();
-        self.tokens
-            .insert(token.clone(), key_auth.as_str().to_string());
+        let token_guard =
+            ChallengeTokenGuard::insert(&self.tokens, token, key_auth.as_str().to_string());
 
         // 5. Signal readiness.
         challenge
@@ -289,8 +334,8 @@ impl LeManager {
             .await
             .map_err(|e| format!("{domain}: order failed: {e}"))?;
 
-        // 7. Clean up token regardless of outcome.
-        self.tokens.remove(&token);
+        // 7. The HTTP-01 token is no longer needed after validation completes.
+        drop(token_guard);
 
         if status != OrderStatus::Ready {
             return Err(format!("{domain}: unexpected order status {status:?}"));
@@ -488,8 +533,12 @@ async fn reconcile_once(
         }
     }
 
-    if let Some(m) = manager {
-        m.reconcile(&snapshot.router).await;
+    let Some(m) = manager else {
+        return;
+    };
+    if m.reconcile(&snapshot.router).await {
+        let revision = state.invalidate_tls_material();
+        log::info!("activated renewed TLS certificate material at revision {revision}");
     }
 }
 

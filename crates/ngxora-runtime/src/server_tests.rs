@@ -1,11 +1,33 @@
+#[cfg(feature = "openssl")]
+use super::openssl_listener_tls::SniCertResolver;
 use super::{
     default_listener_tls, listener_addr, listener_has_multiple_identities, select_listener_tls,
 };
+#[cfg(feature = "openssl")]
+use crate::control::RuntimeState;
 use crate::upstreams::{CompiledRouter, ListenKey, ListenerTlsConfig};
 use ngxora_compile::ir::{Http, Listen, PemSource, Server, SslProvider, TlsIdentity};
+#[cfg(feature = "openssl")]
+use openssl::asn1::Asn1Time;
+#[cfg(feature = "openssl")]
+use openssl::bn::BigNum;
+#[cfg(feature = "openssl")]
+use openssl::ec::{EcGroup, EcKey};
+#[cfg(feature = "openssl")]
+use openssl::hash::MessageDigest;
+#[cfg(feature = "openssl")]
+use openssl::nid::Nid;
+#[cfg(feature = "openssl")]
+use openssl::pkey::PKey;
+#[cfg(feature = "openssl")]
+use openssl::x509::{X509, X509NameBuilder};
 use std::collections::HashMap;
+#[cfg(feature = "openssl")]
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
+#[cfg(feature = "openssl")]
+use std::sync::Arc;
 
 fn tls_identity(cert: &str, key: &str) -> TlsIdentity {
     TlsIdentity {
@@ -22,6 +44,99 @@ fn tls_listener(port: u16, default_server: bool) -> Listen {
         default_server,
         ..Listen::default()
     }
+}
+
+#[cfg(feature = "openssl")]
+fn write_self_signed_certificate(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+    serial: u32,
+) {
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).expect("create EC group");
+    let key = PKey::from_ec_key(EcKey::generate(&group).expect("generate EC key"))
+        .expect("create private key");
+
+    let mut name = X509NameBuilder::new().expect("create X509 name");
+    name.append_entry_by_text("CN", "example.com")
+        .expect("set common name");
+    let name = name.build();
+
+    let mut cert = X509::builder().expect("create X509 builder");
+    cert.set_version(2).expect("set certificate version");
+    let serial = BigNum::from_u32(serial)
+        .expect("create serial")
+        .to_asn1_integer()
+        .expect("convert serial");
+    cert.set_serial_number(&serial).expect("set serial");
+    cert.set_subject_name(&name).expect("set subject");
+    cert.set_issuer_name(&name).expect("set issuer");
+    cert.set_pubkey(&key).expect("set public key");
+    let not_before = Asn1Time::days_from_now(0).expect("set not-before time");
+    let not_after = Asn1Time::days_from_now(1).expect("set not-after time");
+    cert.set_not_before(&not_before).expect("set not-before");
+    cert.set_not_after(&not_after).expect("set not-after");
+    cert.sign(&key, MessageDigest::sha256())
+        .expect("sign certificate");
+
+    fs::write(
+        cert_path,
+        cert.build().to_pem().expect("encode certificate"),
+    )
+    .expect("write certificate");
+    fs::write(
+        key_path,
+        key.private_key_to_pem_pkcs8().expect("encode private key"),
+    )
+    .expect("write private key");
+}
+
+#[cfg(feature = "openssl")]
+#[test]
+fn sni_cache_reloads_certificate_after_tls_material_invalidation() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let cert_path = dir.path().join("fullchain.pem");
+    let key_path = dir.path().join("privkey.pem");
+    write_self_signed_certificate(&cert_path, &key_path, 1);
+
+    let listen_key = ListenKey {
+        addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port: 443,
+        ssl: true,
+    };
+    let identity = TlsIdentity {
+        cert: PemSource::Path(cert_path.clone()),
+        key: PemSource::Path(key_path.clone()),
+    };
+    let router = CompiledRouter {
+        listener_tls: HashMap::from([(
+            listen_key.clone(),
+            ListenerTlsConfig {
+                named: HashMap::from([("example.com".into(), identity.clone())]),
+                default: Some(identity),
+                ..ListenerTlsConfig::default()
+            },
+        )]),
+        ..CompiledRouter::default()
+    };
+    let state = Arc::new(RuntimeState::bootstrap(router));
+    let resolver = SniCertResolver::new(Arc::clone(&state), listen_key);
+
+    let first = resolver
+        .selected_cert_der_for_test(Some("example.com"))
+        .expect("load first certificate");
+    write_self_signed_certificate(&cert_path, &key_path, 2);
+
+    let cached = resolver
+        .selected_cert_der_for_test(Some("example.com"))
+        .expect("load cached certificate");
+    assert_eq!(cached, first);
+
+    state.invalidate_tls_material();
+
+    let renewed = resolver
+        .selected_cert_der_for_test(Some("example.com"))
+        .expect("load renewed certificate");
+    assert_ne!(renewed, first);
 }
 
 #[test]

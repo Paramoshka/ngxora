@@ -135,7 +135,8 @@ mod openssl_listener_tls {
 
     #[derive(Default)]
     struct LoadedTlsIdentityCache {
-        generation: u64,
+        snapshot_generation: u64,
+        tls_material_generation: u64,
         identities: HashMap<LoadedIdentityKey, Arc<LoadedTlsIdentity>>,
     }
 
@@ -155,7 +156,8 @@ mod openssl_listener_tls {
         }
 
         // Certificates are selected from the current runtime snapshot on every
-        // handshake, while the parsed PEM objects are cached per generation.
+        // handshake, while parsed PEM objects are cached until config or file
+        // material changes.
         fn select(&self, server_name: Option<&str>) -> Result<Arc<LoadedTlsIdentity>> {
             let snapshot = self.state.snapshot();
             let tls = snapshot
@@ -172,12 +174,17 @@ mod openssl_listener_tls {
                     )
                 })?;
             let identity = select_listener_tls(&self.listen_key, tls, server_name)?;
-            self.load_cached(snapshot.generation, identity)
+            self.load_cached(
+                snapshot.generation,
+                self.state.tls_material_generation(),
+                identity,
+            )
         }
 
         fn load_cached(
             &self,
-            generation: u64,
+            snapshot_generation: u64,
+            tls_material_generation: u64,
             identity: &TlsIdentity,
         ) -> Result<Arc<LoadedTlsIdentity>> {
             let key = LoadedIdentityKey {
@@ -186,8 +193,11 @@ mod openssl_listener_tls {
             };
 
             let mut cache = self.cache.lock().expect("tls cache poisoned");
-            if cache.generation != generation {
-                cache.generation = generation;
+            if cache.snapshot_generation != snapshot_generation
+                || cache.tls_material_generation != tls_material_generation
+            {
+                cache.snapshot_generation = snapshot_generation;
+                cache.tls_material_generation = tls_material_generation;
                 cache.identities.clear();
             }
 
@@ -202,6 +212,19 @@ mod openssl_listener_tls {
             )?);
             cache.identities.insert(key, Arc::clone(&loaded));
             Ok(loaded)
+        }
+
+        #[cfg(test)]
+        pub(super) fn selected_cert_der_for_test(
+            &self,
+            server_name: Option<&str>,
+        ) -> Result<Vec<u8>> {
+            self.select(server_name)?.cert.to_der().map_err(|err| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!("failed to encode selected certificate: {err}"),
+                )
+            })
         }
 
         fn install_identity(&self, ssl: &mut SslRef, identity: &LoadedTlsIdentity) -> Result<()> {
