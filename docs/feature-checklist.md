@@ -74,7 +74,7 @@ The rule is simple:
 
 | Plugin | Status | Text Config | gRPC | Phase | Notes |
 |---|---|---|---|---|---|
-| `headers` | ✅ | ✅ | ✅ | request/upstream/response | Add/Set/Remove |
+| `headers` | ✅ | ✅ | ✅ | request/upstream/response | Add/Set/Remove + trusted client IP forwarding |
 | `cors` | ✅ | ✅ | ✅ | request/response | Preflight + headers |
 | `basic-auth` | ✅ | ✅ | ✅ | request | RFC 7617 |
 | `jwt-auth` | ✅ | ✅ | ✅ | request | HS256/RS256/ES256/EdDSA, jsonwebtoken 10.3 |

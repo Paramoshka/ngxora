@@ -1952,6 +1952,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "http",
+ "ipnet",
  "ngxora-plugin-api",
  "serde",
  "serde_json",

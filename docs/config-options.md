@@ -345,6 +345,10 @@ location /api/ {
         upstream_request_set X-Upstream-Route api;
         upstream_request_remove X-Legacy;
 
+        forward_client_ip on;
+        trusted_proxy 10.0.0.0/8;
+        trusted_proxy 2001:db8::2;
+
         response_add X-Proxy ngxora;
         response_set Cache-Control no-store;
         response_remove X-Powered-By;
@@ -353,6 +357,29 @@ location /api/ {
     proxy_pass http://127.0.0.1:8080;
 }
 ```
+
+`forward_client_ip on;` makes the plugin set `X-Real-IP` and
+`X-Forwarded-For` from the downstream socket address. An incoming
+`X-Forwarded-For` chain is accepted only when the immediate peer matches a
+`trusted_proxy <IP-or-CIDR>;` entry. The chain is evaluated from right to left,
+and values before the first untrusted address are discarded. Invalid chains
+fall back to the immediate peer address. The default is
+`forward_client_ip off;`.
+
+Client IP directives:
+
+| Directive | Arguments | Default | Behavior |
+| --- | --- | --- | --- |
+| `forward_client_ip` | `on` or `off` | `off` | Enables authoritative `X-Real-IP` and `X-Forwarded-For` generation. May appear once. |
+| `trusted_proxy` | IPv4, IPv6, or CIDR | none | Trusts an immediate or intermediate proxy. May be repeated. An invalid value rejects the plugin configuration. |
+
+With no `trusted_proxy` entries, the immediate socket peer is always used and
+any incoming `X-Forwarded-For` value is replaced. Declaring `trusted_proxy`
+without enabling `forward_client_ip` has no runtime effect.
+
+Only plain IPv4 and IPv6 addresses are accepted in `X-Forwarded-For`; quoted
+values and addresses with ports are treated as invalid. This setting affects
+forwarded headers only and does not change the client IP seen by other plugins.
 
 ### `basic_auth` / `basic-auth`
 

@@ -24,6 +24,10 @@ pub struct LowerErr {
 
 #[derive(Debug, Default, Serialize)]
 struct HeadersPluginConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forward_client_ip: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    trusted_proxies: Vec<String>,
     request: HeaderPatchConfig,
     upstream_request: HeaderPatchConfig,
     response: HeaderPatchConfig,
@@ -1130,6 +1134,20 @@ fn apply_headers_directive(
             config.response.remove.push(parse_header_remove(
                 &directive.args,
                 consts::RESPONSE_REMOVE,
+            )?);
+        }
+        consts::FORWARD_CLIENT_IP => {
+            if config.forward_client_ip.is_some() {
+                return Err(LowerErr {
+                    message: "headers block: duplicate forward_client_ip directive".into(),
+                });
+            }
+            config.forward_client_ip = Some(get_directive_switch(directive)? == Switch::On);
+        }
+        consts::TRUSTED_PROXY => {
+            config.trusted_proxies.push(parse_exactly_one_argument(
+                &directive.args,
+                consts::TRUSTED_PROXY,
             )?);
         }
         _ => {

@@ -447,6 +447,67 @@ http {
     }
 
     #[test]
+    fn from_ast_parses_client_ip_forwarding_for_headers_plugin() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location / {
+      headers {
+        forward_client_ip on;
+        trusted_proxy 10.0.0.0/8;
+        trusted_proxy 2001:db8::2;
+      }
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let location = &ir.http.expect("http missing").servers[0].locations[0];
+        assert_eq!(
+            location.plugins,
+            vec![PluginSpec {
+                name: "headers".into(),
+                config: json!({
+                    "forward_client_ip": true,
+                    "trusted_proxies": ["10.0.0.0/8", "2001:db8::2"],
+                    "request": { "add": [], "set": [], "remove": [] },
+                    "upstream_request": { "add": [], "set": [], "remove": [] },
+                    "response": { "add": [], "set": [], "remove": [] }
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn headers_plugin_rejects_duplicate_forward_client_ip() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location / {
+      headers {
+        forward_client_ip on;
+        forward_client_ip off;
+      }
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let error = Ir::from_ast(&ast).expect_err("duplicate directive should fail");
+
+        assert_eq!(
+            error.message,
+            "headers block: duplicate forward_client_ip directive"
+        );
+    }
+
+    #[test]
     fn from_ast_parses_upstream_blocks() {
         let input = r#"
 http {

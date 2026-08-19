@@ -49,6 +49,33 @@ docker run --rm \
   paramoshka/ngxora:latest
 ```
 
+## CI and image publishing
+
+GitHub Actions runs both CI jobs on GitHub-hosted `ubuntu-latest` runners; no
+self-hosted runner is required:
+
+- `test` runs `make test` for pushes to `main`, tags, and pull requests;
+- `build-and-publish` runs after tests and builds the binary and Docker image;
+- pull requests build but do not publish images;
+- pushes to `main` publish `paramoshka/ngxora:latest` to Docker Hub;
+- tag builds install Grype, scan the image, and publish the matching tag.
+
+Image publishing requires these repository secrets:
+
+| Secret | Purpose |
+| --- | --- |
+| `REGISTRY_USERNAME` | Docker Hub username used by `docker login` |
+| `REGISTRY_TOKEN` | Docker Hub access token; prefer a scoped token over an account password |
+
+The workflow installs its system packages, Rust toolchain, and Go toolchain on
+each fresh runner and caches Cargo artifacts between runs. If a self-hosted
+runner is still registered in the repository settings, it can be removed after
+a successful hosted run because the workflow has no `self-hosted` label.
+
+Standard GitHub-hosted runners are free for public repositories. Private
+repositories consume the Actions minutes included in the account plan. See the
+[GitHub-hosted runners reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+and [Actions limits](https://docs.github.com/en/actions/reference/limits).
 
 ## nginx-style config
 
@@ -282,6 +309,8 @@ location /api/ {
     headers {
         request_set X-Route api;
         upstream_request_add X-From-Proxy ngxora;
+        forward_client_ip on;
+        trusted_proxy 10.0.0.0/8;
         response_add X-Proxy ngxora;
     }
 
