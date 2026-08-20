@@ -14,3 +14,4 @@ Current ADRs:
 
 - [ADR-001](./001-local-grpc-control-plane.md): local gRPC control plane
 - [ADR-002](./002-ir-and-snapshot-boundary.md): strict IR -> snapshot boundary
+- [ADR-003](./003-production-security-baseline.md): production security baseline

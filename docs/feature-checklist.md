@@ -31,8 +31,8 @@ The rule is simple:
 | WebSocket proxying | ✅ | `proxy_pass` | ✅ | Live | Auto upgrade, no extra config |
 | gRPC proxying (h2/h2c) | ✅ | `proxy_upstream_protocol` | ✅ | Live | |
 | **Redirect** `return <status> <url>` | ✅ | `return 301 https://...` | ✅ | Live | Text config and gRPC snapshots map to the same runtime return target |
-| `try_files` | 🟡 | parsed only | ❌ | — | Runtime NOP |
-| `root` | 🟡 | parsed only | ❌ | — | Runtime NOP |
+| `try_files` | 💤 | Rejected | ❌ | — | Not implemented; never silently ignored |
+| `root` | 💤 | Rejected | ❌ | — | Not implemented; never silently ignored |
 
 ## TLS
 
@@ -62,10 +62,10 @@ The rule is simple:
 
 | Feature | Status | Text Config | gRPC | Reload | Notes |
 |---|---|---|---|---|---|
-| Per-location cache | ✅ | `proxy_cache { ... }` | ✅ | Live | In-memory LRU |
+| Per-location cache | ✅ | `proxy_cache { ... }` | ✅ | Live | Bounded in-memory cache |
 | `proxy_cache_ttl` | ✅ | ✅ | ✅ | Live | |
 | `proxy_cache_stale_if_error` | ✅ | ✅ | ✅ | Live | `X-Cache: STALE` |
-| `proxy_cache_key` | ✅ | ✅ | ✅ | Live | uri/uri_and_method/normalized_uri |
+| `proxy_cache_key` | ✅ | ✅ | ✅ | Live | Snapshot/route/host isolation; `normalized_uri` is exact-URI compatibility mode |
 | `proxy_cache_valid` | ✅ | ✅ | ✅ | Live | Status code allowlist |
 | `proxy_cache_max_size` | ✅ | ✅ | ✅ | Live | Global + per-location |
 | `proxy_cache_min_uses` | ✅ | ✅ | ✅ | Live | First N cache misses before initial store |
@@ -97,8 +97,8 @@ The rule is simple:
 |---|---|---|
 | gRPC `ApplySnapshot` | ✅ | Live route updates |
 | gRPC `GetSnapshot` | ✅ | Runtime state export |
-| gRPC over TCP | ✅ | `--grpc-addr` |
-| gRPC over UDS | ✅ | `--grpc-uds` |
+| gRPC over TCP | ✅ | Loopback by default; non-loopback requires `--unsafe-grpc-listen` and a private/firewalled network |
+| gRPC over UDS | ✅ | `--grpc-uds`; socket mode `0600` |
 | In-process control plane | ✅ | No gRPC, direct calls |
 | Reload matrix docs | ✅ | See `docs/README.md` reload matrix |
 
@@ -110,6 +110,7 @@ The rule is simple:
 | Graceful shutdown | ✅ | Pingora built-in |
 | Dry-run `--check` | ✅ | `ngxora --check ngxora.conf` |
 | Liveness probe (`GET /healthz`) | ✅ | Served by `--metrics-addr` alongside `/metrics` |
+| Readiness probe (`GET /readyz`) | ✅ | Active listeners + valid, current TLS cert/key material |
 | Graceful reload (SIGHUP) | 💤 | Use gRPC for live updates |
 | Let's Encrypt / ACME | ✅ | `instant-acme`, HTTP-01 challenges, background reconciler every 1h |
 | Admin API endpoint | 💤 | Runtime inspection: routes, stats, cache |
@@ -120,17 +121,20 @@ The rule is simple:
 
 ## Blockers for serious production
 
-1. 🔴 **Remove dead `todo!()` in `Ir::validate()`** — `validate.rs` is never called; either implement or delete to avoid a panic trap.
-2. 🔴 **Externalize rate-limit and cache backends** — both are in-process (`DashMap`), not shared across replicas. Add optional Redis backend for horizontal scaling.
+1. ✅ **Fail-closed cache safety** — authentication runs before lookup; private/conditional requests bypass; snapshots and hosts are isolated; response buffering is bounded.
+2. ✅ **Safe management defaults** — remote unauthenticated TCP binds require an explicit unsafe opt-in; prefer loopback or gRPC UDS.
+3. ✅ **Non-panicking IR validation** — unsupported programmatic IR is rejected before runtime.
+4. 🔴 **Externalize rate-limit and cache backends** — both are in-process (`DashMap`), not shared across replicas. Add an optional shared backend before relying on consistent limits/cache across replicas.
 
 ## Useful before real load
 
-3. ✅ **Liveness/readiness endpoint** — `GET /healthz` on the `--metrics-addr` port (k8s liveness/readiness, docker `HEALTHCHECK`).
-4. 🔧 **IP allow/deny** — `allow 10.0.0.0/8; deny all;` inside `location {}`.
-5. 🔧 **SIGHUP live-reload for text config** — currently only gRPC `ApplySnapshot` or full restart.
+5. ✅ **Separate liveness/readiness endpoints** — `/healthz` checks the process; `/readyz` checks active config and TLS material.
+6. 🔧 **IP allow/deny** — `allow 10.0.0.0/8; deny all;` inside `location {}`.
+7. 🔧 **SIGHUP live-reload for text config** — currently only gRPC `ApplySnapshot` or full restart.
+8. 🔧 **PROXY protocol for trusted L4 load balancers** — requires a pre-TLS integration point in the listener stack.
 
 ## Nice to have
 
-6. 💤 **HTTP/3 (QUIC)** — blocked on Pingora upstream support.
-7. 💤 **Admin API** — runtime inspection: routes, stats, cache state.
-8. 🟡 **gRPC path for `try_files`, `root`** — currently runtime NOPs, text-only.
+9. 💤 **HTTP/3 (QUIC)** — blocked on Pingora upstream support.
+10. 💤 **Admin API** — runtime inspection: routes, stats, cache state.
+11. 💤 **Static files (`try_files`, `root`)** — unsupported directives are rejected rather than accepted as NOPs.

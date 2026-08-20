@@ -1,11 +1,12 @@
 #[cfg(feature = "openssl")]
 use super::openssl_listener_tls::SniCertResolver;
 use super::{
-    default_listener_tls, listener_addr, listener_has_multiple_identities, select_listener_tls,
+    default_listener_tls, listener_addr, listener_has_multiple_identities, router_ready,
+    select_listener_tls,
 };
 #[cfg(feature = "openssl")]
 use crate::control::RuntimeState;
-use crate::upstreams::{CompiledRouter, ListenKey, ListenerTlsConfig};
+use crate::upstreams::{CompiledRouter, ListenKey, ListenerTlsConfig, VirtualHostRoutes};
 use ngxora_compile::ir::{Http, Listen, PemSource, Server, SslProvider, TlsIdentity};
 #[cfg(feature = "openssl")]
 use openssl::asn1::Asn1Time;
@@ -58,6 +59,25 @@ fn write_self_signed_certificate(
     key_path: &std::path::Path,
     serial: u32,
 ) {
+    let not_before = Asn1Time::days_from_now(0).expect("set not-before time");
+    let not_after = Asn1Time::days_from_now(1).expect("set not-after time");
+    write_self_signed_certificate_with_validity(
+        cert_path,
+        key_path,
+        serial,
+        &not_before,
+        &not_after,
+    );
+}
+
+#[cfg(feature = "openssl")]
+fn write_self_signed_certificate_with_validity(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+    serial: u32,
+    not_before: &openssl::asn1::Asn1TimeRef,
+    not_after: &openssl::asn1::Asn1TimeRef,
+) {
     let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).expect("create EC group");
     let key = PKey::from_ec_key(EcKey::generate(&group).expect("generate EC key"))
         .expect("create private key");
@@ -77,10 +97,8 @@ fn write_self_signed_certificate(
     cert.set_subject_name(&name).expect("set subject");
     cert.set_issuer_name(&name).expect("set issuer");
     cert.set_pubkey(&key).expect("set public key");
-    let not_before = Asn1Time::days_from_now(0).expect("set not-before time");
-    let not_after = Asn1Time::days_from_now(1).expect("set not-after time");
-    cert.set_not_before(&not_before).expect("set not-before");
-    cert.set_not_after(&not_after).expect("set not-after");
+    cert.set_not_before(not_before).expect("set not-before");
+    cert.set_not_after(not_after).expect("set not-after");
     cert.sign(&key, MessageDigest::sha256())
         .expect("sign certificate");
 
@@ -94,6 +112,84 @@ fn write_self_signed_certificate(
         key.private_key_to_pem_pkcs8().expect("encode private key"),
     )
     .expect("write private key");
+}
+
+#[cfg(feature = "openssl")]
+fn router_with_tls_identity(identity: TlsIdentity) -> CompiledRouter {
+    let listen_key = ListenKey {
+        addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port: 443,
+        ssl: true,
+    };
+    CompiledRouter {
+        listeners: HashMap::from([(listen_key.clone(), VirtualHostRoutes::default())]),
+        listener_tls: HashMap::from([(
+            listen_key,
+            ListenerTlsConfig {
+                default: Some(identity),
+                ..ListenerTlsConfig::default()
+            },
+        )]),
+        ..CompiledRouter::default()
+    }
+}
+
+#[cfg(feature = "openssl")]
+#[test]
+fn router_readiness_accepts_valid_tls_material() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
+    write_self_signed_certificate(&cert_path, &key_path, 1);
+
+    let router = router_with_tls_identity(TlsIdentity {
+        cert: PemSource::Path(cert_path),
+        key: PemSource::Path(key_path),
+    });
+    router_ready(&router).expect("valid TLS router should be ready");
+}
+
+#[cfg(feature = "openssl")]
+#[test]
+fn router_readiness_rejects_missing_and_mismatched_tls_material() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let cert_path = dir.path().join("cert.pem");
+    let key_path = dir.path().join("key.pem");
+    let other_cert_path = dir.path().join("other-cert.pem");
+    let other_key_path = dir.path().join("other-key.pem");
+    write_self_signed_certificate(&cert_path, &key_path, 1);
+    write_self_signed_certificate(&other_cert_path, &other_key_path, 2);
+
+    let missing = router_with_tls_identity(TlsIdentity {
+        cert: PemSource::Path(dir.path().join("missing.pem")),
+        key: PemSource::Path(key_path.clone()),
+    });
+    assert!(router_ready(&missing).is_err());
+
+    let mismatched = router_with_tls_identity(TlsIdentity {
+        cert: PemSource::Path(cert_path),
+        key: PemSource::Path(other_key_path),
+    });
+    let err = router_ready(&mismatched).expect_err("mismatched key must fail readiness");
+    assert!(err.contains("do not match"));
+}
+
+#[cfg(feature = "openssl")]
+#[test]
+fn router_readiness_rejects_expired_certificate() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let cert_path = dir.path().join("expired-cert.pem");
+    let key_path = dir.path().join("expired-key.pem");
+    let not_before = Asn1Time::from_unix(1).expect("create old not-before");
+    let not_after = Asn1Time::from_unix(2).expect("create old not-after");
+    write_self_signed_certificate_with_validity(&cert_path, &key_path, 1, &not_before, &not_after);
+
+    let router = router_with_tls_identity(TlsIdentity {
+        cert: PemSource::Path(cert_path),
+        key: PemSource::Path(key_path),
+    });
+    let err = router_ready(&router).expect_err("expired certificate must fail readiness");
+    assert!(err.contains("expired"));
 }
 
 #[cfg(feature = "openssl")]

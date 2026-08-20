@@ -4,11 +4,14 @@ use super::types::{
     CompiledRouter, CompiledUpstreamGroup, CompiledUpstreamServer, ListenKey, RouteTarget,
     VirtualHostRoutes,
 };
-use crate::cache::{CacheBackend, CacheKey, build_cache_key, is_cacheable};
+use crate::cache::{
+    CacheBackend, CacheKey, build_cache_key, estimated_headers_size, is_cacheable,
+    is_cacheable_request,
+};
 use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState};
 use crate::le::ChallengeTokens;
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use ngxora_compile::ir::{
     CacheConfig, PemSource, Switch, UpstreamHttpProtocol, UpstreamSelectionPolicy,
@@ -25,9 +28,9 @@ use pingora::lb::{Backend, Backends, LoadBalancer, discovery, selection};
 use pingora::protocols::l4::socket::SocketAddr as PingoraSocketAddr;
 use pingora::protocols::tls::CaType;
 #[cfg(feature = "openssl")]
-use pingora::tls::x509::X509;
-#[cfg(feature = "openssl")]
 use pingora::tls::pkey::PKey;
+#[cfg(feature = "openssl")]
+use pingora::tls::x509::X509;
 use pingora::upstreams::peer::HttpPeer;
 use pingora::utils::tls::CertKey;
 use pingora_proxy::{ProxyHttp, Session};
@@ -234,7 +237,8 @@ pub struct ProxyContext {
     pub(crate) cache_store_allowed: bool,
     pub(crate) cache_status: Option<http::StatusCode>,
     pub(crate) cache_headers: Option<http::HeaderMap>,
-    pub(crate) response_body_buf: bytes::Bytes,
+    pub(crate) cache_body_limit: Option<u64>,
+    pub(crate) response_body_buf: BytesMut,
     /// Timestamp when the request was created; used for latency calculation.
     pub(crate) start_time: std::time::Instant,
     /// True when the request was served from cache (set in request_filter).
@@ -258,7 +262,8 @@ impl Default for ProxyContext {
             cache_store_allowed: false,
             cache_status: None,
             cache_headers: None,
-            response_body_buf: bytes::Bytes::new(),
+            cache_body_limit: None,
+            response_body_buf: BytesMut::new(),
             start_time: std::time::Instant::now(),
             cache_hit: false,
             span: None,
@@ -424,16 +429,14 @@ impl SelectedRoute {
                 .client_certificate_key
                 .as_ref(),
         ) {
-            (Some(cert), Some(key)) => Some(
-                snapshot
-                    .client_identity(cert, key)
-                    .ok_or_else(|| {
-                        pingora::Error::explain(
-                            pingora::ErrorType::InternalError,
-                            "compiled upstream client identity is missing at runtime",
-                        )
-                    })?,
-            ),
+            (Some(cert), Some(key)) => {
+                Some(snapshot.client_identity(cert, key).ok_or_else(|| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::InternalError,
+                        "compiled upstream client identity is missing at runtime",
+                    )
+                })?)
+            }
             _ => None,
         };
 
@@ -704,7 +707,10 @@ fn collect_client_identities_from_server(
     for location in &routes.locations {
         let (Some(cert), Some(key)) = (
             location.upstream_ssl_options.client_certificate.as_ref(),
-            location.upstream_ssl_options.client_certificate_key.as_ref(),
+            location
+                .upstream_ssl_options
+                .client_certificate_key
+                .as_ref(),
         ) else {
             continue;
         };
@@ -717,10 +723,7 @@ fn collect_client_identities_from_server(
             continue;
         }
 
-        identities.insert(
-            identity_key,
-            load_runtime_client_identity(cert, key)?,
-        );
+        identities.insert(identity_key, load_runtime_client_identity(cert, key)?);
     }
 
     Ok(())
@@ -739,9 +742,8 @@ fn load_runtime_client_identity(
     }
 
     let key_pem = read_pem_source(key_source, "proxy_ssl_certificate_key")?;
-    let key = PKey::private_key_from_pem(&key_pem).map_err(|err| {
-        format!("failed to parse proxy_ssl_certificate_key: {err}")
-    })?;
+    let key = PKey::private_key_from_pem(&key_pem)
+        .map_err(|err| format!("failed to parse proxy_ssl_certificate_key: {err}"))?;
 
     Ok(Arc::new(CertKey::new(certs, key)))
 }
@@ -953,26 +955,9 @@ impl ProxyHttp for DynamicProxy {
             return Ok(false);
         };
 
-        // ── Cache lookup ──
-        let full_uri = session.req_header().uri.to_string();
-        if let Some(cache_cfg) = &selected.cache {
-            let cache_key = build_cache_key(
-                &session.req_header().method,
-                &full_uri,
-                selected.route_id(),
-                cache_cfg,
-            );
-            if let Some(cached) = self.cache_backend.get(&cache_key, cache_cfg).await {
-                ctx.cache_hit = true;
-                write_cached_response(session, &cached).await?;
-                return Ok(true);
-            }
-            ctx.cache_store_allowed = self.cache_backend.record_miss(&cache_key, cache_cfg);
-            ctx.cache_key = Some(cache_key);
-        }
-
         let path = session.req_header().uri.path().to_string();
         let method = session.req_header().method.clone();
+        let request_was_cacheable = is_cacheable_request(&method, &session.req_header().headers);
         let client_ip = request_client_ip(session);
         let mut headers = RequestHeaderEditor {
             inner: session.downstream_session.req_header_mut(),
@@ -994,6 +979,33 @@ impl ProxyHttp for DynamicProxy {
                 session.set_keepalive(None);
                 write_local_response(session, response).await?;
                 return Ok(true);
+            }
+        }
+
+        ctx.selected = Some(selected.clone());
+
+        // Authentication, rate limiting, and other request plugins must run
+        // before a cache hit can terminate the request.
+        if request_was_cacheable
+            && is_cacheable_request(&session.req_header().method, &session.req_header().headers)
+        {
+            if let Some(cache_cfg) = &selected.cache {
+                let full_uri = session.req_header().uri.to_string();
+                let cache_key = build_cache_key(
+                    &session.req_header().method,
+                    &full_uri,
+                    snapshot.generation,
+                    selected.route_id(),
+                    host.as_deref().unwrap_or(""),
+                    cache_cfg,
+                );
+                if let Some(cached) = self.cache_backend.get(&cache_key, cache_cfg).await {
+                    ctx.cache_hit = true;
+                    write_cached_response(session, &cached).await?;
+                    return Ok(true);
+                }
+                ctx.cache_store_allowed = self.cache_backend.record_miss(&cache_key, cache_cfg);
+                ctx.cache_key = Some(cache_key);
             }
         }
 
@@ -1022,7 +1034,6 @@ impl ProxyHttp for DynamicProxy {
             return Ok(true);
         }
 
-        ctx.selected = Some(selected);
         Ok(false)
     }
 
@@ -1187,8 +1198,29 @@ impl ProxyHttp for DynamicProxy {
             if cache_store_allowed(cache_cfg, ctx.cache_store_allowed)
                 && is_cacheable(status, &upstream_response.headers, cache_cfg)
             {
-                ctx.cache_status = Some(status);
-                ctx.cache_headers = Some(upstream_response.headers.clone());
+                let entry_overhead =
+                    estimated_headers_size(&upstream_response.headers).saturating_add(128);
+                let body_limit = self
+                    .cache_backend
+                    .max_size(cache_cfg)
+                    .saturating_sub(entry_overhead);
+                let content_length_fits = upstream_response
+                    .headers
+                    .get(http::header::CONTENT_LENGTH)
+                    .map(|value| {
+                        value
+                            .to_str()
+                            .ok()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .is_some_and(|length| length <= body_limit)
+                    })
+                    .unwrap_or(true);
+
+                if content_length_fits {
+                    ctx.cache_status = Some(status);
+                    ctx.cache_headers = Some(upstream_response.headers.clone());
+                    ctx.cache_body_limit = Some(body_limit);
+                }
             }
         }
 
@@ -1203,16 +1235,21 @@ impl ProxyHttp for DynamicProxy {
         _end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> PingoraResult<Option<Duration>> {
-        if ctx.cache_headers.is_none() {
+        let Some(body_limit) = ctx.cache_body_limit else {
             return Ok(None);
-        }
+        };
 
         if let Some(chunk) = body.as_ref() {
-            let buf = std::mem::take(&mut ctx.response_body_buf);
-            let mut combined = bytes::BytesMut::with_capacity(buf.len() + chunk.len());
-            combined.extend_from_slice(&buf);
-            combined.extend_from_slice(chunk);
-            ctx.response_body_buf = combined.freeze();
+            let next_size = (ctx.response_body_buf.len() as u64).saturating_add(chunk.len() as u64);
+            if next_size > body_limit {
+                ctx.cache_status = None;
+                ctx.cache_headers = None;
+                ctx.cache_body_limit = None;
+                ctx.response_body_buf.clear();
+                return Ok(None);
+            }
+
+            ctx.response_body_buf.extend_from_slice(chunk);
         }
         Ok(None)
     }
@@ -1316,7 +1353,8 @@ impl ProxyHttp for DynamicProxy {
         if e.is_some() {
             ctx.cache_headers = None;
             ctx.cache_status = None;
-            ctx.response_body_buf = Bytes::new();
+            ctx.cache_body_limit = None;
+            ctx.response_body_buf.clear();
             return;
         }
 
@@ -1327,12 +1365,13 @@ impl ProxyHttp for DynamicProxy {
             if !cache_store_allowed(cache_cfg, ctx.cache_store_allowed) {
                 ctx.cache_headers = None;
                 ctx.cache_status = None;
-                ctx.response_body_buf = Bytes::new();
+                ctx.cache_body_limit = None;
+                ctx.response_body_buf.clear();
                 return;
             }
 
             if let (Some(status), Some(headers)) = (ctx.cache_status, ctx.cache_headers.take()) {
-                let body = std::mem::take(&mut ctx.response_body_buf);
+                let body = std::mem::take(&mut ctx.response_body_buf).freeze();
                 self.cache_backend
                     .put(
                         cache_key.clone(),
@@ -1456,6 +1495,7 @@ mod tests {
         let mut session = test_session().await;
         let mut ctx = ProxyContext {
             cache_headers: Some(http::HeaderMap::new()),
+            cache_body_limit: Some(1024),
             ..Default::default()
         };
         let original = Bytes::from_static(b"hello");
@@ -1466,6 +1506,29 @@ mod tests {
 
         assert_eq!(body, Some(original.clone()));
         assert_eq!(ctx.response_body_buf, original);
+    }
+
+    #[tokio::test]
+    async fn response_body_filter_stops_buffering_at_cache_limit() {
+        let proxy = DynamicProxy::from_router(CompiledRouter::default());
+        let mut session = test_session().await;
+        let mut ctx = ProxyContext {
+            cache_status: Some(StatusCode::OK),
+            cache_headers: Some(http::HeaderMap::new()),
+            cache_body_limit: Some(4),
+            response_body_buf: BytesMut::from(&b"abc"[..]),
+            ..Default::default()
+        };
+        let original = Bytes::from_static(b"de");
+        let mut body = Some(original.clone());
+
+        ProxyHttp::response_body_filter(&proxy, &mut session, &mut body, false, &mut ctx)
+            .expect("body filter succeeds");
+
+        assert_eq!(body, Some(original));
+        assert!(ctx.response_body_buf.is_empty());
+        assert!(ctx.cache_headers.is_none());
+        assert!(ctx.cache_body_limit.is_none());
     }
 
     #[tokio::test]
@@ -1483,7 +1546,9 @@ mod tests {
         let mut ctx = ProxyContext {
             selected: Some(cached_route(cache_cfg.clone(), plugins)),
             cache_key: Some(CacheKey {
+                generation: 1,
                 route_id: 1,
+                host: "localhost".into(),
                 method: "GET".into(),
                 uri: "/".into(),
             }),
@@ -1511,7 +1576,9 @@ mod tests {
         let mut session = test_session().await;
         let cache_cfg = CacheConfig::default();
         let key = CacheKey {
+            generation: 1,
             route_id: 1,
+            host: "localhost".into(),
             method: "GET".into(),
             uri: "/partial".into(),
         };
@@ -1520,7 +1587,7 @@ mod tests {
             cache_key: Some(key.clone()),
             cache_status: Some(StatusCode::OK),
             cache_headers: Some(http::HeaderMap::new()),
-            response_body_buf: Bytes::from_static(b"partial"),
+            response_body_buf: BytesMut::from(&b"partial"[..]),
             ..Default::default()
         };
         let err = pingora::Error::explain(pingora::ErrorType::InternalError, "boom");
@@ -1545,7 +1612,9 @@ mod tests {
             ..CacheConfig::default()
         };
         let key = CacheKey {
+            generation: 1,
             route_id: 1,
+            host: "localhost".into(),
             method: "GET".into(),
             uri: "/redirect".into(),
         };
@@ -1584,7 +1653,9 @@ mod tests {
             ..CacheConfig::default()
         };
         let key = CacheKey {
+            generation: 1,
             route_id: 1,
+            host: "localhost".into(),
             method: "GET".into(),
             uri: "/warming".into(),
         };
@@ -1595,7 +1666,7 @@ mod tests {
             cache_store_allowed: false,
             cache_status: Some(StatusCode::OK),
             cache_headers: Some(http::HeaderMap::new()),
-            response_body_buf: Bytes::from_static(b"first"),
+            response_body_buf: BytesMut::from(&b"first"[..]),
             ..Default::default()
         };
 
@@ -1608,7 +1679,7 @@ mod tests {
             cache_store_allowed: true,
             cache_status: Some(StatusCode::OK),
             cache_headers: Some(http::HeaderMap::new()),
-            response_body_buf: Bytes::from_static(b"second"),
+            response_body_buf: BytesMut::from(&b"second"[..]),
             ..Default::default()
         };
 

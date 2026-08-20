@@ -239,19 +239,23 @@ The runtime is built around atomic snapshot apply:
 - Let's Encrypt configuration can be applied via snapshot
 - listener topology changes are detected and reported as `restart_required`
 
-The gRPC transport for the control plane is the intended next layer on top of this runtime model.
-
 You can now start the built-in Rust gRPC control plane alongside the proxy:
 
 ```bash
 cargo run -- --grpc-addr 127.0.0.1:50051 examples/basic/ngxora.conf
 ```
 
+The TCP control plane is unauthenticated and therefore defaults to loopback.
+A non-loopback address requires the explicit `--unsafe-grpc-listen` flag and
+must be protected by a firewall or private management network.
+
 For sidecar-style local control, use a Unix domain socket instead:
 
 ```bash
 cargo run -- --grpc-uds /tmp/ngxora-control.sock examples/basic/ngxora.conf
 ```
+
+The socket is created with mode `0600`.
 
 And inspect the current snapshot with the example Rust client:
 

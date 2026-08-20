@@ -17,6 +17,8 @@ use ngxora_plugin_api::PluginSpec;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -132,6 +134,7 @@ pub async fn serve_control_plane_uds(
     prepare_uds_path(&path)?;
     let listener = UnixListener::bind(&path)
         .map_err(|err| format!("failed to bind gRPC UDS {}: {err}", path.display()))?;
+    set_uds_permissions(&path)?;
     let incoming = UnixListenerStream::new(listener);
 
     GrpcServer::builder()
@@ -207,6 +210,16 @@ fn prepare_uds_path(path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_uds_permissions(path: &Path) -> Result<(), String> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|err| {
+        format!(
+            "failed to set gRPC UDS permissions on {}: {err}",
+            path.display()
+        )
+    })
 }
 
 fn proto_apply_result(result: RuntimeApplyResult) -> ProtoApplyResult {
@@ -386,7 +399,9 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
             directives.push(LocationDirective::ProxySslCertificate(client_certificate));
         }
         if let Some(client_certificate_key) = tls_options.client_certificate_key {
-            directives.push(LocationDirective::ProxySslCertificateKey(client_certificate_key));
+            directives.push(LocationDirective::ProxySslCertificateKey(
+                client_certificate_key,
+            ));
         }
     }
 
@@ -706,7 +721,10 @@ fn upstream_tls_options_from_proto(
         .map(|source| pem_source_from_proto(Some(source), "route upstream client certificate key"))
         .transpose()?;
 
-    match (client_certificate.is_some(), client_certificate_key.is_some()) {
+    match (
+        client_certificate.is_some(),
+        client_certificate_key.is_some(),
+    ) {
         (true, false) => {
             return Err(
                 "UpstreamTlsOptions: client_certificate requires client_certificate_key".into(),
