@@ -4,14 +4,15 @@
 //! - Counter for cumulative counts (requests, bytes, cache events)
 //! - Histogram for distributions (latency, response size)
 
+use crate::admin::{admin_server, admin_server_with_state};
+use crate::control::RuntimeState;
 use pingora::services::listening::Service;
-use crate::admin::admin_server;
 use pingora_proxy::Session;
 use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts};
 use serde::Serialize;
 use std::io::Write;
 use std::net::SocketAddr;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 // ---- Registry ----
 
@@ -236,15 +237,26 @@ pub(crate) fn write_access_log(
 
 // ---- Prometheus metrics service ----
 
-/// Convenience: build and bind the admin service to `addr`.
+/// Compatibility helper without runtime readiness state.
 ///
-/// Serves both `GET /metrics` (Prometheus exposition) and `GET /healthz`
-/// (liveness) on the same listener.
+/// Serves metrics and liveness normally; `GET /readyz` returns `503`.
 pub fn spawn_metrics_service(
     server: &mut pingora::server::Server,
     addr: SocketAddr,
 ) -> pingora::Result<()> {
     let mut svc = Service::new("Admin HTTP".to_string(), admin_server());
+    svc.add_tcp(&addr.to_string());
+    server.add_service(svc);
+    Ok(())
+}
+
+/// Build the admin service with readiness tied to the active runtime state.
+pub fn spawn_metrics_service_with_state(
+    server: &mut pingora::server::Server,
+    addr: SocketAddr,
+    state: Arc<RuntimeState>,
+) -> pingora::Result<()> {
+    let mut svc = Service::new("Admin HTTP".to_string(), admin_server_with_state(state));
     svc.add_tcp(&addr.to_string());
     server.add_service(svc);
     Ok(())

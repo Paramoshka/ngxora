@@ -486,9 +486,7 @@ fn compile_upstream_ssl_options(location: &Location) -> Result<UpstreamSslOption
             }
             LocationDirective::ProxySslCertificate(pem_source) => {
                 if seen_cert {
-                    return Err(
-                        "proxy_ssl_certificate is duplicated in the same location".into(),
-                    );
+                    return Err("proxy_ssl_certificate is duplicated in the same location".into());
                 }
                 seen_cert = true;
                 options.client_certificate = Some(pem_source.clone());
@@ -507,16 +505,15 @@ fn compile_upstream_ssl_options(location: &Location) -> Result<UpstreamSslOption
     }
 
     // mTLS to upstream requires both the client certificate and its private key.
-    match (options.client_certificate.is_some(), options.client_certificate_key.is_some()) {
+    match (
+        options.client_certificate.is_some(),
+        options.client_certificate_key.is_some(),
+    ) {
         (true, false) => {
-            return Err(
-                "proxy_ssl_certificate requires proxy_ssl_certificate_key".into(),
-            );
+            return Err("proxy_ssl_certificate requires proxy_ssl_certificate_key".into());
         }
         (false, true) => {
-            return Err(
-                "proxy_ssl_certificate_key requires proxy_ssl_certificate".into(),
-            );
+            return Err("proxy_ssl_certificate_key requires proxy_ssl_certificate".into());
         }
         _ => {}
     }
@@ -529,6 +526,23 @@ fn compile_location(
     upstreams: &HashMap<String, CompiledUpstreamGroup>,
     next_route_id: &mut u64,
 ) -> Result<Option<CompiledLocation>, String> {
+    let mut action_count = 0;
+    for directive in &location.directives {
+        match directive {
+            LocationDirective::ProxyPass(_) | LocationDirective::Return { .. } => {
+                action_count += 1;
+            }
+            LocationDirective::Root(_) => return Err("root is not supported at runtime".into()),
+            LocationDirective::TryFiles(_) => {
+                return Err("try_files is not supported at runtime".into());
+            }
+            _ => {}
+        }
+    }
+    if action_count != 1 {
+        return Err("location must contain exactly one proxy_pass or return directive".into());
+    }
+
     let Some(target) = route_target(location, upstreams)? else {
         return Ok(None);
     };

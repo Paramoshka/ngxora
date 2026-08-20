@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use super::set_uds_permissions;
 use super::{proto, proto_snapshot_from_runtime, runtime_snapshot_from_proto};
 use crate::control::{ConfigSnapshot, RuntimeState};
 use crate::upstreams::{CompiledMatcher, CompiledRouter, ListenKey, RouteTarget};
@@ -9,6 +11,21 @@ use ngxora_compile::ir::{
 use ngxora_plugin_api::PluginSpec;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
+
+#[cfg(unix)]
+#[test]
+fn grpc_uds_permissions_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let file = tempfile::NamedTempFile::new().expect("create temporary socket placeholder");
+    set_uds_permissions(file.path()).expect("set UDS permissions");
+    let mode = std::fs::metadata(file.path())
+        .expect("read UDS metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+}
 
 const TRUSTED_UPSTREAM_CA_PATH: &str = "/etc/ngxora/upstreams/ca.pem";
 const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
@@ -568,14 +585,10 @@ fn proto_snapshot_roundtrips_upstream_client_certificate() {
                     verify: proto::Switch::On as i32,
                     trusted_certificate: None,
                     client_certificate: Some(proto::PemSource {
-                        source: Some(proto::pem_source::Source::Path(
-                            CLIENT_CERT_PATH.into(),
-                        )),
+                        source: Some(proto::pem_source::Source::Path(CLIENT_CERT_PATH.into())),
                     }),
                     client_certificate_key: Some(proto::PemSource {
-                        source: Some(proto::pem_source::Source::Path(
-                            CLIENT_KEY_PATH.into(),
-                        )),
+                        source: Some(proto::pem_source::Source::Path(CLIENT_KEY_PATH.into())),
                     }),
                 }),
                 upstream_protocol: proto::UpstreamHttpProtocol::Unspecified as i32,
@@ -647,9 +660,7 @@ fn proto_snapshot_rejects_client_cert_without_key() {
                     verify: proto::Switch::On as i32,
                     trusted_certificate: None,
                     client_certificate: Some(proto::PemSource {
-                        source: Some(proto::pem_source::Source::Path(
-                            CLIENT_CERT_PATH.into(),
-                        )),
+                        source: Some(proto::pem_source::Source::Path(CLIENT_CERT_PATH.into())),
                     }),
                     client_certificate_key: None,
                 }),
@@ -659,8 +670,8 @@ fn proto_snapshot_rejects_client_cert_without_key() {
         le_config: None,
     };
 
-    let err = runtime_snapshot_from_proto(snapshot)
-        .expect_err("expected cert-without-key rejection");
+    let err =
+        runtime_snapshot_from_proto(snapshot).expect_err("expected cert-without-key rejection");
     assert!(err.contains("client_certificate requires client_certificate_key"));
 }
 

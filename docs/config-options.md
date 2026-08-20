@@ -538,16 +538,19 @@ location /blog/ {
 | Mode | Key derivation |
 |---|---|
 | `uri` | Request URI path and query string (default). |
-| `uri_and_method` | URI + HTTP method (e.g. `GET /api/users` vs `POST /api/users`). |
-| `normalized_uri` | URI with sorted query parameters (stable keys regardless of param order). |
+| `uri_and_method` | HTTP method + exact request URI. The cache currently accepts only `GET`. |
+| `normalized_uri` | Compatibility mode that currently uses the exact URI to avoid unsafe query-order collisions. |
 
 ### Notes
 
 - Cache is per-location: two locations with the same upstream do not share cache unless configured identically.
+- Cache entries are isolated by active snapshot generation, route, and request host.
 - Cache storage is in-memory. `proxy_cache_max_size` caps memory per location.
-- Responses larger than the configured per-location max size are not cached.
+- Responses larger than the configured per-location max size stop being buffered and are not cached.
 - `proxy_cache off` explicitly disables caching for that location (useful to override a broader config).
-- Responses with `Cache-Control: private`, `Cache-Control: no-store`, or `Set-Cookie` are not cached.
+- Only `GET` requests are cached. Requests carrying credentials, cookies, range/conditional headers, or client cache-bypass directives always go upstream.
+- Request plugins, including authentication and rate limiting, always run before a cache lookup.
+- Responses with `Vary`, `Set-Cookie`, or `Cache-Control: private`, `no-store`, or `no-cache` are not cached.
 - `proxy_cache_valid` applies to the final response status after response plugins run.
 
 ## Observability
@@ -557,10 +560,23 @@ location /blog/ {
 Enable with the `--metrics-addr` CLI flag:
 
 ```bash
-ngxora --metrics-addr 0.0.0.0:9090 ngxora.conf
+ngxora --metrics-addr 127.0.0.1:9090 ngxora.conf
 ```
 
-This exposes `GET /metrics` in Prometheus text format with the following custom metrics
+This exposes `GET /metrics`, liveness at `GET /healthz`, and TLS-aware
+readiness at `GET /readyz`. Readiness returns `503` while the active
+configuration has no listeners or any configured certificate is missing,
+invalid, not yet valid, expired, or does not match its private key.
+
+Admin HTTP is unauthenticated. A non-loopback bind is rejected unless the
+operator explicitly supplies `--unsafe-admin-listen`; expose it only on a
+firewalled management network:
+
+```bash
+ngxora --metrics-addr 0.0.0.0:9090 --unsafe-admin-listen ngxora.conf
+```
+
+The metrics endpoint uses Prometheus text format with the following custom metrics
 (prefixed `ngxora_`):
 
 | Metric | Type | Labels | Description |

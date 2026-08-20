@@ -336,7 +336,6 @@ http {
         );
     }
 
-
     #[test]
     fn from_ast_parses_client_max_body_size_off() {
         let input = r#"

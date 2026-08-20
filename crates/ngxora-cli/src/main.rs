@@ -5,7 +5,7 @@ use ngxora_runtime::control::{
 };
 use ngxora_runtime::grpc::{spawn_control_plane, spawn_control_plane_uds};
 use ngxora_runtime::le::{self, LeReconcilerService};
-use ngxora_runtime::metrics::spawn_metrics_service;
+use ngxora_runtime::metrics::spawn_metrics_service_with_state;
 use ngxora_runtime::server::bind_listeners_from_state;
 use ngxora_runtime::upstreams::{CompiledRouter, DynamicProxy};
 use pingora::server::Server;
@@ -24,6 +24,8 @@ struct CliArgs {
     grpc_uds: Option<PathBuf>,
     metrics_addr: Option<SocketAddr>,
     otel_endpoint: Option<String>,
+    unsafe_grpc_listen: bool,
+    unsafe_admin_listen: bool,
 }
 
 fn main() -> ExitCode {
@@ -111,6 +113,11 @@ fn run(cli: CliArgs) -> Result<(), String> {
     );
 
     if let Some(addr) = cli.grpc_addr {
+        if cli.unsafe_grpc_listen && !addr.ip().is_loopback() {
+            eprintln!(
+                "WARNING: unauthenticated gRPC control plane is exposed on non-loopback address {addr}"
+            );
+        }
         spawn_control_plane(addr, control.clone())?;
         println!("gRPC control plane listening on {addr}");
     }
@@ -121,7 +128,12 @@ fn run(cli: CliArgs) -> Result<(), String> {
     }
 
     if let Some(addr) = cli.metrics_addr {
-        spawn_metrics_service(&mut server, addr)
+        if cli.unsafe_admin_listen && !addr.ip().is_loopback() {
+            eprintln!(
+                "WARNING: unauthenticated admin HTTP is exposed on non-loopback address {addr}"
+            );
+        }
+        spawn_metrics_service_with_state(&mut server, addr, Arc::clone(&state))
             .map_err(|err| format!("failed to spawn metrics service: {err}"))?;
         println!("Prometheus metrics listening on {addr}");
     }
@@ -151,6 +163,13 @@ fn load_router(path: &Path) -> Result<CompiledRouter, String> {
         })?;
     let ir = Ir::from_ast(&ast)
         .map_err(|err| format!("failed to lower config {}: {}", path.display(), err.message))?;
+    ir.validate().map_err(|err| {
+        format!(
+            "failed to validate config {}: {}",
+            path.display(),
+            err.message
+        )
+    })?;
     let http = ir
         .http
         .ok_or_else(|| format!("config {} does not contain an http block", path.display()))?;
@@ -181,11 +200,15 @@ where
     let mut grpc_uds: Option<PathBuf> = None;
     let mut metrics_addr: Option<SocketAddr> = None;
     let mut otel_endpoint: Option<String> = None;
+    let mut unsafe_grpc_listen = false;
+    let mut unsafe_admin_listen = false;
 
     let mut args = args.into_iter().skip(1).map(Into::into);
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "--check" => check_only = true,
+            "--unsafe-grpc-listen" => unsafe_grpc_listen = true,
+            "--unsafe-admin-listen" => unsafe_admin_listen = true,
             "--grpc-addr" => {
                 let value = args
                     .next()
@@ -247,6 +270,18 @@ where
     if grpc_addr.is_some() && grpc_uds.is_some() {
         return Err("use either --grpc-addr or --grpc-uds, not both".into());
     }
+    if unsafe_grpc_listen && grpc_addr.is_none() {
+        return Err("--unsafe-grpc-listen requires --grpc-addr".into());
+    }
+    if unsafe_admin_listen && metrics_addr.is_none() {
+        return Err("--unsafe-admin-listen requires --metrics-addr".into());
+    }
+    if grpc_addr.is_some_and(|addr| !addr.ip().is_loopback()) && !unsafe_grpc_listen {
+        return Err("non-loopback --grpc-addr requires explicit --unsafe-grpc-listen".into());
+    }
+    if metrics_addr.is_some_and(|addr| !addr.ip().is_loopback()) && !unsafe_admin_listen {
+        return Err("non-loopback --metrics-addr requires explicit --unsafe-admin-listen".into());
+    }
 
     Ok(Some(CliArgs {
         config_path,
@@ -255,11 +290,13 @@ where
         grpc_uds,
         metrics_addr,
         otel_endpoint,
+        unsafe_grpc_listen,
+        unsafe_admin_listen,
     }))
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage: ngxora [--check] [--metrics-addr <host:port>] [--otel-endpoint <url>] [--grpc-addr <host:port> | --grpc-uds <path>] <config-path>"
+        "Usage: ngxora [--check] [--metrics-addr <host:port> [--unsafe-admin-listen]] [--otel-endpoint <url>] [--grpc-addr <host:port> [--unsafe-grpc-listen] | --grpc-uds <path>] <config-path>"
     );
 }

@@ -314,6 +314,87 @@ fn listener_addr(key: &ListenKey) -> String {
     SocketAddr::new(key.addr, key.port).to_string()
 }
 
+fn read_tls_source(source: &PemSource, label: &str) -> std::result::Result<Vec<u8>, String> {
+    match source {
+        PemSource::Path(path) => std::fs::read(path)
+            .map_err(|err| format!("failed to read {label} {}: {err}", path.display())),
+        PemSource::InlinePem(pem) if !pem.is_empty() => Ok(pem.as_bytes().to_vec()),
+        PemSource::InlinePem(_) => Err(format!("{label} inline PEM is empty")),
+    }
+}
+
+fn validate_tls_identity(identity: &TlsIdentity) -> std::result::Result<(), String> {
+    let cert_pem = read_tls_source(&identity.cert, "TLS certificate")?;
+    let certificates = openssl::x509::X509::stack_from_pem(&cert_pem)
+        .map_err(|err| format!("failed to parse TLS certificate: {err}"))?;
+    let certificate = certificates
+        .first()
+        .ok_or_else(|| "TLS certificate chain is empty".to_string())?;
+
+    let key_pem = read_tls_source(&identity.key, "TLS private key")?;
+    let private_key = openssl::pkey::PKey::private_key_from_pem(&key_pem)
+        .map_err(|err| format!("failed to parse TLS private key: {err}"))?;
+    let public_key = certificate
+        .public_key()
+        .map_err(|err| format!("failed to read TLS certificate public key: {err}"))?;
+    if !public_key.public_eq(&private_key) {
+        return Err("TLS certificate and private key do not match".into());
+    }
+
+    let now = openssl::asn1::Asn1Time::days_from_now(0)
+        .map_err(|err| format!("failed to read current ASN.1 time: {err}"))?;
+    if certificate
+        .not_before()
+        .compare(&now)
+        .map_err(|err| format!("failed to compare TLS not-before time: {err}"))?
+        == std::cmp::Ordering::Greater
+    {
+        return Err("TLS certificate is not valid yet".into());
+    }
+    if certificate
+        .not_after()
+        .compare(&now)
+        .map_err(|err| format!("failed to compare TLS expiry time: {err}"))?
+        != std::cmp::Ordering::Greater
+    {
+        return Err("TLS certificate is expired".into());
+    }
+
+    Ok(())
+}
+
+/// Check whether the active router has listeners and usable TLS material.
+pub(crate) fn router_ready(router: &CompiledRouter) -> std::result::Result<(), String> {
+    if router.listeners.is_empty() {
+        return Err("active configuration has no listeners".into());
+    }
+
+    for key in router.listeners.keys().filter(|key| key.ssl) {
+        let tls = router.listener_tls.get(key).ok_or_else(|| {
+            format!(
+                "TLS listener {} has no certificate configuration",
+                listener_addr(key)
+            )
+        })?;
+        let identities = tls.default.iter().chain(tls.named.values());
+        let mut identity_count = 0;
+        for identity in identities {
+            identity_count += 1;
+            validate_tls_identity(identity).map_err(|err| {
+                format!("TLS listener {} is not ready: {err}", listener_addr(key))
+            })?;
+        }
+        if identity_count == 0 {
+            return Err(format!(
+                "TLS listener {} has no certificate identities",
+                listener_addr(key)
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 // Listener certificates are loaded from files because Pingora's bind path
 // expects filesystem-backed identities today.
 fn pem_source_path<'a>(source: &'a PemSource, label: &str) -> Result<&'a str> {
