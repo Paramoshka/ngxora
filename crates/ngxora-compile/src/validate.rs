@@ -84,6 +84,7 @@ mod tests {
                     locations: vec![Location {
                         matcher: LocationMatcher::Prefix("/".into()),
                         directives: vec![directive],
+                        access_rules: Vec::new(),
                         plugins: Vec::new(),
                         cache: None,
                     }],

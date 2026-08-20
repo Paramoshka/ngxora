@@ -80,7 +80,7 @@ The rule is simple:
 | `jwt-auth` | ✅ | ✅ | ✅ | request | HS256/RS256/ES256/EdDSA, jsonwebtoken 10.3 |
 | `rate-limit` | ✅ | ✅ | ✅ | request | Per-IP sliding window |
 | `ext-authz` | ✅ | ✅ | ✅ | request | External HTTP auth |
-| **IP allow/deny** | 🔧 | — | — | request | nginx `allow`/`deny` analog |
+| **IP allow/deny** | 🟡 | ✅ | 🔧 | request | nginx `allow`/`deny` analog in text config; gRPC path not exposed yet |
 
 ## Observability
 
@@ -129,7 +129,7 @@ The rule is simple:
 ## Useful before real load
 
 5. ✅ **Separate liveness/readiness endpoints** — `/healthz` checks the process; `/readyz` checks active config and TLS material.
-6. 🔧 **IP allow/deny** — `allow 10.0.0.0/8; deny all;` inside `location {}`.
+6. ✅ **IP allow/deny** — `allow 10.0.0.0/8; deny all;` inside `location {}`.
 7. 🔧 **SIGHUP live-reload for text config** — currently only gRPC `ApplySnapshot` or full restart.
 8. 🔧 **PROXY protocol for trusted L4 load balancers** — requires a pre-TLS integration point in the listener stack.
 

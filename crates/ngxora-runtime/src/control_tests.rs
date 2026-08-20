@@ -36,6 +36,7 @@ fn router_with_route_plugin(port: u16, plugin_name: &str) -> CompiledRouter {
     let location = CompiledLocation {
         route_id: 1,
         matcher: CompiledMatcher::Prefix("/".into()),
+        access_rules: Vec::new(),
         target: RouteTarget::ProxyPass {
             host: "example.com".into(),
             port: 80,

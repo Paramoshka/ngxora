@@ -7,9 +7,10 @@ use super::{
     validate_sni_host_consistency,
 };
 use bytes::Bytes;
+use ipnet::IpNet;
 use ngxora_compile::ir::{
-    Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
-    ProxyPassTarget, Server, SslProvider, Switch, UpstreamBlock, UpstreamHealthCheck,
+    Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationIpRule, LocationMatcher,
+    PemSource, ProxyPassTarget, Server, SslProvider, Switch, UpstreamBlock, UpstreamHealthCheck,
     UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
     UpstreamSslOptions, UpstreamTimeouts,
 };
@@ -20,6 +21,7 @@ use pingora_proxy::{ProxyHttp, Session};
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, duplex};
 
@@ -60,6 +62,7 @@ fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
     CompiledLocation {
         route_id: 1,
         matcher,
+        access_rules: Vec::new(),
         target: target(id),
         upstream_timeouts: UpstreamTimeouts::default(),
         upstream_protocol: None,
@@ -248,6 +251,7 @@ fn compiled_router_rejects_invalid_location_regex() {
                 directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
                     "http://127.0.0.1:8080".parse().unwrap(),
                 ))],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -282,6 +286,7 @@ fn compiled_router_rejects_letsencrypt_with_multiple_server_names() {
                 directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
                     "http://127.0.0.1:8080".parse().unwrap(),
                 ))],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -312,6 +317,7 @@ fn compiled_router_parses_proxy_timeouts() {
                         "http://127.0.0.1:8080".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -359,6 +365,7 @@ fn compiled_router_parses_proxy_ssl_options() {
                         "https://127.0.0.1:8443".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -407,6 +414,7 @@ fn compiled_router_parses_proxy_ssl_client_certificate() {
                         "https://127.0.0.1:8443".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -454,6 +462,7 @@ fn compiled_router_rejects_proxy_ssl_certificate_without_key() {
                         "https://127.0.0.1:8443".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -484,6 +493,7 @@ fn compiled_router_rejects_proxy_ssl_certificate_key_without_cert() {
                         "https://127.0.0.1:8443".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -512,6 +522,7 @@ fn compiled_router_parses_proxy_upstream_protocol() {
                         "http://127.0.0.1:50051".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -550,6 +561,7 @@ fn compiled_router_rejects_h2_without_tls_upstream() {
                         "http://127.0.0.1:50051".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -578,6 +590,7 @@ fn compiled_router_rejects_h2c_with_tls_upstream() {
                         "https://127.0.0.1:50051".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -628,6 +641,7 @@ fn apply_upstream_ssl_options_sets_trusted_ca() {
                         "https://127.0.0.1:8443".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -730,6 +744,7 @@ fn apply_upstream_ssl_options_sets_client_identity() {
                         "https://127.0.0.1:8443".parse().unwrap(),
                     )),
                 ],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -829,6 +844,7 @@ fn compiled_router_maps_named_upstream_groups() {
                 directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
                     "http://backend".parse().unwrap(),
                 ))],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -1092,6 +1108,48 @@ async fn request_body_filter_ignores_upgraded_websocket_stream() {
 }
 
 #[test]
+fn compiled_router_preserves_location_access_rules() {
+    let allow = IpNet::from_str("10.0.0.0/8").expect("test network");
+    let deny = IpNet::from_str("192.0.2.1/32").expect("192.0.2.1/32 is valid");
+
+    let http = Http {
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/".into()),
+                access_rules: vec![LocationIpRule::Deny(deny), LocationIpRule::Allow(allow)],
+                directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    "http://127.0.0.1:8080".parse().unwrap(),
+                ))],
+                plugins: Vec::new(),
+                cache: None,
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    };
+
+    let router = CompiledRouter::from_http(&http).expect("router compiles");
+    let location = &router
+        .listeners
+        .values()
+        .next()
+        .expect("listener present")
+        .default
+        .as_ref()
+        .expect("default route present")
+        .locations[0];
+
+    assert_eq!(
+        location.access_rules,
+        vec![LocationIpRule::Deny(deny), LocationIpRule::Allow(allow)]
+    );
+}
+
+#[test]
 fn compiled_router_preserves_location_plugins() {
     let http = Http {
         servers: vec![Server {
@@ -1104,6 +1162,7 @@ fn compiled_router_preserves_location_plugins() {
                 directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
                     "http://127.0.0.1:8080".parse().unwrap(),
                 ))],
+                access_rules: Vec::new(),
                 plugins: vec![PluginSpec {
                     name: "headers".into(),
                     config: json!({

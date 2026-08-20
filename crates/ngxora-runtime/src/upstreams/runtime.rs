@@ -209,6 +209,7 @@ enum SelectedTarget {
 pub(crate) struct SelectedRoute {
     route_id: u64,
     target: SelectedTarget,
+    access_rules: Vec<ngxora_compile::ir::LocationIpRule>,
     upstream_timeouts: UpstreamTimeouts,
     upstream_protocol: Option<UpstreamHttpProtocol>,
     upstream_ssl_options: UpstreamSslOptions,
@@ -370,6 +371,7 @@ impl SelectedRoute {
             RouteTarget::Return { status, location } => {
                 return Ok(Self {
                     route_id: resolved.location.route_id,
+                    access_rules: Vec::new(),
                     target: SelectedTarget::Return {
                         status: *status,
                         location: location.clone(),
@@ -442,6 +444,7 @@ impl SelectedRoute {
 
         Ok(Self {
             route_id: resolved.location.route_id,
+            access_rules: resolved.location.access_rules.clone(),
             target,
             upstream_timeouts: resolved.location.upstream_timeouts,
             upstream_protocol: resolved.location.upstream_protocol,
@@ -487,6 +490,27 @@ fn request_client_ip(session: &Session) -> Option<std::net::IpAddr> {
         .client_addr()
         .and_then(|addr| addr.as_inet())
         .map(|addr| addr.ip())
+}
+
+fn location_allows_client(
+    rules: &[ngxora_compile::ir::LocationIpRule],
+    client_ip: Option<std::net::IpAddr>,
+) -> bool {
+    if rules.is_empty() {
+        return true;
+    }
+
+    let Some(ip) = client_ip else {
+        return false;
+    };
+
+    for rule in rules {
+        if rule.matches(&ip) {
+            return rule.is_allow();
+        }
+    }
+
+    false
 }
 
 fn respond_from_plugin_flow(flow: PluginFlow, stage: &str) -> PingoraResult<()> {
@@ -959,6 +983,12 @@ impl ProxyHttp for DynamicProxy {
         let method = session.req_header().method.clone();
         let request_was_cacheable = is_cacheable_request(&method, &session.req_header().headers);
         let client_ip = request_client_ip(session);
+        if !location_allows_client(&selected.access_rules, client_ip) {
+            session.set_keepalive(None);
+            session.respond_error(http::StatusCode::FORBIDDEN).await?;
+            return Ok(true);
+        }
+
         let mut headers = RequestHeaderEditor {
             inner: session.downstream_session.req_header_mut(),
         };
@@ -1438,7 +1468,10 @@ impl ProxyHttp for DynamicProxy {
 mod tests {
     use super::*;
     use http::StatusCode;
+    use ipnet::IpNet;
+    use ngxora_compile::ir::LocationIpRule;
     use ngxora_plugin_api::{HttpPlugin, PluginFlow, async_trait, empty_plugin_chain};
+    use std::str::FromStr;
     use std::sync::Arc;
     use tokio::io::{AsyncWriteExt, duplex};
 
@@ -1457,6 +1490,7 @@ mod tests {
     fn cached_route(cache: CacheConfig, plugins: ngxora_plugin_api::PluginChain) -> SelectedRoute {
         SelectedRoute {
             route_id: 1,
+            access_rules: Vec::new(),
             target: SelectedTarget::Upstream(SelectedPeer {
                 host: "127.0.0.1".into(),
                 port: 8080,
@@ -1529,6 +1563,28 @@ mod tests {
         assert!(ctx.response_body_buf.is_empty());
         assert!(ctx.cache_headers.is_none());
         assert!(ctx.cache_body_limit.is_none());
+    }
+
+    #[test]
+    fn location_access_rules_defaults_to_allow() {
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+        assert!(location_allows_client(&[], Some(ip)));
+    }
+
+    #[test]
+    fn location_access_rules_first_match_wins() {
+        let rules = vec![
+            LocationIpRule::Deny(IpNet::from_str("10.0.0.0/8").expect("allowlist parse")),
+            LocationIpRule::Allow(IpNet::from_str("10.0.0.1/32").expect("10.0.0.1/32 is valid")),
+        ];
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        assert!(!location_allows_client(&rules, Some(ip)));
+    }
+
+    #[test]
+    fn location_access_rules_without_client_ip_is_denied_if_restricted() {
+        let rules = vec![LocationIpRule::AllowAll];
+        assert!(!location_allows_client(&rules, None));
     }
 
     #[tokio::test]

@@ -427,6 +427,7 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
     Ok(Location {
         matcher,
         directives,
+        access_rules: Vec::new(),
         plugins: route
             .plugins
             .iter()

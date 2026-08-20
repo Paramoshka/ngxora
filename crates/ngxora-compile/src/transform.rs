@@ -1,3 +1,4 @@
+use ipnet::IpNet;
 use ngxora_config::{Ast, Block, Directive, Node};
 use ngxora_plugin_api::PluginSpec;
 use serde::Serialize;
@@ -10,9 +11,9 @@ use crate::{
     consts,
     ir::{
         CacheConfig, Http, Ir, KeepaliveTimeout, LetsEncryptConfig, Listen, Location,
-        LocationDirective, LocationMatcher, PemSource, ProxyPassTarget, Server, SslProvider,
-        Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient, UpstreamBlock,
-        UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol,
+        LocationDirective, LocationIpRule, LocationMatcher, PemSource, ProxyPassTarget, Server,
+        SslProvider, Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
+        UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol,
         UpstreamSelectionPolicy, UpstreamServer,
     },
 };
@@ -727,10 +728,11 @@ fn set_once<T>(slot: &mut Option<T>, value: T, directive: &str) -> Result<(), Lo
 
 fn lower_location(block: &Block) -> Result<Location, LowerErr> {
     let matcher = parse_location_matcher(&block.args)?;
-    let (directives, plugins, cache) = parse_location_contents(&block.children)?;
+    let (directives, plugins, cache, access_rules) = parse_location_contents(&block.children)?;
 
     Ok(Location {
         matcher,
+        access_rules,
         directives,
         plugins,
         cache,
@@ -767,10 +769,19 @@ fn parse_location_matcher(args: &[String]) -> Result<LocationMatcher, LowerErr> 
 
 fn parse_location_contents(
     nodes: &[Node],
-) -> Result<(Vec<LocationDirective>, Vec<PluginSpec>, Option<CacheConfig>), LowerErr> {
+) -> Result<
+    (
+        Vec<LocationDirective>,
+        Vec<PluginSpec>,
+        Option<CacheConfig>,
+        Vec<LocationIpRule>,
+    ),
+    LowerErr,
+> {
     let mut directives: Vec<LocationDirective> = Vec::new();
     let mut plugins: Vec<PluginSpec> = Vec::new();
     let mut cache: Option<CacheConfig> = None;
+    let mut access_rules: Vec<LocationIpRule> = Vec::new();
     for node in nodes {
         match node {
             Node::Directive(directive) => {
@@ -782,6 +793,12 @@ fn parse_location_contents(
                     }
                     continue;
                 }
+
+                if let Some(rule) = apply_location_access_rule(directive)? {
+                    access_rules.push(rule);
+                    continue;
+                }
+
                 let location_directive = apply_location_directive(directive)?;
                 directives.push(location_directive);
             }
@@ -800,7 +817,52 @@ fn parse_location_contents(
         }
     }
 
-    Ok((directives, plugins, cache))
+    Ok((directives, plugins, cache, access_rules))
+}
+
+fn apply_location_access_rule(directive: &Directive) -> Result<Option<LocationIpRule>, LowerErr> {
+    fn parse_network(value: &str, directive: &str) -> Result<IpNet, LowerErr> {
+        if let Ok(network) = value.parse::<IpNet>() {
+            return Ok(network);
+        }
+        if let Ok(address) = value.parse::<IpAddr>() {
+            return Ok(IpNet::from(address));
+        }
+
+        Err(LowerErr {
+            message: format!("{directive}: expected an IP address or CIDR, got `{value}`"),
+        })
+    }
+
+    match directive.name.as_str() {
+        consts::ALLOW => match directive.args.as_slice() {
+            [value] if value == consts::ALL => Ok(Some(LocationIpRule::AllowAll)),
+            [value] => Ok(Some(LocationIpRule::Allow(parse_network(
+                value,
+                consts::ALLOW,
+            )?))),
+            [] => Err(LowerErr {
+                message: "allow: expected <ip>|<cidr>|all".into(),
+            }),
+            _ => Err(LowerErr {
+                message: "allow: expected exactly 1 argument".into(),
+            }),
+        },
+        consts::DENY => match directive.args.as_slice() {
+            [value] if value == consts::ALL => Ok(Some(LocationIpRule::DenyAll)),
+            [value] => Ok(Some(LocationIpRule::Deny(parse_network(
+                value,
+                consts::DENY,
+            )?))),
+            [] => Err(LowerErr {
+                message: "deny: expected <ip>|<cidr>|all".into(),
+            }),
+            _ => Err(LowerErr {
+                message: "deny: expected exactly 1 argument".into(),
+            }),
+        },
+        _ => Ok(None),
+    }
 }
 
 fn apply_cache_directive(

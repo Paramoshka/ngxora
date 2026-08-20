@@ -5,6 +5,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use ipnet::IpNet;
+
 use url::Url;
 
 /// How the server obtains its TLS certificate.
@@ -217,9 +219,31 @@ pub enum TlsVerifyClient {
 #[derive(Debug, Eq, PartialEq)]
 pub struct Location {
     pub matcher: LocationMatcher,
+    pub access_rules: Vec<LocationIpRule>,
     pub directives: Vec<LocationDirective>, // proxy_pass, root, try_files...
     pub plugins: Vec<PluginSpec>,
     pub cache: Option<CacheConfig>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum LocationIpRule {
+    Allow(IpNet),
+    Deny(IpNet),
+    AllowAll,
+    DenyAll,
+}
+
+impl LocationIpRule {
+    pub fn matches(&self, ip: &IpAddr) -> bool {
+        match self {
+            Self::Allow(network) | Self::Deny(network) => network.contains(ip),
+            Self::AllowAll | Self::DenyAll => true,
+        }
+    }
+
+    pub fn is_allow(&self) -> bool {
+        matches!(self, Self::Allow(_) | Self::AllowAll)
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

@@ -551,6 +551,7 @@ fn compile_location(
     let compiled = CompiledLocation {
         route_id: *next_route_id,
         matcher: CompiledMatcher::try_from(&location.matcher)?,
+        access_rules: location.access_rules.clone(),
         target,
         upstream_timeouts: compile_upstream_timeouts(location)?,
         upstream_protocol,

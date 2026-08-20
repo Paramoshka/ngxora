@@ -501,6 +501,7 @@ fn runtime_return_route_converts_back_to_proto_redirect() {
                     status: 308,
                     location: "https://example.com/new".into(),
                 }],
+                access_rules: Vec::new(),
                 plugins: Vec::new(),
                 cache: None,
             }],
@@ -716,6 +717,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
                         tls: true,
                     }),
                 ],
+                access_rules: Vec::new(),
                 plugins: test_route_plugins(),
                 cache: Some(ngxora_compile::ir::CacheConfig {
                     enabled: true,

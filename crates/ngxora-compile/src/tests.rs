@@ -2,6 +2,7 @@
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;
+    use std::str::FromStr;
     use std::time::Duration;
 
     use ngxora_config::Ast;
@@ -10,10 +11,11 @@ mod tests {
     use url::Url;
 
     use crate::ir::{
-        CacheKeyMode, Ir, KeepaliveTimeout, LocationDirective, LocationMatcher, PemSource,
-        ProxyPassTarget, SslProvider, Switch, TlsProtocolBounds, TlsProtocolVersion,
+        CacheKeyMode, Ir, KeepaliveTimeout, LocationDirective, LocationIpRule, LocationMatcher,
+        PemSource, ProxyPassTarget, SslProvider, Switch, TlsProtocolBounds, TlsProtocolVersion,
         TlsVerifyClient, UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy,
     };
+    use ipnet::IpNet;
 
     #[test]
     fn from_ast_parses_basic_http() {
@@ -333,6 +335,59 @@ http {
                     Url::parse("https://127.0.0.1:8443").unwrap(),
                 )),
             ]
+        );
+    }
+
+    #[test]
+    fn from_ast_parses_location_access_rules() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location /api/ {
+      allow 10.0.0.0/8;
+      deny 192.0.2.10;
+      allow all;
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let location = &ir.http.expect("http missing").servers[0].locations[0];
+        assert_eq!(
+            location.access_rules,
+            vec![
+                LocationIpRule::Allow(IpNet::from_str("10.0.0.0/8").expect("10.0.0.0/8 is valid")),
+                LocationIpRule::Deny(
+                    IpNet::from_str("192.0.2.10/32").expect("192.0.2.10/32 is valid"),
+                ),
+                LocationIpRule::AllowAll,
+            ]
+        );
+    }
+
+    #[test]
+    fn from_ast_rejects_invalid_location_access_rule() {
+        let input = r#"
+http {
+  server {
+    listen 8080;
+    location / {
+      allow not-an-ip;
+      proxy_pass http://127.0.0.1:8080;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("expected invalid allow value");
+
+        assert!(
+            err.message
+                .contains("allow: expected an IP address or CIDR")
         );
     }
 

@@ -225,10 +225,18 @@ Supported location directives:
 - `proxy_ssl_certificate_key <path>;`
   Private key for `proxy_ssl_certificate`. Must be paired with
   `proxy_ssl_certificate`.
+- `allow <ip>|<cidr>|all;`
+  Adds an IP allow/deny rule to the current `location`.
+- `deny <ip>|<cidr>|all;`
+  Adds an IP deny rule to the current `location`.
 - `return <status> <location>;`
   Returns an HTTP redirect response (301, 302, 303, 307, or 308) with
   a `Location` header set to `<location>`. The request is not proxied
   to an upstream when this directive is present on a matched location.
+
+Rules are evaluated in declaration order. The first matching rule wins.
+If no rule matches the client IP, access is denied.
+If no `allow`/`deny` directives exist on a location, all clients are allowed.
 
   Example:
 

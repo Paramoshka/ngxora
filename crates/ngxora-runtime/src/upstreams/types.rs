@@ -1,6 +1,6 @@
 use ngxora_compile::ir::{
-    DownstreamTlsOptions, LetsEncryptConfig, Listen, LocationMatcher, PemSource, TlsIdentity,
-    TlsProtocolBounds, TlsVerifyClient, UpstreamHttpProtocol, UpstreamSelectionPolicy,
+    DownstreamTlsOptions, LetsEncryptConfig, Listen, LocationIpRule, LocationMatcher, PemSource,
+    TlsIdentity, TlsProtocolBounds, TlsVerifyClient, UpstreamHttpProtocol, UpstreamSelectionPolicy,
     UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
@@ -159,6 +159,7 @@ use ngxora_compile::ir::CacheConfig;
 pub struct CompiledLocation {
     pub route_id: u64,
     pub matcher: CompiledMatcher,
+    pub access_rules: Vec<LocationIpRule>,
     pub target: RouteTarget,
     pub upstream_timeouts: UpstreamTimeouts,
     pub upstream_protocol: Option<UpstreamHttpProtocol>,
