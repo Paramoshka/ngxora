@@ -21,7 +21,6 @@ use pingora_proxy::{ProxyHttp, Session};
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::str::FromStr;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, duplex};
 
@@ -1109,8 +1108,10 @@ async fn request_body_filter_ignores_upgraded_websocket_stream() {
 
 #[test]
 fn compiled_router_preserves_location_access_rules() {
-    let allow = IpNet::from_str("10.0.0.0/8").expect("test network");
-    let deny = IpNet::from_str("192.0.2.1/32").expect("192.0.2.1/32 is valid");
+    let allow = "10.0.0.0/8".parse::<IpNet>().expect("test network");
+    let deny = "192.0.2.1/32"
+        .parse::<IpNet>()
+        .expect("192.0.2.1/32 is valid");
 
     let http = Http {
         servers: vec![Server {

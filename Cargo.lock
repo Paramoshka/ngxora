@@ -2020,6 +2020,7 @@ dependencies = [
  "http",
  "hyper-util",
  "instant-acme",
+ "ipnet",
  "log",
  "ngxora-compile",
  "ngxora-plugin-api",

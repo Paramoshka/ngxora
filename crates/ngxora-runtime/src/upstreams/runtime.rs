@@ -985,7 +985,9 @@ impl ProxyHttp for DynamicProxy {
         let client_ip = request_client_ip(session);
         if !location_allows_client(&selected.access_rules, client_ip) {
             session.set_keepalive(None);
-            session.respond_error(http::StatusCode::FORBIDDEN).await?;
+            session
+                .respond_error(http::StatusCode::FORBIDDEN.into())
+                .await?;
             return Ok(true);
         }
 
@@ -1471,7 +1473,6 @@ mod tests {
     use ipnet::IpNet;
     use ngxora_compile::ir::LocationIpRule;
     use ngxora_plugin_api::{HttpPlugin, PluginFlow, async_trait, empty_plugin_chain};
-    use std::str::FromStr;
     use std::sync::Arc;
     use tokio::io::{AsyncWriteExt, duplex};
 
@@ -1574,8 +1575,12 @@ mod tests {
     #[test]
     fn location_access_rules_first_match_wins() {
         let rules = vec![
-            LocationIpRule::Deny(IpNet::from_str("10.0.0.0/8").expect("allowlist parse")),
-            LocationIpRule::Allow(IpNet::from_str("10.0.0.1/32").expect("10.0.0.1/32 is valid")),
+            LocationIpRule::Deny("10.0.0.0/8".parse::<IpNet>().expect("allowlist parse")),
+            LocationIpRule::Allow(
+                "10.0.0.1/32"
+                    .parse::<IpNet>()
+                    .expect("10.0.0.1/32 is valid"),
+            ),
         ];
         let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
         assert!(!location_allows_client(&rules, Some(ip)));
