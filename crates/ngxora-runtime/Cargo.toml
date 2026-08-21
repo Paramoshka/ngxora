@@ -53,4 +53,4 @@ ipnet = "2"
 
 [build-dependencies]
 protoc-bin-vendored = "3"
-tonic-build = "0.12"
+tonic-build = "0.14"
