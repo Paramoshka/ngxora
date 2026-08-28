@@ -35,7 +35,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost", "tls"] }
 tower = "0.5"
 url = "2"
 prometheus = "0.14"
@@ -48,6 +48,7 @@ opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "trace"] }
 
 [dev-dependencies]
+rcgen = "0.14"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 ipnet = "2"
 

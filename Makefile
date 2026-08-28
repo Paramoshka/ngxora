@@ -64,6 +64,7 @@ lint: ## Lint source code
 
 test: test-unit ## Run default test suite
 test-unit: ## Run unit tests
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --bin $(APP)
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/ngxora-config/Cargo.toml
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/ngxora-compile/Cargo.toml
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/extensions/headers/Cargo.toml

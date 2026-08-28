@@ -26,7 +26,7 @@ use std::time::Duration;
 use tokio::net::UnixListener;
 #[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
-use tonic::transport::Server as GrpcServer;
+use tonic::transport::{Certificate, Identity, Server as GrpcServer, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use url::Url;
 
@@ -74,6 +74,31 @@ impl GrpcControlPlane {
     }
 }
 
+/// TLS material for the TCP gRPC control plane.
+///
+/// Supplying a client CA makes client certificates mandatory. The local UDS
+/// control plane intentionally does not use this configuration.
+#[derive(Clone)]
+pub struct GrpcTlsConfig {
+    identity: Identity,
+    client_ca: Certificate,
+}
+
+impl GrpcTlsConfig {
+    /// Creates the server identity and the dedicated CA used for controller
+    /// client certificates.
+    pub fn from_pem(
+        server_certificate: impl AsRef<[u8]>,
+        server_key: impl AsRef<[u8]>,
+        client_ca: impl AsRef<[u8]>,
+    ) -> Self {
+        Self {
+            identity: Identity::from_pem(server_certificate, server_key),
+            client_ca: Certificate::from_pem(client_ca),
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl ControlPlane for GrpcControlPlane {
     async fn apply_snapshot(
@@ -101,8 +126,9 @@ impl ControlPlane for GrpcControlPlane {
 pub async fn serve_control_plane(
     addr: SocketAddr,
     control: InProcessControlPlane,
+    tls: GrpcTlsConfig,
 ) -> Result<(), tonic::transport::Error> {
-    GrpcServer::builder()
+    grpc_server(&tls)?
         .add_service(ControlPlaneServer::new(GrpcControlPlane::new(control)))
         .serve(addr)
         .await
@@ -113,16 +139,28 @@ pub async fn serve_control_plane(
 pub fn spawn_control_plane(
     addr: SocketAddr,
     control: InProcessControlPlane,
+    tls: GrpcTlsConfig,
 ) -> Result<JoinHandle<()>, String> {
+    // Validate the PEM before the server is moved to its background runtime so
+    // a bad Secret fails process startup instead of only logging in a thread.
+    grpc_server(&tls).map_err(|err| format!("invalid gRPC mTLS configuration: {err}"))?;
     let runtime = grpc_runtime()?;
 
     Ok(std::thread::spawn(move || {
         runtime.block_on(async move {
-            if let Err(err) = serve_control_plane(addr, control).await {
+            if let Err(err) = serve_control_plane(addr, control, tls).await {
                 eprintln!("gRPC control plane stopped: {err}");
             }
         });
     }))
+}
+
+fn grpc_server(tls: &GrpcTlsConfig) -> Result<GrpcServer, tonic::transport::Error> {
+    GrpcServer::builder().tls_config(
+        ServerTlsConfig::new()
+            .identity(tls.identity.clone())
+            .client_ca_root(tls.client_ca.clone()),
+    )
 }
 
 /// Runs the gRPC control plane over a Unix domain socket for local agent-sidecar use.

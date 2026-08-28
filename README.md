@@ -242,12 +242,24 @@ The runtime is built around atomic snapshot apply:
 You can now start the built-in Rust gRPC control plane alongside the proxy:
 
 ```bash
-cargo run -- --grpc-addr 127.0.0.1:50051 examples/basic/ngxora.conf
+cargo run -- \
+  --grpc-addr 0.0.0.0:50051 \
+  --grpc-tls-cert /var/run/ngxora/grpc/server.crt \
+  --grpc-tls-key /var/run/ngxora/grpc/server.key \
+  --grpc-client-ca /var/run/ngxora/grpc/controller-ca.crt \
+  examples/basic/ngxora.conf
 ```
 
-The TCP control plane is unauthenticated and therefore defaults to loopback.
-A non-loopback address requires the explicit `--unsafe-grpc-listen` flag and
-must be protected by a firewall or private management network.
+Every TCP control-plane listener requires mTLS, including loopback. The server
+certificate must cover the address used by the controller, and
+`--grpc-client-ca` must contain only the CA that issues controller client
+certificates. Plaintext TCP and `--unsafe-grpc-listen` are not supported.
+
+For Kubernetes, mount the server keypair and dedicated controller CA from a
+read-only Secret (for example at `/var/run/ngxora/grpc`) with `defaultMode:
+0400`. Use separate Secrets for the server identity and the controller client
+identity. Certificate rotation requires a Pod rollout; certificate files are
+read once during process startup.
 
 For sidecar-style local control, use a Unix domain socket instead:
 
@@ -261,6 +273,16 @@ And inspect the current snapshot with the example Rust client:
 
 ```bash
 cargo run -p ngxora-runtime --example get_snapshot -- --uds /tmp/ngxora-control.sock
+```
+
+For remote TCP, the same client uses its own mTLS identity:
+
+```bash
+cargo run -p ngxora-runtime --example get_snapshot -- \
+  --addr https://ngxora-control.default.svc:50051 \
+  --tls-ca /var/run/controller/ngxora-server-ca.crt \
+  --tls-cert /var/run/controller/tls.crt \
+  --tls-key /var/run/controller/tls.key
 ```
 
 Push a minimal replacement snapshot back into `ngxora`:
@@ -284,14 +306,15 @@ That emits Go bindings under `sdk/go/ngxora/control/v1`.
 
 ## Security roadmap
 
-The runtime control-plane model is meant for trusted environments until the networked gRPC layer is fully hardened.
+TCP control-plane access uses mutual TLS with a dedicated controller CA. The
+remaining work is authorization and operation-level protection:
 
-Planned hardening work:
-- authenticated and authorized gRPC control-plane access
+- authorization policy for authenticated controller identities
 - rate limiting and audit logging for snapshot operations
 - protected-header policy for mutation plugins such as `headers`
 
-In practice, this means route and TLS snapshot updates are already part of the runtime model, but the public control-plane surface and plugin guardrails are still being tightened.
+Route and TLS snapshot updates are already part of the runtime model, but
+authenticated identities are not yet restricted by certificate subject or SAN.
 
 ## Plugins
 

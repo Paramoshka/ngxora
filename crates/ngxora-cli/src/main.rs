@@ -3,7 +3,7 @@ use ngxora_config::{Ast, include::IncludeResolver};
 use ngxora_runtime::control::{
     ConfigSnapshot, InProcessControlPlane, RuntimeState, RuntimeUpstreamHealthChecks,
 };
-use ngxora_runtime::grpc::{spawn_control_plane, spawn_control_plane_uds};
+use ngxora_runtime::grpc::{GrpcTlsConfig, spawn_control_plane, spawn_control_plane_uds};
 use ngxora_runtime::le::{self, LeReconcilerService};
 use ngxora_runtime::metrics::spawn_metrics_service_with_state;
 use ngxora_runtime::server::bind_listeners_from_state;
@@ -17,15 +17,23 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+#[derive(Debug)]
 struct CliArgs {
     config_path: PathBuf,
     check_only: bool,
     grpc_addr: Option<SocketAddr>,
     grpc_uds: Option<PathBuf>,
+    grpc_tls: Option<GrpcTlsFiles>,
     metrics_addr: Option<SocketAddr>,
     otel_endpoint: Option<String>,
-    unsafe_grpc_listen: bool,
     unsafe_admin_listen: bool,
+}
+
+#[derive(Debug)]
+struct GrpcTlsFiles {
+    certificate: PathBuf,
+    key: PathBuf,
+    client_ca: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -74,6 +82,8 @@ fn run(cli: CliArgs) -> Result<(), String> {
         return Ok(());
     }
 
+    let grpc_tls = cli.grpc_tls.as_ref().map(load_grpc_tls).transpose()?;
+
     let mut server = Server::new(None::<Opt>)
         .map_err(|err| format!("failed to create pingora server: {err}"))?;
     server.bootstrap();
@@ -113,13 +123,11 @@ fn run(cli: CliArgs) -> Result<(), String> {
     );
 
     if let Some(addr) = cli.grpc_addr {
-        if cli.unsafe_grpc_listen && !addr.ip().is_loopback() {
-            eprintln!(
-                "WARNING: unauthenticated gRPC control plane is exposed on non-loopback address {addr}"
-            );
-        }
-        spawn_control_plane(addr, control.clone())?;
-        println!("gRPC control plane listening on {addr}");
+        let tls = grpc_tls.ok_or_else(|| {
+            "internal error: missing validated gRPC TLS configuration for TCP listener".to_string()
+        })?;
+        spawn_control_plane(addr, control.clone(), tls)?;
+        println!("gRPC control plane listening with mTLS on {addr}");
     }
 
     if let Some(path) = cli.grpc_uds {
@@ -141,6 +149,29 @@ fn run(cli: CliArgs) -> Result<(), String> {
     server.add_service(proxy);
     server.add_service(upstream_health_checks);
     server.run_forever();
+}
+
+fn load_grpc_tls(files: &GrpcTlsFiles) -> Result<GrpcTlsConfig, String> {
+    let certificate = std::fs::read(&files.certificate).map_err(|err| {
+        format!(
+            "failed to read gRPC server certificate {}: {err}",
+            files.certificate.display()
+        )
+    })?;
+    let key = std::fs::read(&files.key).map_err(|err| {
+        format!(
+            "failed to read gRPC server key {}: {err}",
+            files.key.display()
+        )
+    })?;
+    let client_ca = std::fs::read(&files.client_ca).map_err(|err| {
+        format!(
+            "failed to read gRPC controller client CA {}: {err}",
+            files.client_ca.display()
+        )
+    })?;
+
+    Ok(GrpcTlsConfig::from_pem(certificate, key, client_ca))
 }
 
 fn load_router(path: &Path) -> Result<CompiledRouter, String> {
@@ -198,16 +229,17 @@ where
     let mut check_only = false;
     let mut grpc_addr: Option<SocketAddr> = None;
     let mut grpc_uds: Option<PathBuf> = None;
+    let mut grpc_certificate: Option<PathBuf> = None;
+    let mut grpc_key: Option<PathBuf> = None;
+    let mut grpc_client_ca: Option<PathBuf> = None;
     let mut metrics_addr: Option<SocketAddr> = None;
     let mut otel_endpoint: Option<String> = None;
-    let mut unsafe_grpc_listen = false;
     let mut unsafe_admin_listen = false;
 
     let mut args = args.into_iter().skip(1).map(Into::into);
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "--check" => check_only = true,
-            "--unsafe-grpc-listen" => unsafe_grpc_listen = true,
             "--unsafe-admin-listen" => unsafe_admin_listen = true,
             "--grpc-addr" => {
                 let value = args
@@ -224,6 +256,30 @@ where
                     .next()
                     .ok_or_else(|| "--grpc-uds requires a filesystem path".to_string())?;
                 grpc_uds = Some(PathBuf::from(value));
+            }
+            "--grpc-tls-cert" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--grpc-tls-cert requires a PEM file path".to_string())?;
+                if grpc_certificate.replace(PathBuf::from(value)).is_some() {
+                    return Err("--grpc-tls-cert specified more than once".into());
+                }
+            }
+            "--grpc-tls-key" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--grpc-tls-key requires a PEM file path".to_string())?;
+                if grpc_key.replace(PathBuf::from(value)).is_some() {
+                    return Err("--grpc-tls-key specified more than once".into());
+                }
+            }
+            "--grpc-client-ca" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--grpc-client-ca requires a PEM file path".to_string())?;
+                if grpc_client_ca.replace(PathBuf::from(value)).is_some() {
+                    return Err("--grpc-client-ca specified more than once".into());
+                }
             }
             "--metrics-addr" => {
                 let value = args
@@ -270,14 +326,32 @@ where
     if grpc_addr.is_some() && grpc_uds.is_some() {
         return Err("use either --grpc-addr or --grpc-uds, not both".into());
     }
-    if unsafe_grpc_listen && grpc_addr.is_none() {
-        return Err("--unsafe-grpc-listen requires --grpc-addr".into());
-    }
     if unsafe_admin_listen && metrics_addr.is_none() {
         return Err("--unsafe-admin-listen requires --metrics-addr".into());
     }
-    if grpc_addr.is_some_and(|addr| !addr.ip().is_loopback()) && !unsafe_grpc_listen {
-        return Err("non-loopback --grpc-addr requires explicit --unsafe-grpc-listen".into());
+    let grpc_tls = match (grpc_certificate, grpc_key, grpc_client_ca) {
+        (None, None, None) => None,
+        (Some(certificate), Some(key), Some(client_ca)) => Some(GrpcTlsFiles {
+            certificate,
+            key,
+            client_ca,
+        }),
+        _ => {
+            return Err(
+                "--grpc-addr requires --grpc-tls-cert, --grpc-tls-key, and --grpc-client-ca".into(),
+            );
+        }
+    };
+    if grpc_addr.is_some() && grpc_tls.is_none() {
+        return Err(
+            "--grpc-addr requires --grpc-tls-cert, --grpc-tls-key, and --grpc-client-ca".into(),
+        );
+    }
+    if grpc_uds.is_some() && grpc_tls.is_some() {
+        return Err("gRPC TLS file flags can only be used with --grpc-addr".into());
+    }
+    if grpc_addr.is_none() && grpc_tls.is_some() {
+        return Err("gRPC TLS file flags require --grpc-addr".into());
     }
     if metrics_addr.is_some_and(|addr| !addr.ip().is_loopback()) && !unsafe_admin_listen {
         return Err("non-loopback --metrics-addr requires explicit --unsafe-admin-listen".into());
@@ -288,15 +362,75 @@ where
         check_only,
         grpc_addr,
         grpc_uds,
+        grpc_tls,
         metrics_addr,
         otel_endpoint,
-        unsafe_grpc_listen,
         unsafe_admin_listen,
     }))
 }
 
 fn print_usage() {
     eprintln!(
-        "Usage: ngxora [--check] [--metrics-addr <host:port> [--unsafe-admin-listen]] [--otel-endpoint <url>] [--grpc-addr <host:port> [--unsafe-grpc-listen] | --grpc-uds <path>] <config-path>"
+        "Usage: ngxora [--check] [--metrics-addr <host:port> [--unsafe-admin-listen]] [--otel-endpoint <url>] [--grpc-addr <host:port> --grpc-tls-cert <pem> --grpc-tls-key <pem> --grpc-client-ca <pem> | --grpc-uds <path>] <config-path>"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cli_args;
+
+    #[test]
+    fn tcp_grpc_requires_all_mtls_files() {
+        let err = parse_cli_args([
+            "ngxora",
+            "--grpc-addr",
+            "0.0.0.0:50051",
+            "--grpc-tls-cert",
+            "server.pem",
+            "config.conf",
+        ])
+        .expect_err("incomplete TLS configuration is rejected");
+
+        assert!(err.contains("--grpc-addr requires"));
+    }
+
+    #[test]
+    fn tcp_grpc_accepts_non_loopback_with_mtls() {
+        let cli = parse_cli_args([
+            "ngxora",
+            "--grpc-addr",
+            "0.0.0.0:50051",
+            "--grpc-tls-cert",
+            "server.pem",
+            "--grpc-tls-key",
+            "server.key",
+            "--grpc-client-ca",
+            "controller-ca.pem",
+            "config.conf",
+        ])
+        .expect("valid mTLS TCP listener")
+        .expect("not help");
+
+        assert_eq!(cli.grpc_addr.expect("TCP address").port(), 50051);
+        assert!(cli.grpc_tls.is_some());
+    }
+
+    #[test]
+    fn uds_rejects_tcp_tls_files() {
+        let err = parse_cli_args([
+            "ngxora",
+            "--grpc-uds",
+            "/tmp/ngxora.sock",
+            "--grpc-tls-cert",
+            "server.pem",
+            "--grpc-tls-key",
+            "server.key",
+            "--grpc-client-ca",
+            "controller-ca.pem",
+            "config.conf",
+        ])
+        .expect_err("UDS must not accept TCP TLS files");
+
+        assert!(err.contains("only be used with --grpc-addr"));
+    }
 }

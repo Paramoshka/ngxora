@@ -97,7 +97,7 @@ The rule is simple:
 |---|---|---|
 | gRPC `ApplySnapshot` | ✅ | Live route updates |
 | gRPC `GetSnapshot` | ✅ | Runtime state export |
-| gRPC over TCP | ✅ | Loopback by default; non-loopback requires `--unsafe-grpc-listen` and a private/firewalled network |
+| gRPC over TCP | ✅ | mTLS required for every bind; server keypair and dedicated controller client CA are mandatory |
 | gRPC over UDS | ✅ | `--grpc-uds`; socket mode `0600` |
 | In-process control plane | ✅ | No gRPC, direct calls |
 | Reload matrix docs | ✅ | See `docs/README.md` reload matrix |
@@ -122,7 +122,7 @@ The rule is simple:
 ## Blockers for serious production
 
 1. ✅ **Fail-closed cache safety** — authentication runs before lookup; private/conditional requests bypass; snapshots and hosts are isolated; response buffering is bounded.
-2. ✅ **Safe management defaults** — remote unauthenticated TCP binds require an explicit unsafe opt-in; prefer loopback or gRPC UDS.
+2. ✅ **Safe management defaults** — TCP gRPC requires mTLS for every bind; prefer gRPC UDS for local agents.
 3. ✅ **Non-panicking IR validation** — unsupported programmatic IR is rejected before runtime.
 4. 🔴 **Externalize rate-limit and cache backends** — both are in-process (`DashMap`), not shared across replicas. Add an optional shared backend before relying on consistent limits/cache across replicas.
 
