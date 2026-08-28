@@ -20,11 +20,16 @@ pub const EXT_AUTHZ: &str = "ext_authz";
 pub const URI: &str = "uri";
 pub const PASS_REQUEST_HEADER: &str = "pass_request_header";
 pub const PASS_RESPONSE_HEADER: &str = "pass_response_header";
+pub const ALLOWED_HOST: &str = "allowed_host";
 
 pub const JWT_AUTH: &str = "jwt_auth";
 pub const ALGORITHM: &str = "algorithm";
 pub const SECRET: &str = "secret";
 pub const SECRET_FILE: &str = "secret_file";
+pub const ISS: &str = "iss";
+pub const AUD: &str = "aud";
+pub const SUB: &str = "sub";
+pub const REQUIRED_SCOPE: &str = "required_scope";
 
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";

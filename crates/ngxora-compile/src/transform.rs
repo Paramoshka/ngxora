@@ -68,6 +68,8 @@ struct ExtAuthzPluginConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    allowed_hosts: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pass_request_headers: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pass_response_headers: Vec<String>,
@@ -80,6 +82,14 @@ struct JwtAuthPluginConfig {
     secret: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     secret_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    iss: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    aud: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sub: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    required_scopes: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -1487,6 +1497,11 @@ fn lower_ext_authz_plugin(block: &Block) -> Result<PluginSpec, LowerErr> {
             message: "ext_authz block: missing `uri` directive".into(),
         });
     }
+    if config.allowed_hosts.is_empty() {
+        return Err(LowerErr {
+            message: "ext_authz block: missing `allowed_host` directive".into(),
+        });
+    }
 
     let config_val = serde_json::to_value(config).expect("ext_authz plugin config serializes");
     Ok(PluginSpec {
@@ -1531,6 +1546,10 @@ fn apply_ext_authz_directive(
                 ),
             })?;
             config.timeout_ms = Some(ms);
+        }
+        consts::ALLOWED_HOST => {
+            let val = parse_exactly_one_argument(&directive.args, consts::ALLOWED_HOST)?;
+            config.allowed_hosts.push(val);
         }
         consts::PASS_REQUEST_HEADER => {
             let val = parse_exactly_one_argument(&directive.args, consts::PASS_REQUEST_HEADER)?;
@@ -1626,6 +1645,33 @@ fn apply_jwt_auth_directive(
             }
             let val = parse_exactly_one_argument(&directive.args, consts::SECRET_FILE)?;
             config.secret_file = Some(val);
+        }
+        consts::ISS => {
+            if config.iss.is_some() {
+                return Err(LowerErr {
+                    message: format!("jwt_auth block: duplicate `{}` directive", consts::ISS),
+                });
+            }
+            config.iss = Some(parse_exactly_one_argument(&directive.args, consts::ISS)?);
+        }
+        consts::AUD => {
+            config
+                .aud
+                .push(parse_exactly_one_argument(&directive.args, consts::AUD)?);
+        }
+        consts::SUB => {
+            if config.sub.is_some() {
+                return Err(LowerErr {
+                    message: format!("jwt_auth block: duplicate `{}` directive", consts::SUB),
+                });
+            }
+            config.sub = Some(parse_exactly_one_argument(&directive.args, consts::SUB)?);
+        }
+        consts::REQUIRED_SCOPE => {
+            config.required_scopes.push(parse_exactly_one_argument(
+                &directive.args,
+                consts::REQUIRED_SCOPE,
+            )?);
         }
         _ => {
             return Err(LowerErr {

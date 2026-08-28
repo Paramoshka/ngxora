@@ -6,6 +6,7 @@ use ngxora_plugin_api::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 const PLUGIN_NAME: &str = "basic-auth";
 
@@ -71,7 +72,12 @@ impl HttpPlugin for BasicAuthPlugin {
         if !scheme.eq_ignore_ascii_case("Basic") {
             return Ok(self.unauthorized_response());
         }
-        if credentials != self.expected_credentials {
+        if credentials
+            .as_bytes()
+            .ct_eq(self.expected_credentials.as_bytes())
+            .unwrap_u8()
+            != 1
+        {
             return Ok(self.unauthorized_response());
         }
 
@@ -135,7 +141,7 @@ mod tests {
     use super::{BasicAuthPluginConfig, BasicAuthPluginFactory};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use futures::executor::block_on;
-    use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method};
+    use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
     use ngxora_plugin_api::{
         HeaderMapMut, PluginFactory, PluginFlow, PluginSpec, PluginState, RequestCtx,
     };
@@ -258,6 +264,50 @@ mod tests {
                 );
             }
             PluginFlow::Continue => panic!("missing credentials should be rejected"),
+        }
+    }
+
+    #[test]
+    fn basic_auth_plugin_rejects_credentials_that_differ_at_any_position() {
+        let plugin = BasicAuthPluginFactory
+            .build(&plugin_spec())
+            .expect("basic-auth build should succeed");
+        let expected = STANDARD.encode("demo:s3cret");
+
+        for index in [0, expected.len() / 2, expected.len() - 1] {
+            let mut credentials = expected.as_bytes().to_vec();
+            credentials[index] = if credentials[index] == b'A' {
+                b'B'
+            } else {
+                b'A'
+            };
+            let credentials = String::from_utf8(credentials)
+                .expect("base64 credentials should remain valid UTF-8");
+            let mut headers = FakeHeaders::default();
+            headers
+                .set(
+                    &http::header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Basic {credentials}")).unwrap(),
+                )
+                .unwrap();
+            let method = Method::GET;
+            let mut state = PluginState {
+                extensions: Extensions::new(),
+            };
+
+            let flow = block_on(plugin.on_request(&mut RequestCtx {
+                state: &mut state,
+                path: "/",
+                host: Some("example.com"),
+                method: &method,
+                client_ip: None,
+                headers: &mut headers,
+            }))
+            .expect("request hook should succeed");
+
+            assert!(
+                matches!(flow, PluginFlow::Respond(response) if response.status == StatusCode::UNAUTHORIZED)
+            );
         }
     }
 

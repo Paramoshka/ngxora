@@ -787,6 +787,7 @@ http {
     location /api {
       ext_authz {
         uri http://127.0.0.1:9091/auth;
+        allowed_host 127.0.0.1;
         timeout 2000;
         pass_request_header Authorization;
         pass_request_header Cookie;
@@ -809,6 +810,7 @@ http {
                 name: "ext_authz".into(),
                 config: json!({
                     "uri": "http://127.0.0.1:9091/auth",
+                    "allowed_hosts": ["127.0.0.1"],
                     "timeout_ms": 2000,
                     "pass_request_headers": ["Authorization", "Cookie"],
                     "pass_response_headers": ["X-Remote-User", "X-Role"]
@@ -845,6 +847,49 @@ http {
                 config: json!({
                     "algorithm": "RS256",
                     "secret_file": "/path/to/public.pem",
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn from_ast_parses_jwt_auth_claim_policy() {
+        let input = r#"
+http {
+  server {
+    listen 80;
+    location /secure {
+      jwt_auth {
+        algorithm HS256;
+        secret secret;
+        iss https://issuer.example;
+        aud orders-api;
+        aud reporting-api;
+        sub service-account;
+        required_scope orders:read;
+        required_scope profile;
+      }
+      proxy_pass http://api;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+
+        let http = ir.http.expect("http missing");
+        let location = &http.servers[0].locations[0];
+        assert_eq!(
+            location.plugins,
+            vec![PluginSpec {
+                name: "jwt_auth".into(),
+                config: json!({
+                    "algorithm": "HS256",
+                    "secret": "secret",
+                    "iss": "https://issuer.example",
+                    "aud": ["orders-api", "reporting-api"],
+                    "sub": "service-account",
+                    "required_scopes": ["orders:read", "profile"],
                 }),
             }]
         );

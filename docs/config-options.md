@@ -444,6 +444,8 @@ location /api/ {
     ext_authz {
         # The external authorization endpoint
         uri http://127.0.0.1:9091/auth;
+        # Required exact allowlist entry for the endpoint host
+        allowed_host 127.0.0.1;
         
         # Sub-request timeout
         timeout 2000;
@@ -460,6 +462,11 @@ location /api/ {
     proxy_pass http://api_pool;
 }
 ```
+
+`allowed_host <host-or-ip>;` is required and can be repeated. Only exact hosts
+or IP addresses listed here may be used in `uri`. Redirects are never followed.
+If `timeout` is omitted it defaults to 3000 ms; valid values are 1 through
+30000 ms.
 
 ### `jwt_auth`
 
@@ -478,6 +485,12 @@ location /secured-api/ {
         
         # For RSA/ECDSA/EdDSA algorithms, use 'secret_file' to point to the public key PEM
         secret_file /etc/ngxora/certs/auth_pubkey.pem;
+
+        # Optional claim policy
+        iss https://issuer.example;
+        aud orders-api;
+        sub service-account;
+        required_scope orders:read;
     }
     
     proxy_pass http://internal_api;
@@ -488,6 +501,10 @@ Directives:
 - `algorithm <alg>;` : (**Required**) The JWT signing algorithm.
 - `secret <value>;` : (**Required if HMAC**) The secret string for HS* algorithms.
 - `secret_file <path>;` : (**Required if RSA/EC/Ed**) The path to the public key PEM file.
+- `iss <value>;`, `aud <value>;`, `sub <value>;` : optional exact JWT claim checks.
+  `aud` may be repeated; any configured audience is accepted.
+- `required_scope <value>;` : optional repeatable scope requirement. All configured
+  values must be present in the JWT `scope` claim as space-separated tokens.
 
 ## Proxy Cache (Location-Level)
 
