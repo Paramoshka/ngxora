@@ -1,7 +1,7 @@
 use ngxora_compile::ir::{
     DownstreamTlsOptions, LetsEncryptConfig, Listen, LocationIpRule, LocationMatcher, PemSource,
-    TlsIdentity, TlsProtocolBounds, TlsVerifyClient, UpstreamHttpProtocol, UpstreamSelectionPolicy,
-    UpstreamSslOptions, UpstreamTimeouts,
+    TlsIdentity, TlsProtocolBounds, TlsVerifyClient, UpstreamHashKey, UpstreamHttpProtocol,
+    UpstreamSelectionPolicy, UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use regex::{Regex, RegexBuilder};
@@ -53,6 +53,7 @@ pub enum RouteTarget {
 pub struct CompiledUpstreamServer {
     pub host: String,
     pub port: u16,
+    pub weight: u16,
 }
 
 impl Display for CompiledUpstreamServer {
@@ -84,6 +85,7 @@ pub struct CompiledHealthCheck {
 pub struct CompiledUpstreamGroup {
     pub name: String,
     pub policy: UpstreamSelectionPolicy,
+    pub hash_key: Option<UpstreamHashKey>,
     pub servers: Vec<CompiledUpstreamServer>,
     pub health_check: Option<CompiledHealthCheck>,
 }

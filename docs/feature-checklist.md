@@ -26,7 +26,7 @@ The rule is simple:
 | HTTPS/TLS reverse proxy | ✅ | `proxy_pass https://...` | ✅ | Live | SNI + upstream TLS |
 | HTTP/2 downstream (TLS) | ✅ | `listen ... http2` | Bootstrap | Restart | ALPN negotiation |
 | HTTP/2 cleartext (h2c) | ✅ | `h2c on;` | Bootstrap | Restart | |
-| Upstream groups | ✅ | `upstream {}` | ✅ | Live | Round-robin, random |
+| Upstream groups | ✅ | `upstream {}` | ✅ | Live | Weighted round-robin, random, consistent hash |
 | Upstream health checks | ✅ | `health_check {}` | ✅ | Live | TCP + HTTP |
 | WebSocket proxying | ✅ | `proxy_pass` | ✅ | Live | Auto upgrade, no extra config |
 | gRPC proxying (h2/h2c) | ✅ | `proxy_upstream_protocol` | ✅ | Live | |
@@ -86,8 +86,8 @@ The rule is simple:
 
 | Feature | Status | Notes |
 |---|---|---|
-| **Prometheus metrics** | ✅ | `prometheus` 0.13; `GET /metrics` via `--metrics-addr <host:port>` |
-| **Structured access log (JSON)** | ✅ | Method, path, status, latency, upstream, cache; `ngxora_access` log target |
+| **Prometheus metrics** | ✅ | Request/cache metrics plus per-upstream-group/backend request, latency, and readiness series; `GET /metrics` via `--metrics-addr <host:port>` |
+| **Structured access log (JSON)** | ✅ | Method, path, status, latency, upstream, upstream group, cache; `ngxora_access` log target |
 | Request ID propagation | 💤 | Can be done via `headers` plugin |
 | Tracing (OpenTelemetry) | ✅ | W3C TraceContext, OTLP/gRPC via `--otel-endpoint` |
 

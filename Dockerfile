@@ -19,6 +19,7 @@ RUN ARCH="$(uname -m)" \
     && cargo build --release --bin ngxora --target "${RUST_TARGET}" ${CARGO_BUILD_FLAGS} \
     && cp "target/${RUST_TARGET}/release/ngxora" /usr/local/bin/ngxora
 RUN /usr/local/bin/ngxora --check /app/examples/basic/ngxora.conf
+RUN /usr/local/bin/ngxora --check /app/examples/sbi-ready/ngxora.conf
 
 FROM scratch
 

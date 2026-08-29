@@ -100,6 +100,7 @@ pub struct Server {
 pub struct UpstreamBlock {
     pub name: String,
     pub policy: UpstreamSelectionPolicy,
+    pub hash_key: Option<UpstreamHashKey>,
     pub servers: Vec<UpstreamServer>,
     pub health_check: Option<UpstreamHealthCheck>,
 }
@@ -108,6 +109,7 @@ pub struct UpstreamBlock {
 pub struct UpstreamServer {
     pub host: String,
     pub port: u16,
+    pub weight: u16,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
@@ -115,6 +117,13 @@ pub enum UpstreamSelectionPolicy {
     #[default]
     RoundRobin,
     Random,
+    ConsistentHash,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum UpstreamHashKey {
+    ClientIp,
+    Header(String),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

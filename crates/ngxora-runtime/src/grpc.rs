@@ -10,8 +10,9 @@ use ngxora_compile::ir::{
     CacheConfig, CacheKeyMode, DownstreamTlsOptions, Http, KeepaliveTimeout, LetsEncryptConfig,
     Listen, Location, LocationDirective, LocationMatcher, PemSource, ProxyPassTarget, Server,
     SslProvider, Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
-    UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol,
-    UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
+    UpstreamBlock, UpstreamHashKey, UpstreamHealthCheck, UpstreamHealthCheckType,
+    UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
+    UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use serde_json::Value;
@@ -48,7 +49,8 @@ use proto::{
     RouteTimeouts as ProtoRouteTimeouts, Switch as ProtoSwitch, TlsBinding as ProtoTlsBinding,
     TlsProtocolVersion as ProtoTlsProtocolVersion, TlsVerifyClient as ProtoTlsVerifyClient,
     Upstream as ProtoUpstream, UpstreamBackend as ProtoUpstreamBackend,
-    UpstreamGroup as ProtoUpstreamGroup, UpstreamHealthCheck as ProtoUpstreamHealthCheck,
+    UpstreamGroup as ProtoUpstreamGroup, UpstreamHashKey as ProtoUpstreamHashKey,
+    UpstreamHealthCheck as ProtoUpstreamHealthCheck,
     UpstreamHttpHealthCheck as ProtoUpstreamHttpHealthCheck,
     UpstreamHttpProtocol as ProtoUpstreamHttpProtocol,
     UpstreamSelectionPolicy as ProtoUpstreamSelectionPolicy,
@@ -339,6 +341,11 @@ fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<Upstream
             Ok(UpstreamBlock {
                 name: name.to_string(),
                 policy: upstream_selection_policy_from_proto(upstream.policy)?,
+                hash_key: upstream
+                    .hash_key
+                    .as_ref()
+                    .map(upstream_hash_key_from_proto)
+                    .transpose()?,
                 servers,
                 health_check: upstream
                     .health_check
@@ -490,7 +497,29 @@ fn upstream_backend_from_proto(backend: &ProtoUpstreamBackend) -> Result<Upstrea
         host: backend.host.clone(),
         port: u16::try_from(backend.port)
             .map_err(|_| format!("upstream backend `{}` port is out of range", backend.host))?,
+        weight: if backend.weight == 0 {
+            1
+        } else {
+            u16::try_from(backend.weight).map_err(|_| {
+                format!("upstream backend `{}` weight is out of range", backend.host)
+            })?
+        },
     })
+}
+
+fn upstream_hash_key_from_proto(value: &ProtoUpstreamHashKey) -> Result<UpstreamHashKey, String> {
+    match value.source.as_ref() {
+        Some(proto::upstream_hash_key::Source::ClientIp(true)) => Ok(UpstreamHashKey::ClientIp),
+        Some(proto::upstream_hash_key::Source::ClientIp(false)) => {
+            Err("upstream hash_key client_ip must be true".into())
+        }
+        Some(proto::upstream_hash_key::Source::Header(name)) => {
+            http::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| format!("upstream hash_key has invalid HTTP header name `{name}`"))?;
+            Ok(UpstreamHashKey::Header(name.clone()))
+        }
+        None => Err("upstream hash_key source is required".into()),
+    }
 }
 
 fn upstream_health_check_from_proto(
@@ -879,6 +908,7 @@ fn proto_upstreams_from_runtime(
                 .map(|server| ProtoUpstreamBackend {
                     host: server.host,
                     port: u32::from(server.port),
+                    weight: u32::from(server.weight),
                 })
                 .collect(),
             policy: proto_upstream_selection_policy_from_runtime(group.policy) as i32,
@@ -886,8 +916,22 @@ fn proto_upstreams_from_runtime(
                 .health_check
                 .as_ref()
                 .map(proto_upstream_health_check_from_runtime),
+            hash_key: group
+                .hash_key
+                .as_ref()
+                .map(proto_upstream_hash_key_from_runtime),
         })
         .collect()
+}
+
+fn proto_upstream_hash_key_from_runtime(value: &UpstreamHashKey) -> ProtoUpstreamHashKey {
+    let source = match value {
+        UpstreamHashKey::ClientIp => proto::upstream_hash_key::Source::ClientIp(true),
+        UpstreamHashKey::Header(name) => proto::upstream_hash_key::Source::Header(name.clone()),
+    };
+    ProtoUpstreamHashKey {
+        source: Some(source),
+    }
 }
 
 fn proto_upstream_health_check_from_runtime(
@@ -1284,6 +1328,7 @@ fn upstream_selection_policy_from_proto(value: i32) -> Result<UpstreamSelectionP
             Ok(UpstreamSelectionPolicy::RoundRobin)
         }
         ProtoUpstreamSelectionPolicy::Random => Ok(UpstreamSelectionPolicy::Random),
+        ProtoUpstreamSelectionPolicy::ConsistentHash => Ok(UpstreamSelectionPolicy::ConsistentHash),
     }
 }
 
@@ -1293,6 +1338,7 @@ fn proto_upstream_selection_policy_from_runtime(
     match value {
         UpstreamSelectionPolicy::RoundRobin => ProtoUpstreamSelectionPolicy::RoundRobin,
         UpstreamSelectionPolicy::Random => ProtoUpstreamSelectionPolicy::Random,
+        UpstreamSelectionPolicy::ConsistentHash => ProtoUpstreamSelectionPolicy::ConsistentHash,
     }
 }
 

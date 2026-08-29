@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+http = "1"
 ngxora-config = { path = "../ngxora-config" }
 ngxora-plugin-api = { path = "../ngxora-plugin-api" }
 serde = { version = "1", features = ["derive"] }

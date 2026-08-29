@@ -3,7 +3,7 @@ use super::{
     CompiledUpstreamGroup, CompiledUpstreamServer, HealthCheckType, RouteTarget, ServerRoutes,
     VirtualHostRoutes, apply_upstream_http_protocol, apply_upstream_ssl_options,
     apply_upstream_timeouts, content_length_limit_exceeded, downstream_keepalive_timeout_secs,
-    listener_routes, select_route_target, update_received_body_bytes,
+    listener_routes, select_route_target, update_received_body_bytes, upstream_selection_key,
     validate_sni_host_consistency,
 };
 use bytes::Bytes;
@@ -821,14 +821,17 @@ fn compiled_router_maps_named_upstream_groups() {
         upstreams: vec![UpstreamBlock {
             name: "backend".into(),
             policy: UpstreamSelectionPolicy::RoundRobin,
+            hash_key: None,
             servers: vec![
                 UpstreamServer {
                     host: "127.0.0.1".into(),
                     port: 8080,
+                    weight: 1,
                 },
                 UpstreamServer {
                     host: "127.0.0.1".into(),
                     port: 8081,
+                    weight: 1,
                 },
             ],
             health_check: None,
@@ -877,14 +880,17 @@ fn runtime_upstream_group_round_robins_backends() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
+        hash_key: None,
         servers: vec![
             CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 8080,
+                weight: 1,
             },
             CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 8081,
+                weight: 1,
             },
         ],
         health_check: None,
@@ -901,18 +907,130 @@ fn runtime_upstream_group_round_robins_backends() {
 }
 
 #[test]
-fn runtime_upstream_group_random_selects_configured_backend() {
+fn runtime_upstream_group_honors_round_robin_weights() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
         name: "backend".into(),
-        policy: UpstreamSelectionPolicy::Random,
+        policy: UpstreamSelectionPolicy::RoundRobin,
+        hash_key: None,
         servers: vec![
             CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 8080,
+                weight: 3,
             },
             CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 8081,
+                weight: 1,
+            },
+        ],
+        health_check: None,
+    })
+    .expect("runtime group builds");
+
+    let ports = (0..4)
+        .map(|_| group.select(b"").expect("backend").port)
+        .collect::<Vec<_>>();
+    assert_eq!(ports.iter().filter(|port| **port == 8080).count(), 3);
+    assert_eq!(ports.iter().filter(|port| **port == 8081).count(), 1);
+}
+
+#[test]
+fn runtime_upstream_group_consistent_hash_is_stable_and_distributes_keys() {
+    let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        name: "backend".into(),
+        policy: UpstreamSelectionPolicy::ConsistentHash,
+        hash_key: Some(ngxora_compile::ir::UpstreamHashKey::Header(
+            "X-Tenant-ID".into(),
+        )),
+        servers: vec![
+            CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8080,
+                weight: 1,
+            },
+            CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8081,
+                weight: 1,
+            },
+        ],
+        health_check: None,
+    })
+    .expect("runtime group builds");
+
+    let first = group.select(b"tenant-a").expect("first selection");
+    for _ in 0..10 {
+        assert_eq!(group.select(b"tenant-a"), Some(first.clone()));
+    }
+
+    let selected_ports = (0..100)
+        .map(|index| {
+            group
+                .select(format!("tenant-{index}").as_bytes())
+                .expect("backend")
+                .port
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(selected_ports.len(), 2);
+}
+
+#[tokio::test]
+async fn consistent_hash_header_requires_one_nonempty_value() {
+    let (mut client, server) = duplex(1024);
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Tenant-ID: tenant-a\r\n\r\n")
+        .await
+        .expect("write request");
+    let mut session = Session::new_h1(Box::new(server));
+    session.read_request().await.expect("read request");
+
+    assert_eq!(
+        upstream_selection_key(
+            Some(&ngxora_compile::ir::UpstreamHashKey::Header(
+                "X-Tenant-ID".into(),
+            )),
+            &session,
+        )
+        .expect("header key"),
+        b"tenant-a"
+    );
+
+    session.req_header_mut().remove_header("X-Tenant-ID");
+    session
+        .req_header_mut()
+        .append_header("X-Tenant-ID", "tenant-a")
+        .expect("append first header");
+    session
+        .req_header_mut()
+        .append_header("X-Tenant-ID", "tenant-b")
+        .expect("append second header");
+    let err = upstream_selection_key(
+        Some(&ngxora_compile::ir::UpstreamHashKey::Header(
+            "X-Tenant-ID".into(),
+        )),
+        &session,
+    )
+    .expect_err("repeated header and missing socket IP must fail");
+    assert_eq!(err.etype(), &pingora::ErrorType::HTTPStatus(503));
+}
+
+#[test]
+fn runtime_upstream_group_random_selects_configured_backend() {
+    let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        name: "backend".into(),
+        policy: UpstreamSelectionPolicy::Random,
+        hash_key: None,
+        servers: vec![
+            CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8080,
+                weight: 1,
+            },
+            CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8081,
+                weight: 1,
             },
         ],
         health_check: None,
@@ -929,9 +1047,11 @@ fn compiled_router_maps_upstream_health_check() {
         upstreams: vec![UpstreamBlock {
             name: "backend".into(),
             policy: UpstreamSelectionPolicy::RoundRobin,
+            hash_key: None,
             servers: vec![UpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 8080,
+                weight: 1,
             }],
             health_check: Some(UpstreamHealthCheck {
                 check_type: UpstreamHealthCheckType::Http {
@@ -970,14 +1090,17 @@ async fn runtime_upstream_group_tcp_health_check_marks_unreachable_backends_unhe
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
+        hash_key: None,
         servers: vec![
             CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 1,
+                weight: 1,
             },
             CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 2,
+                weight: 1,
             },
         ],
         health_check: Some(CompiledHealthCheck {
@@ -1002,14 +1125,17 @@ async fn runtime_upstream_group_http_health_check_marks_unreachable_backends_unh
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
+        hash_key: None,
         servers: vec![
             CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 1,
+                weight: 1,
             },
             CompiledUpstreamServer {
                 host: "127.0.0.1".into(),
                 port: 2,
+                weight: 1,
             },
         ],
         health_check: Some(CompiledHealthCheck {

@@ -13,8 +13,8 @@ use crate::{
         CacheConfig, Http, Ir, KeepaliveTimeout, LetsEncryptConfig, Listen, Location,
         LocationDirective, LocationIpRule, LocationMatcher, PemSource, ProxyPassTarget, Server,
         SslProvider, Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
-        UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol,
-        UpstreamSelectionPolicy, UpstreamServer,
+        UpstreamBlock, UpstreamHashKey, UpstreamHealthCheck, UpstreamHealthCheckType,
+        UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
     },
 };
 
@@ -354,6 +354,7 @@ fn lower_upstream(block: &Block) -> Result<UpstreamBlock, LowerErr> {
     let mut upstream = UpstreamBlock {
         name,
         policy: UpstreamSelectionPolicy::RoundRobin,
+        hash_key: None,
         servers: Vec::new(),
         health_check: None,
     };
@@ -506,6 +507,14 @@ fn apply_upstream_directive(
         }
         consts::POLICY => {
             upstream.policy = parse_upstream_policy(&directive.args)?;
+        }
+        consts::HASH_KEY => {
+            if upstream.hash_key.is_some() {
+                return Err(LowerErr {
+                    message: "hash_key: directive is duplicated".into(),
+                });
+            }
+            upstream.hash_key = Some(parse_upstream_hash_key(&directive.args)?);
         }
         _ => {
             return Err(LowerErr {
@@ -678,9 +687,10 @@ fn parse_upstream_policy(args: &[String]) -> Result<UpstreamSelectionPolicy, Low
         [value] => match value.as_str() {
             "round_robin" => Ok(UpstreamSelectionPolicy::RoundRobin),
             "random" => Ok(UpstreamSelectionPolicy::Random),
+            "consistent_hash" => Ok(UpstreamSelectionPolicy::ConsistentHash),
             _ => Err(LowerErr {
                 message: format!(
-                    "policy: unsupported upstream selection policy `{value}`; expected round_robin|random"
+                    "policy: unsupported upstream selection policy `{value}`; expected round_robin|random|consistent_hash"
                 ),
             }),
         },
@@ -689,6 +699,21 @@ fn parse_upstream_policy(args: &[String]) -> Result<UpstreamSelectionPolicy, Low
         }),
         _ => Err(LowerErr {
             message: "policy: expected exactly 1 argument".into(),
+        }),
+    }
+}
+
+fn parse_upstream_hash_key(args: &[String]) -> Result<UpstreamHashKey, LowerErr> {
+    match args {
+        [value] if value == "client_ip" => Ok(UpstreamHashKey::ClientIp),
+        [kind, name] if kind == "header" => {
+            http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| LowerErr {
+                message: format!("hash_key: invalid HTTP header name `{name}`"),
+            })?;
+            Ok(UpstreamHashKey::Header(name.clone()))
+        }
+        _ => Err(LowerErr {
+            message: "hash_key: expected `client_ip` or `header <name>`".into(),
         }),
     }
 }
@@ -1022,16 +1047,11 @@ fn parse_proxy_cache_block(block: &Block) -> Result<CacheConfig, LowerErr> {
 }
 
 fn parse_upstream_server(args: &[String]) -> Result<UpstreamServer, LowerErr> {
-    let raw = match args {
-        [value] => value,
-        [] => {
+    let raw = match args.first() {
+        Some(value) => value,
+        None => {
             return Err(LowerErr {
                 message: "upstream server: expected host:port".into(),
-            });
-        }
-        _ => {
-            return Err(LowerErr {
-                message: "upstream server: expected exactly 1 argument".into(),
             });
         }
     };
@@ -1048,9 +1068,34 @@ fn parse_upstream_server(args: &[String]) -> Result<UpstreamServer, LowerErr> {
         message: format!("upstream server: invalid port in `{raw}`"),
     })?;
 
+    let mut weight = 1u16;
+    let mut saw_weight = false;
+    for parameter in &args[1..] {
+        let Some(value) = parameter.strip_prefix("weight=") else {
+            return Err(LowerErr {
+                message: format!("upstream server: unsupported parameter `{parameter}`"),
+            });
+        };
+        if saw_weight {
+            return Err(LowerErr {
+                message: "upstream server: weight is duplicated".into(),
+            });
+        }
+        weight = value.parse::<u16>().map_err(|_| LowerErr {
+            message: format!("upstream server: invalid weight `{value}`"),
+        })?;
+        if weight == 0 {
+            return Err(LowerErr {
+                message: "upstream server: weight must be greater than zero".into(),
+            });
+        }
+        saw_weight = true;
+    }
+
     Ok(UpstreamServer {
         host: host.to_string(),
         port,
+        weight,
     })
 }
 

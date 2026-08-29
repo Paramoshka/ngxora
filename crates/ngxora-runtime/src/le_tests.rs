@@ -17,9 +17,7 @@ use std::os::unix::fs::PermissionsExt;
 fn install_rustls_provider() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .expect("install rustls crypto provider");
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     });
 }
 

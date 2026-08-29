@@ -33,7 +33,7 @@ pub(crate) use routing::{listener_routes, select_route_target, validate_sni_host
 #[cfg(test)]
 pub(crate) use runtime::{
     apply_upstream_http_protocol, apply_upstream_ssl_options, apply_upstream_timeouts,
-    content_length_limit_exceeded, update_received_body_bytes,
+    content_length_limit_exceeded, update_received_body_bytes, upstream_selection_key,
 };
 
 #[cfg(test)]

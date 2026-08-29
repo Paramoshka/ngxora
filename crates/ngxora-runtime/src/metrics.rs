@@ -8,8 +8,9 @@ use crate::admin::{admin_server, admin_server_with_state};
 use crate::control::RuntimeState;
 use pingora::services::listening::Service;
 use pingora_proxy::Session;
-use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, Opts};
+use prometheus::{HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
@@ -105,6 +106,47 @@ fn cache_misses_total() -> &'static IntCounterVec {
     )
 }
 
+fn upstream_backend_requests_total() -> &'static IntCounterVec {
+    metric!(
+        IntCounterVec,
+        IntCounterVec::new,
+        Opts::new(
+            "ngxora_upstream_backend_requests_total",
+            "Total requests sent to a configured upstream backend."
+        ),
+        &["upstream_group", "backend", "status_class"]
+    )
+}
+
+fn upstream_backend_request_duration_seconds() -> &'static HistogramVec {
+    metric!(
+        HistogramVec,
+        HistogramVec::new,
+        HistogramOpts::new(
+            "ngxora_upstream_backend_request_duration_seconds",
+            "End-to-end request duration for requests sent to an upstream backend."
+        ),
+        &["upstream_group", "backend"]
+    )
+}
+
+fn upstream_backend_ready() -> &'static IntGaugeVec {
+    metric!(
+        IntGaugeVec,
+        IntGaugeVec::new,
+        Opts::new(
+            "ngxora_upstream_backend_ready",
+            "Whether a configured upstream backend is healthy and enabled."
+        ),
+        &["upstream_group", "backend"]
+    )
+}
+
+fn readiness_series() -> &'static std::sync::Mutex<HashSet<(String, String)>> {
+    static SERIES: OnceLock<std::sync::Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    SERIES.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
+}
+
 // ---- Metrics recording ----
 
 /// Common labels attached to every metric.
@@ -170,6 +212,49 @@ pub(crate) fn record_metrics(
     }
 }
 
+pub(crate) fn record_upstream_backend_metrics(
+    upstream_group: &str,
+    backend: &str,
+    status: u16,
+    latency_secs: f64,
+) {
+    let status_class = match status {
+        100..=199 => "1xx",
+        200..=299 => "2xx",
+        300..=399 => "3xx",
+        400..=499 => "4xx",
+        500..=599 => "5xx",
+        _ => "error",
+    };
+    upstream_backend_requests_total()
+        .with_label_values(&[upstream_group, backend, status_class])
+        .inc();
+    upstream_backend_request_duration_seconds()
+        .with_label_values(&[upstream_group, backend])
+        .observe(latency_secs);
+}
+
+pub(crate) fn replace_upstream_backend_readiness(
+    readiness: impl IntoIterator<Item = (String, String, bool)>,
+) {
+    let gauge = upstream_backend_ready();
+    let mut current = HashSet::new();
+    for (group, backend, ready) in readiness {
+        gauge
+            .with_label_values(&[group.as_str(), backend.as_str()])
+            .set(i64::from(ready));
+        current.insert((group, backend));
+    }
+
+    let mut previous = readiness_series()
+        .lock()
+        .expect("upstream readiness metrics lock poisoned");
+    for (group, backend) in previous.difference(&current) {
+        let _ = gauge.remove_label_values(&[group.as_str(), backend.as_str()]);
+    }
+    *previous = current;
+}
+
 // ---- Structured access log (JSON) ----
 
 #[derive(Debug, Serialize)]
@@ -181,6 +266,8 @@ struct AccessLogEntry {
     latency_secs: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     upstream: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upstream_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,6 +288,7 @@ pub(crate) fn write_access_log(
     status: u16,
     latency: Option<std::time::Duration>,
     upstream: Option<&str>,
+    upstream_group: Option<&str>,
     cache_status: Option<&str>,
     route_id: Option<u64>,
 ) {
@@ -221,6 +309,7 @@ pub(crate) fn write_access_log(
         status,
         latency_secs,
         upstream: upstream.map(|s| s.to_string()),
+        upstream_group: upstream_group.map(|s| s.to_string()),
         cache_status: cache_status.map(|s| s.to_string()),
         bytes_sent: None,
         client_ip,
@@ -264,7 +353,10 @@ pub fn spawn_metrics_service_with_state(
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheStatus, RequestLabels, record_metrics};
+    use super::{
+        CacheStatus, RequestLabels, record_metrics, record_upstream_backend_metrics,
+        replace_upstream_backend_readiness,
+    };
 
     #[test]
     fn record_metrics_registers_collectors_in_default_registry() {
@@ -283,7 +375,7 @@ mod tests {
 
         let metric_names = prometheus::gather()
             .into_iter()
-            .map(|family| family.get_name().to_string())
+            .map(|family| family.name().to_string())
             .collect::<Vec<_>>();
 
         assert!(
@@ -311,5 +403,27 @@ mod tests {
                 .iter()
                 .any(|name| name == "ngxora_cache_misses_total")
         );
+    }
+
+    #[test]
+    fn upstream_backend_metrics_register_request_duration_and_readiness() {
+        record_upstream_backend_metrics("sbi", "127.0.0.1:8080", 200, 0.025);
+        replace_upstream_backend_readiness([(
+            "sbi".to_string(),
+            "127.0.0.1:8080".to_string(),
+            true,
+        )]);
+
+        let metric_names = prometheus::gather()
+            .into_iter()
+            .map(|family| family.name().to_string())
+            .collect::<Vec<_>>();
+        for expected in [
+            "ngxora_upstream_backend_requests_total",
+            "ngxora_upstream_backend_request_duration_seconds",
+            "ngxora_upstream_backend_ready",
+        ] {
+            assert!(metric_names.iter().any(|name| name == expected));
+        }
     }
 }

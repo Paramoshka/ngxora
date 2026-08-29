@@ -5,17 +5,27 @@ use super::{
     runtime_snapshot_from_proto,
 };
 use crate::control::{ConfigSnapshot, InProcessControlPlane, RuntimeState};
-use crate::upstreams::{CompiledMatcher, CompiledRouter, ListenKey, RouteTarget};
+use crate::upstreams::{
+    CompiledMatcher, CompiledRouter, ListenKey, RouteTarget, apply_upstream_http_protocol,
+    apply_upstream_ssl_options, build_runtime_client_identities, build_runtime_trusted_cas,
+};
+use bytes::Bytes;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationMatcher, PemSource,
-    ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity, UpstreamBlock, UpstreamHealthCheck,
-    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
+    ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity, UpstreamBlock, UpstreamHashKey,
+    UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy,
+    UpstreamServer,
 };
 use ngxora_plugin_api::PluginSpec;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+
+use pingora::connectors::http::Connector;
+use pingora::http::RequestHeader;
+use pingora::protocols::http::client::HttpSession;
+use pingora::upstreams::peer::HttpPeer;
 
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -116,6 +126,155 @@ fn tcp_grpc_requires_trusted_mtls_client_and_server() {
                 .is_err()
             );
             assert!(plaintext_snapshot(addr.port()).await.is_err());
+
+            server_task.abort();
+        });
+}
+
+#[cfg(feature = "openssl")]
+#[test]
+fn pingora_connector_reaches_mock_service_over_h2_mtls_with_trailers() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    grpc_runtime()
+        .expect("create gRPC test runtime")
+        .block_on(async {
+            let server_ca = test_ca("mock-sbi-server-ca");
+            let client_ca = test_ca("mock-sbi-client-ca");
+            let server_identity = signed_identity(
+                &server_ca.issuer,
+                vec!["localhost".into()],
+                ExtendedKeyUsagePurpose::ServerAuth,
+            );
+            let client_identity = signed_identity(
+                &client_ca.issuer,
+                vec!["ngxora-sbi-client".into()],
+                ExtendedKeyUsagePurpose::ClientAuth,
+            );
+            let server_chain = format!("{}{}", server_identity.certificate, server_ca.certificate);
+            let tls = GrpcTlsConfig::from_pem(
+                &server_chain,
+                &server_identity.key,
+                &client_ca.certificate,
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock SBI listener");
+            let addr = listener.local_addr().expect("mock SBI address");
+            let control = InProcessControlPlane::new(Arc::new(RuntimeState::new(
+                ConfigSnapshot::new("mock-sbi-v1", CompiledRouter::default()),
+            )));
+            let server_task = tokio::spawn(
+                grpc_server(&tls)
+                    .expect("build mock SBI mTLS server")
+                    .add_service(proto::control_plane_server::ControlPlaneServer::new(
+                        GrpcControlPlane::new(control),
+                    ))
+                    .serve_with_incoming(TcpListenerStream::new(listener)),
+            );
+
+            let ca_source = PemSource::InlinePem(server_ca.certificate.clone());
+            let cert_source = PemSource::InlinePem(client_identity.certificate.clone());
+            let key_source = PemSource::InlinePem(client_identity.key.clone());
+            let router = CompiledRouter::from_http(&Http {
+                servers: vec![Server {
+                    listens: vec![Listen {
+                        default_server: true,
+                        ..Listen::default()
+                    }],
+                    locations: vec![Location {
+                        matcher: LocationMatcher::Prefix("/".into()),
+                        directives: vec![
+                            LocationDirective::ProxySslTrustedCertificate(ca_source.clone()),
+                            LocationDirective::ProxySslCertificate(cert_source.clone()),
+                            LocationDirective::ProxySslCertificateKey(key_source.clone()),
+                            LocationDirective::ProxyUpstreamProtocol(UpstreamHttpProtocol::H2),
+                            LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                                format!("https://localhost:{}", addr.port())
+                                    .parse()
+                                    .expect("mock SBI URL"),
+                            )),
+                        ],
+                        access_rules: Vec::new(),
+                        plugins: Vec::new(),
+                        cache: None,
+                    }],
+                    ..Server::default()
+                }],
+                ..Http::default()
+            })
+            .expect("compile mock SBI client route");
+            let trusted_cas = build_runtime_trusted_cas(&router).expect("load mock SBI CA");
+            let identities =
+                build_runtime_client_identities(&router).expect("load mock SBI client identity");
+            let identity_key = crate::upstreams::ClientIdentityKey {
+                cert: cert_source,
+                key: key_source,
+            };
+
+            let mut peer = HttpPeer::new(("127.0.0.1", addr.port()), true, "localhost".into());
+            apply_upstream_http_protocol(&mut peer, Some(UpstreamHttpProtocol::H2));
+            apply_upstream_ssl_options(
+                &mut peer,
+                &ngxora_compile::ir::UpstreamSslOptions {
+                    verify_cert: Switch::Off,
+                    trusted_certificate: Some(ca_source.clone()),
+                    client_certificate: Some(identity_key.cert.clone()),
+                    client_certificate_key: Some(identity_key.key.clone()),
+                },
+                trusted_cas.get(&ca_source),
+                identities.get(&identity_key),
+            );
+
+            let connector = Connector::new(None);
+            let (mut session, _) = connector
+                .get_http_session(&peer)
+                .await
+                .expect("connect to mock SBI service over mTLS");
+            assert!(session.as_http2().is_some());
+
+            let mut request =
+                RequestHeader::build("POST", b"/ngxora.control.v1.ControlPlane/GetSnapshot", None)
+                    .expect("build gRPC request");
+            request
+                .insert_header("host", "localhost")
+                .expect("set authority");
+            request
+                .insert_header("content-type", "application/grpc")
+                .expect("set content type");
+            request
+                .insert_header("te", "trailers")
+                .expect("request trailers");
+            session
+                .write_request_header(Box::new(request))
+                .await
+                .expect("write gRPC request header");
+            session
+                .write_request_body(Bytes::from_static(&[0, 0, 0, 0, 0]), true)
+                .await
+                .expect("write empty protobuf message");
+            session
+                .read_response_header()
+                .await
+                .expect("read mock SBI response header");
+            assert_eq!(
+                session.response_header().expect("response header").status,
+                200
+            );
+            while session
+                .read_response_body()
+                .await
+                .expect("read mock SBI response body")
+                .is_some()
+            {}
+            let trailers = match &mut session {
+                HttpSession::H2(session) => session
+                    .read_trailers()
+                    .await
+                    .expect("read mock SBI trailers")
+                    .expect("gRPC trailers"),
+                _ => panic!("expected HTTP/2 session"),
+            };
+            assert_eq!(trailers.get("grpc-status").expect("grpc status"), "0");
 
             server_task.abort();
         });
@@ -301,13 +460,15 @@ fn proto_snapshot_converts_into_runtime_router() {
                 proto::UpstreamBackend {
                     host: "backend-1.internal".into(),
                     port: 8080,
+                    weight: 4,
                 },
                 proto::UpstreamBackend {
                     host: "backend-2.internal".into(),
                     port: 8081,
+                    weight: 0,
                 },
             ],
-            policy: proto::UpstreamSelectionPolicy::Random as i32,
+            policy: proto::UpstreamSelectionPolicy::ConsistentHash as i32,
             health_check: Some(proto::UpstreamHealthCheck {
                 kind: Some(proto::upstream_health_check::Kind::Http(
                     proto::UpstreamHttpHealthCheck {
@@ -320,6 +481,11 @@ fn proto_snapshot_converts_into_runtime_router() {
                 interval_ms: 10_000,
                 consecutive_success: 2,
                 consecutive_failure: 3,
+            }),
+            hash_key: Some(proto::UpstreamHashKey {
+                source: Some(proto::upstream_hash_key::Source::Header(
+                    "X-Tenant-ID".into(),
+                )),
             }),
         }],
         virtual_hosts: vec![proto::VirtualHost {
@@ -432,7 +598,19 @@ fn proto_snapshot_converts_into_runtime_router() {
     assert_eq!(route.plugins[0].name, "headers");
     assert_eq!(
         runtime.router.upstreams["backend-pool"].policy,
-        UpstreamSelectionPolicy::Random
+        UpstreamSelectionPolicy::ConsistentHash
+    );
+    assert_eq!(
+        runtime.router.upstreams["backend-pool"].servers[0].weight,
+        4
+    );
+    assert_eq!(
+        runtime.router.upstreams["backend-pool"].servers[1].weight,
+        1
+    );
+    assert_eq!(
+        runtime.router.upstreams["backend-pool"].hash_key,
+        Some(UpstreamHashKey::Header("X-Tenant-ID".into()))
     );
     assert_eq!(
         runtime.router.upstreams["backend-pool"].health_check,
@@ -643,7 +821,18 @@ fn runtime_snapshot_converts_back_to_proto() {
     assert_eq!(proto.upstreams[0].backends.len(), 2);
     assert_eq!(
         proto.upstreams[0].policy,
-        proto::UpstreamSelectionPolicy::RoundRobin as i32
+        proto::UpstreamSelectionPolicy::ConsistentHash as i32
+    );
+    assert_eq!(proto.upstreams[0].backends[0].weight, 3);
+    assert_eq!(proto.upstreams[0].backends[1].weight, 1);
+    assert_eq!(
+        proto.upstreams[0]
+            .hash_key
+            .as_ref()
+            .and_then(|hash_key| hash_key.source.as_ref()),
+        Some(&proto::upstream_hash_key::Source::Header(
+            "X-Tenant-ID".into()
+        ))
     );
     assert_eq!(
         proto.upstreams[0]
@@ -853,15 +1042,18 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
     let http = Http {
         upstreams: vec![UpstreamBlock {
             name: "backend-pool".into(),
-            policy: UpstreamSelectionPolicy::RoundRobin,
+            policy: UpstreamSelectionPolicy::ConsistentHash,
+            hash_key: Some(UpstreamHashKey::Header("X-Tenant-ID".into())),
             servers: vec![
                 UpstreamServer {
                     host: "backend-1.internal".into(),
                     port: 8443,
+                    weight: 3,
                 },
                 UpstreamServer {
                     host: "backend-2.internal".into(),
                     port: 9443,
+                    weight: 1,
                 },
             ],
             health_check: Some(UpstreamHealthCheck {

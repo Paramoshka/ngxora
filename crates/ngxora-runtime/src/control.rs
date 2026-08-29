@@ -92,6 +92,19 @@ impl RuntimeSnapshot {
             })
             .cloned()
     }
+
+    pub(crate) fn upstream_backend_readiness(&self) -> Vec<(String, String, bool)> {
+        let mut readiness = Vec::new();
+        for (name, group) in &self.upstream_groups {
+            readiness.extend(
+                group
+                    .readiness()
+                    .into_iter()
+                    .map(|(backend, ready)| (name.clone(), backend.to_string(), ready)),
+            );
+        }
+        readiness
+    }
 }
 
 /// RuntimeState owns the current immutable snapshot and enforces the restart

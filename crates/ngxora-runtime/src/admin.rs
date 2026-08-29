@@ -113,7 +113,12 @@ async fn respond_for_route(
                     .unwrap()
             }
         },
-        AdminRoute::Metrics => metrics.response(http_session).await,
+        AdminRoute::Metrics => {
+            crate::metrics::replace_upstream_backend_readiness(
+                state.snapshot().upstream_backend_readiness(),
+            );
+            metrics.response(http_session).await
+        }
         AdminRoute::MethodNotAllowed => Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
             .header(http::header::ALLOW, "GET, HEAD")

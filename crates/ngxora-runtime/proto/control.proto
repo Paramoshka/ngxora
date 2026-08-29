@@ -147,11 +147,20 @@ message UpstreamGroup {
   repeated UpstreamBackend backends = 2;
   UpstreamSelectionPolicy policy = 3;
   UpstreamHealthCheck health_check = 4;
+  UpstreamHashKey hash_key = 5;
 }
 
 message UpstreamBackend {
   string host = 1;
   uint32 port = 2;
+  uint32 weight = 3; // zero from older clients means 1
+}
+
+message UpstreamHashKey {
+  oneof source {
+    bool client_ip = 1;
+    string header = 2;
+  }
 }
 
 message UpstreamHealthCheck {
@@ -183,6 +192,7 @@ enum UpstreamSelectionPolicy {
   UPSTREAM_SELECTION_POLICY_UNSPECIFIED = 0;
   UPSTREAM_SELECTION_POLICY_ROUND_ROBIN = 1;
   UPSTREAM_SELECTION_POLICY_RANDOM = 2;
+  UPSTREAM_SELECTION_POLICY_CONSISTENT_HASH = 3;
 }
 
 enum UpstreamHttpProtocol {

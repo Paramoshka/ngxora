@@ -6,8 +6,8 @@ use super::types::{
 use ngxora_compile::ir::{
     DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective, PemSource,
     ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity, UpstreamBlock, UpstreamHealthCheck,
-    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamServer, UpstreamSslOptions,
-    UpstreamTimeouts,
+    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
+    UpstreamSslOptions, UpstreamTimeouts,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -192,6 +192,7 @@ fn compile_upstream_server(server: &UpstreamServer) -> Result<CompiledUpstreamSe
     Ok(CompiledUpstreamServer {
         host: server.host.clone(),
         port: server.port,
+        weight: server.weight,
     })
 }
 
@@ -262,10 +263,42 @@ fn compile_upstreams(
                 upstream.name
             ));
         }
+        let total_weight = upstream.servers.iter().try_fold(0u32, |total, server| {
+            if server.weight == 0 {
+                return Err(format!(
+                    "upstream `{}` backend `{}:{}` weight must be greater than zero",
+                    upstream.name, server.host, server.port
+                ));
+            }
+            Ok(total + u32::from(server.weight))
+        })?;
+        if total_weight > u32::from(u16::MAX) {
+            return Err(format!(
+                "upstream `{}` total backend weight must not exceed {}",
+                upstream.name,
+                u16::MAX
+            ));
+        }
+        if upstream.hash_key.is_some() && upstream.policy != UpstreamSelectionPolicy::ConsistentHash
+        {
+            return Err(format!(
+                "upstream `{}` hash_key requires policy consistent_hash",
+                upstream.name
+            ));
+        }
+        if let Some(ngxora_compile::ir::UpstreamHashKey::Header(name)) = &upstream.hash_key {
+            http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                format!(
+                    "upstream `{}` hash_key has invalid HTTP header name `{name}`",
+                    upstream.name
+                )
+            })?;
+        }
 
         let group = CompiledUpstreamGroup {
             name: upstream.name.clone(),
             policy: upstream.policy,
+            hash_key: upstream.hash_key.clone(),
             servers: upstream
                 .servers
                 .iter()

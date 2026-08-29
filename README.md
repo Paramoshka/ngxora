@@ -229,6 +229,26 @@ Notes:
 - downstream TLS listeners still need `listen ... http2` or `http2_only` for browser/client-side HTTP/2
 - plaintext downstream gRPC requires service-level `h2c on`
 
+## SBI-ready proxying
+
+The same HTTP/2 and upstream mTLS path can be used as a transport foundation for
+5G Service-Based Interfaces. Upstream groups also support weights and stable
+selection by a request header:
+
+```nginx
+upstream sbi_pool {
+    policy consistent_hash;
+    hash_key header X-Tenant-ID;
+    server 10.20.0.11:8443 weight=3;
+    server 10.20.0.12:8443 weight=1;
+}
+```
+
+See [`examples/sbi-ready`](./examples/sbi-ready/) for a complete config and the
+[3GPP Release 18 roadmap](./docs/3gpp-roadmap.md) for the boundary between the
+available generic proxy features and planned SBI-aware behavior. `ngxora` does
+not currently claim SCP, SEPP, NRF, or general 3GPP conformance.
+
 ## Dynamic config
 
 The runtime is built around atomic snapshot apply:

@@ -1,4 +1,4 @@
-use crate::ir::{Ir, LocationDirective};
+use crate::ir::{Ir, LocationDirective, UpstreamHashKey, UpstreamSelectionPolicy};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ValidateErr {
@@ -14,6 +14,51 @@ impl Ir {
             return Err(ValidateErr {
                 message: "http block does not contain any server blocks".into(),
             });
+        }
+
+        for upstream in &http.upstreams {
+            let total_weight = upstream.servers.iter().try_fold(0u32, |total, server| {
+                if server.weight == 0 {
+                    return Err(ValidateErr {
+                        message: format!(
+                            "upstream `{}` backend `{}:{}` weight must be greater than zero",
+                            upstream.name, server.host, server.port
+                        ),
+                    });
+                }
+                Ok(total + u32::from(server.weight))
+            })?;
+            if total_weight > u32::from(u16::MAX) {
+                return Err(ValidateErr {
+                    message: format!(
+                        "upstream `{}` total backend weight must not exceed {}",
+                        upstream.name,
+                        u16::MAX
+                    ),
+                });
+            }
+
+            match (&upstream.policy, &upstream.hash_key) {
+                (UpstreamSelectionPolicy::ConsistentHash, _) => {}
+                (_, Some(_)) => {
+                    return Err(ValidateErr {
+                        message: format!(
+                            "upstream `{}` hash_key requires policy consistent_hash",
+                            upstream.name
+                        ),
+                    });
+                }
+                _ => {}
+            }
+
+            if let Some(UpstreamHashKey::Header(name)) = &upstream.hash_key {
+                http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| ValidateErr {
+                    message: format!(
+                        "upstream `{}` hash_key has invalid HTTP header name `{name}`",
+                        upstream.name
+                    ),
+                })?;
+            }
         }
 
         for (server_index, server) in http.servers.iter().enumerate() {

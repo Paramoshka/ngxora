@@ -34,6 +34,7 @@ pub const REQUIRED_SCOPE: &str = "required_scope";
 pub const LISTEN: &str = "listen";
 pub const SERVER_NAME: &str = "server_name";
 pub const POLICY: &str = "policy";
+pub const HASH_KEY: &str = "hash_key";
 pub const HEALTH_CHECK: &str = "health_check";
 pub const TYPE: &str = "type";
 pub const TIMEOUT: &str = "timeout";

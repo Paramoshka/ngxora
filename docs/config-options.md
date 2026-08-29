@@ -29,9 +29,10 @@ Supported shape:
 
 ```nginx
 upstream app_pool {
-    policy random;
-    server 127.0.0.1:8080;
-    server 127.0.0.1:8081;
+    policy consistent_hash;
+    hash_key header X-Tenant-ID;
+    server 127.0.0.1:8080 weight=3;
+    server 127.0.0.1:8081 weight=1;
 
     health_check {
         type http;
@@ -48,10 +49,17 @@ upstream app_pool {
 
 Supported directives:
 
-- `server <host>:<port>;`
-  Adds a static backend to the upstream group.
-- `policy round_robin|random;`
+- `server <host>:<port> [weight=<1..65535>];`
+  Adds a static backend to the upstream group. Weight defaults to `1`; the sum of
+  weights in one group must not exceed `65535`.
+- `policy round_robin|random|consistent_hash;`
   Selects backend balancing policy. Default is `round_robin`.
+- `hash_key client_ip|header <name>;`
+  Sets the key for `consistent_hash`. A header key must contain exactly one
+  non-empty value. If it is absent, empty, or repeated, ngxora falls back to the
+  socket client IP; if that is also unavailable, the request fails with `503`.
+  Forwarded-IP headers are never trusted implicitly. Without `hash_key`,
+  `consistent_hash` uses the socket client IP.
 - `health_check { ... }`
   Configures active backend health checks for the upstream group.
 
@@ -59,6 +67,7 @@ Supported policies:
 
 - `round_robin` - default policy
 - `random`
+- `consistent_hash` - stable weighted selection for the configured hash key
 
 `health_check {}` directives:
 
@@ -85,6 +94,7 @@ Notes:
 - `health_check` is configured per `upstream {}` block, not per `location {}`.
 - Runtime scheduling is driven by the configured `interval`.
 - gRPC snapshots expose the same shape under `UpstreamGroup.health_check`.
+- Older gRPC clients that omit `UpstreamBackend.weight` keep weight `1` behavior.
 - For plain HTTP backends that do not route by virtual host, `host localhost;` is usually sufficient.
 - For backends that depend on virtual host routing, set `host` to the hostname the application expects.
 - For HTTPS health checks, `host` should match the backend certificate name because it is also used as TLS SNI.

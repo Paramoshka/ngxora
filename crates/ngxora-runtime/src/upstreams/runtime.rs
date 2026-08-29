@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use ngxora_compile::ir::{
-    CacheConfig, PemSource, Switch, UpstreamHttpProtocol, UpstreamSelectionPolicy,
+    CacheConfig, PemSource, Switch, UpstreamHashKey, UpstreamHttpProtocol, UpstreamSelectionPolicy,
     UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::{
@@ -54,12 +54,14 @@ pub(crate) struct ClientIdentityKey {
 pub struct RuntimeUpstreamGroup {
     selector: RuntimeUpstreamSelector,
     max_iterations: usize,
+    hash_key: Option<UpstreamHashKey>,
     health_check: Option<RuntimeHealthCheckSchedule>,
 }
 
 enum RuntimeUpstreamSelector {
     RoundRobin(LoadBalancer<selection::RoundRobin>),
     Random(LoadBalancer<selection::Random>),
+    ConsistentHash(LoadBalancer<selection::Consistent>),
 }
 
 struct RuntimeHealthCheckSchedule {
@@ -77,7 +79,7 @@ fn synthetic_backends(servers: &[CompiledUpstreamServer]) -> Result<BTreeSet<Bac
 
             Ok(Backend {
                 addr: PingoraSocketAddr::Inet(synthetic_backend_addr(index)),
-                weight: 1,
+                weight: usize::from(server.weight),
                 ext,
             })
         })
@@ -126,6 +128,7 @@ impl RuntimeUpstreamSelector {
         match self {
             Self::RoundRobin(lb) => lb.select(key, max_iterations),
             Self::Random(lb) => lb.select(key, max_iterations),
+            Self::ConsistentHash(lb) => lb.select(key, max_iterations),
         }
     }
 
@@ -133,6 +136,15 @@ impl RuntimeUpstreamSelector {
         match self {
             Self::RoundRobin(lb) => lb.backends().run_health_check(false).await,
             Self::Random(lb) => lb.backends().run_health_check(false).await,
+            Self::ConsistentHash(lb) => lb.backends().run_health_check(false).await,
+        }
+    }
+
+    fn backends(&self) -> &Backends {
+        match self {
+            Self::RoundRobin(lb) => lb.backends(),
+            Self::Random(lb) => lb.backends(),
+            Self::ConsistentHash(lb) => lb.backends(),
         }
     }
 }
@@ -154,11 +166,19 @@ impl RuntimeUpstreamGroup {
             UpstreamSelectionPolicy::Random => RuntimeUpstreamSelector::Random(
                 build_load_balancer(backends, group.health_check.as_ref())?,
             ),
+            UpstreamSelectionPolicy::ConsistentHash => RuntimeUpstreamSelector::ConsistentHash(
+                build_load_balancer(backends, group.health_check.as_ref())?,
+            ),
         };
 
         Ok(Self {
             selector,
-            max_iterations: group.servers.len(),
+            max_iterations: if group.policy == UpstreamSelectionPolicy::ConsistentHash {
+                group.servers.len().max(256)
+            } else {
+                group.servers.len()
+            },
+            hash_key: group.hash_key.clone(),
             health_check: group.health_check.as_ref().map(|health_check| {
                 RuntimeHealthCheckSchedule {
                     interval: health_check.interval,
@@ -171,6 +191,29 @@ impl RuntimeUpstreamGroup {
     pub(crate) fn select(&self, key: &[u8]) -> Option<CompiledUpstreamServer> {
         let backend = self.selector.select(key, self.max_iterations)?;
         backend.ext.get::<CompiledUpstreamServer>().cloned()
+    }
+
+    fn hash_key(&self) -> Option<&UpstreamHashKey> {
+        self.hash_key.as_ref()
+    }
+
+    fn uses_consistent_hash(&self) -> bool {
+        matches!(self.selector, RuntimeUpstreamSelector::ConsistentHash(_))
+    }
+
+    pub(crate) fn readiness(&self) -> Vec<(CompiledUpstreamServer, bool)> {
+        let backends = self.selector.backends();
+        backends
+            .get_backend()
+            .iter()
+            .filter_map(|backend| {
+                backend
+                    .ext
+                    .get::<CompiledUpstreamServer>()
+                    .cloned()
+                    .map(|server| (server, backends.ready(backend)))
+            })
+            .collect()
     }
 
     pub(crate) async fn run_due_health_check(&self, now: Instant) -> Option<Instant> {
@@ -197,6 +240,7 @@ struct SelectedPeer {
     port: u16,
     tls: bool,
     sni: String,
+    upstream_group: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -244,6 +288,8 @@ pub struct ProxyContext {
     pub(crate) start_time: std::time::Instant,
     /// True when the request was served from cache (set in request_filter).
     pub(crate) cache_hit: bool,
+    /// True once Pingora asks for an upstream peer for this request.
+    pub(crate) upstream_attempted: bool,
     /// OpenTelemetry span for this request (None if tracing is not configured).
     pub(crate) span: Option<opentelemetry::global::BoxedSpan>,
     /// Extracted W3C TraceContext from downstream headers.
@@ -267,6 +313,7 @@ impl Default for ProxyContext {
             response_body_buf: BytesMut::new(),
             start_time: std::time::Instant::now(),
             cache_hit: false,
+            upstream_attempted: false,
             span: None,
             parent_ctx: opentelemetry::Context::new(),
             upstream_trace_ctx: opentelemetry::Context::new(),
@@ -366,6 +413,7 @@ impl SelectedRoute {
     fn from_resolved(
         snapshot: &RuntimeSnapshot,
         resolved: &ResolvedLocation<'_>,
+        session: &Session,
     ) -> PingoraResult<Self> {
         let target = match &resolved.location.target {
             RouteTarget::Return { status, location } => {
@@ -395,6 +443,7 @@ impl SelectedRoute {
                 port: *port,
                 tls: *tls,
                 sni: sni.clone(),
+                upstream_group: None,
             }),
             RouteTarget::UpstreamGroup { name, tls } => {
                 let group = snapshot.upstream_group(name).ok_or_else(|| {
@@ -403,7 +452,12 @@ impl SelectedRoute {
                         format!("compiled upstream group `{name}` is missing at runtime"),
                     )
                 })?;
-                let backend = group.select(b"").ok_or_else(|| {
+                let key = if group.uses_consistent_hash() {
+                    upstream_selection_key(group.hash_key(), session)?
+                } else {
+                    Vec::new()
+                };
+                let backend = group.select(&key).ok_or_else(|| {
                     pingora::Error::explain(
                         pingora::ErrorType::HTTPStatus(503),
                         format!("upstream `{name}` has no available backends"),
@@ -415,6 +469,7 @@ impl SelectedRoute {
                     host: backend.host,
                     port: backend.port,
                     tls: *tls,
+                    upstream_group: Some(name.trim_end_matches('.').to_ascii_lowercase()),
                 })
             }
         };
@@ -479,9 +534,32 @@ fn select_runtime_route(
     };
 
     Ok(Some((
-        SelectedRoute::from_resolved(snapshot, &resolved)?,
+        SelectedRoute::from_resolved(snapshot, &resolved, session)?,
         resolved.host,
     )))
+}
+
+pub(crate) fn upstream_selection_key(
+    configured: Option<&UpstreamHashKey>,
+    session: &Session,
+) -> PingoraResult<Vec<u8>> {
+    if let Some(UpstreamHashKey::Header(name)) = configured {
+        let mut values = session.req_header().headers.get_all(name).iter();
+        if let (Some(value), None) = (values.next(), values.next())
+            && !value.as_bytes().is_empty()
+        {
+            return Ok(value.as_bytes().to_vec());
+        }
+    }
+
+    request_client_ip(session)
+        .map(|ip| ip.to_string().into_bytes())
+        .ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::HTTPStatus(503),
+                "consistent hash requires a request header key or socket client IP",
+            )
+        })
 }
 
 fn request_client_ip(session: &Session) -> Option<std::net::IpAddr> {
@@ -1309,6 +1387,10 @@ impl ProxyHttp for DynamicProxy {
             SelectedTarget::Upstream(peer) => Some(format!("{}:{}", peer.host, peer.port)),
             SelectedTarget::Return { .. } => None,
         });
+        let upstream_group = ctx.selected.as_ref().and_then(|s| match &s.target {
+            SelectedTarget::Upstream(peer) => peer.upstream_group.as_deref(),
+            SelectedTarget::Return { .. } => None,
+        });
         let route_id = ctx.selected.as_ref().map(|s| s.route_id());
 
         // Cache status: hit when served from cache in request_filter, miss
@@ -1357,6 +1439,7 @@ impl ProxyHttp for DynamicProxy {
                 status,
                 Some(latency),
                 upstream.as_deref(),
+                upstream_group,
                 Some(cache_status),
                 route_id,
             );
@@ -1380,6 +1463,16 @@ impl ProxyHttp for DynamicProxy {
             0,
             ctx.response_body_buf.len() as u64,
         );
+        if ctx.upstream_attempted
+            && let (Some(group), Some(backend)) = (upstream_group, upstream.as_deref())
+        {
+            crate::metrics::record_upstream_backend_metrics(
+                group,
+                backend,
+                status,
+                latency.as_secs_f64(),
+            );
+        }
 
         // ── Original cache-store logic ──
         if e.is_some() {
@@ -1450,6 +1543,7 @@ impl ProxyHttp for DynamicProxy {
                 ));
             }
         };
+        ctx.upstream_attempted = true;
 
         let mut http_peer =
             HttpPeer::new((peer.host.as_str(), peer.port), peer.tls, peer.sni.clone());
@@ -1497,6 +1591,7 @@ mod tests {
                 port: 8080,
                 tls: false,
                 sni: String::new(),
+                upstream_group: Some("backend".into()),
             }),
             upstream_timeouts: UpstreamTimeouts::default(),
             upstream_protocol: None,

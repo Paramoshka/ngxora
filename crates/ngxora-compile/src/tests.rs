@@ -13,7 +13,8 @@ mod tests {
     use crate::ir::{
         CacheKeyMode, Ir, KeepaliveTimeout, LocationDirective, LocationIpRule, LocationMatcher,
         PemSource, ProxyPassTarget, SslProvider, Switch, TlsProtocolBounds, TlsProtocolVersion,
-        TlsVerifyClient, UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy,
+        TlsVerifyClient, UpstreamHashKey, UpstreamHealthCheckType, UpstreamHttpProtocol,
+        UpstreamSelectionPolicy,
     };
     use ipnet::IpNet;
 
@@ -588,6 +589,7 @@ http {
         assert_eq!(http.upstreams[0].policy, UpstreamSelectionPolicy::Random);
         assert_eq!(http.upstreams[0].servers[0].host, "127.0.0.1");
         assert_eq!(http.upstreams[0].servers[0].port, 8080);
+        assert_eq!(http.upstreams[0].servers[0].weight, 1);
         assert_eq!(http.upstreams[0].servers[1].host, "demo-gui");
         assert_eq!(http.upstreams[0].servers[1].port, 80);
         assert!(http.upstreams[0].health_check.is_none());
@@ -596,6 +598,100 @@ http {
             vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
                 Url::parse("http://backend").unwrap(),
             ))]
+        );
+    }
+
+    #[test]
+    fn from_ast_parses_weighted_consistent_hash_upstream() {
+        let input = r#"
+http {
+  upstream backend {
+    policy consistent_hash;
+    hash_key header X-Tenant-ID;
+    server 127.0.0.1:8080 weight=3;
+    server 127.0.0.1:8081 weight=1;
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+        let upstream = &ir.http.expect("http missing").upstreams[0];
+
+        assert_eq!(upstream.policy, UpstreamSelectionPolicy::ConsistentHash);
+        assert_eq!(
+            upstream.hash_key,
+            Some(UpstreamHashKey::Header("X-Tenant-ID".into()))
+        );
+        assert_eq!(upstream.servers[0].weight, 3);
+        assert_eq!(upstream.servers[1].weight, 1);
+    }
+
+    #[test]
+    fn from_ast_rejects_hash_key_without_consistent_hash_policy() {
+        let input = r#"
+http {
+  upstream backend {
+    hash_key client_ip;
+    server 127.0.0.1:8080;
+  }
+  server {
+    listen 8080;
+    location / {
+      proxy_pass http://backend;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+        let err = ir
+            .validate()
+            .expect_err("hash_key must require consistent_hash");
+
+        assert!(
+            err.message
+                .contains("hash_key requires policy consistent_hash")
+        );
+    }
+
+    #[test]
+    fn from_ast_rejects_invalid_upstream_weight() {
+        let input = r#"
+http {
+  upstream backend {
+    server 127.0.0.1:8080 weight=0;
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("zero weight must fail");
+
+        assert!(err.message.contains("weight must be greater than zero"));
+    }
+
+    #[test]
+    fn validation_rejects_excessive_total_upstream_weight() {
+        let input = r#"
+http {
+  upstream backend {
+    server 127.0.0.1:8080 weight=65535;
+    server 127.0.0.1:8081 weight=1;
+  }
+  server {
+    listen 8080;
+    location / {
+      proxy_pass http://backend;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+        let err = ir.validate().expect_err("excessive total weight must fail");
+
+        assert!(
+            err.message
+                .contains("total backend weight must not exceed 65535")
         );
     }
 
