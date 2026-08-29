@@ -49,34 +49,6 @@ docker run --rm \
   paramoshka/ngxora:latest
 ```
 
-## CI and image publishing
-
-GitHub Actions runs both CI jobs on GitHub-hosted `ubuntu-latest` runners; no
-self-hosted runner is required:
-
-- `test` runs `make test` for pushes to `main`, tags, and pull requests;
-- `build-and-publish` runs after tests and builds the binary and Docker image;
-- pull requests build but do not publish images;
-- pushes to `main` publish `paramoshka/ngxora:latest` to Docker Hub;
-- tag builds install Grype, scan the image, and publish the matching tag.
-
-Image publishing requires these repository secrets:
-
-| Secret | Purpose |
-| --- | --- |
-| `REGISTRY_USERNAME` | Docker Hub username used by `docker login` |
-| `REGISTRY_TOKEN` | Docker Hub access token; prefer a scoped token over an account password |
-
-The workflow installs its system packages, Rust toolchain, and Go toolchain on
-each fresh runner and caches Cargo artifacts between runs. If a self-hosted
-runner is still registered in the repository settings, it can be removed after
-a successful hosted run because the workflow has no `self-hosted` label.
-
-Standard GitHub-hosted runners are free for public repositories. Private
-repositories consume the Actions minutes included in the account plan. See the
-[GitHub-hosted runners reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
-and [Actions limits](https://docs.github.com/en/actions/reference/limits).
-
 ## nginx-style config
 
 ```nginx
@@ -251,90 +223,31 @@ not currently claim SCP, SEPP, NRF, or general 3GPP conformance.
 
 ## Dynamic config
 
-The runtime is built around atomic snapshot apply:
+The runtime applies routing, upstream, plugin, and existing-listener TLS updates
+through atomic snapshots. Listener topology changes are reported as
+`restart_required`.
 
-- routing can be swapped live
-- upstreams can be changed live
-- SNI certificate maps can be changed live on existing listeners
-- Let's Encrypt configuration can be applied via snapshot
-- listener topology changes are detected and reported as `restart_required`
-
-You can now start the built-in Rust gRPC control plane alongside the proxy:
-
-```bash
-cargo run -- \
-  --grpc-addr 0.0.0.0:50051 \
-  --grpc-tls-cert /var/run/ngxora/grpc/server.crt \
-  --grpc-tls-key /var/run/ngxora/grpc/server.key \
-  --grpc-client-ca /var/run/ngxora/grpc/controller-ca.crt \
-  examples/basic/ngxora.conf
-```
-
-Every TCP control-plane listener requires mTLS, including loopback. The server
-certificate must cover the address used by the controller, and
-`--grpc-client-ca` must contain only the CA that issues controller client
-certificates. Plaintext TCP and `--unsafe-grpc-listen` are not supported.
-
-For Kubernetes, mount the server keypair and dedicated controller CA from a
-read-only Secret (for example at `/var/run/ngxora/grpc`) with `defaultMode:
-0400`. Use separate Secrets for the server identity and the controller client
-identity. Certificate rotation requires a Pod rollout; certificate files are
-read once during process startup.
-
-For sidecar-style local control, use a Unix domain socket instead:
+For local control, start the gRPC control plane on a Unix domain socket:
 
 ```bash
 cargo run -- --grpc-uds /tmp/ngxora-control.sock examples/basic/ngxora.conf
 ```
 
-The socket is created with mode `0600`.
-
-And inspect the current snapshot with the example Rust client:
+Inspect the current snapshot with the example Rust client:
 
 ```bash
 cargo run -p ngxora-runtime --example get_snapshot -- --uds /tmp/ngxora-control.sock
 ```
 
-For remote TCP, the same client uses its own mTLS identity:
-
-```bash
-cargo run -p ngxora-runtime --example get_snapshot -- \
-  --addr https://ngxora-control.default.svc:50051 \
-  --tls-ca /var/run/controller/ngxora-server-ca.crt \
-  --tls-cert /var/run/controller/tls.crt \
-  --tls-key /var/run/controller/tls.key
-```
-
-Push a minimal replacement snapshot back into `ngxora`:
-
-```bash
-cargo run -p ngxora-runtime --example apply_snapshot -- \
-  --uds /tmp/ngxora-control.sock \
-  --version manual-v2 \
-  --server-name localhost \
-  --upstream-host example.com \
-  --upstream-port 80
-```
-
-The same `control.proto` can also generate a Go SDK for an external agent:
+Generate the Go control-plane SDK with:
 
 ```bash
 make gen-go-sdk
 ```
 
-That emits Go bindings under `sdk/go/ngxora/control/v1`.
-
-## Security roadmap
-
-TCP control-plane access uses mutual TLS with a dedicated controller CA. The
-remaining work is authorization and operation-level protection:
-
-- authorization policy for authenticated controller identities
-- rate limiting and audit logging for snapshot operations
-- protected-header policy for mutation plugins such as `headers`
-
-Route and TLS snapshot updates are already part of the runtime model, but
-authenticated identities are not yet restricted by certificate subject or SAN.
+See the [reload matrix](./docs/README.md), [snapshot schema](./docs/snapshot-schema.md),
+and [Go SDK guide](./sdk/go/README.md) for the complete control-plane contract,
+TCP mTLS setup, and live/restart boundaries.
 
 ## Plugins
 
@@ -345,9 +258,6 @@ Current shape:
 - plugin registry with feature-gated registration
 - built-in `headers`, `basic-auth`, `rate-limit`, `cors`, `ext_authz`, and `jwt_auth` extensions
 - `plugins.cfg` + `make build-bin` for build-time plugin selection
-
-Later plugin roadmap:
-- `geoip`
 
 Text config syntax for built-in location plugins is documented in [Config Options](./docs/config-options.md).
 

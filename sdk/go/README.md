@@ -1,6 +1,6 @@
 # Go SDK
 
-This module contains Go bindings generated from [`crates/ngxora-runtime/proto/control.proto`](/home/ivan/projects/pet/ngxora/crates/ngxora-runtime/proto/control.proto).
+This module contains Go bindings generated from [`crates/ngxora-runtime/proto/control.proto`](../../crates/ngxora-runtime/proto/control.proto).
 
 Generate or refresh the SDK from the repository root:
 

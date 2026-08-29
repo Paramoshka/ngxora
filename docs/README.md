@@ -6,7 +6,7 @@ The table below describes `gRPC ApplySnapshot` behavior for the current runtime 
 
 For supported directives, upstream policies, and built-in plugin syntax, see [Config Options](./config-options.md).
 
-For implementation discipline on new options and plugins, see [Feature Checklist](/home/ivan/projects/pet/ngxora/docs/feature-checklist.md).
+For implementation discipline on new options and plugins, see [Feature Checklist](./feature-checklist.md).
 
 For durable architecture choices, see [ADRs](./adr/README.md).
 
@@ -59,7 +59,7 @@ http {
 | Option | Scope | gRPC ApplySnapshot | Notes |
 | --- | --- | --- | --- |
 | `location` / `proxy_pass` | route | Live | Applied through `RuntimeState` swap |
-| `upstream` blocks / backend sets | upstream group | Live | Rebuilds named backend pools, current selection policy state (`round_robin`, `random`), and configured upstream health checks |
+| `upstream` blocks / backend sets | upstream group | Live | Rebuilds weighted backend pools, selection state (`round_robin`, `random`, `consistent_hash`), hash keys, and configured health checks |
 | `proxy_connect_timeout` / `proxy_read_timeout` / `proxy_write_timeout` | route | Live | Applied to `HttpPeer.options` per selected upstream route |
 | `proxy_upstream_protocol` | route | Live | Applies upstream H1/H2/H2C selection per route; downstream listener HTTP/2 policy is still bootstrap-only |
 | `proxy_ssl_verify` | route | Live | Applied to upstream certificate and hostname verification flags per selected route |
