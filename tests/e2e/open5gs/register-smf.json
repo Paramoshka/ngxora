@@ -1,0 +1,28 @@
+{
+  "nfInstanceId": "c3b8f2c4-66bb-4a59-a334-715f25d9f3a5",
+  "nfType": "SMF",
+  "nfStatus": "REGISTERED",
+  "heartBeatTimer": 300,
+  "ipv4Addresses": ["10.248.73.20"],
+  "nfServices": [
+    {
+      "serviceInstanceId": "d9707af8-892b-45eb-b642-cdd957b4a817",
+      "serviceName": "nsmf-pdusession",
+      "versions": [
+        {
+          "apiVersionInUri": "v1",
+          "apiFullVersion": "1.0.0"
+        }
+      ],
+      "scheme": "http",
+      "nfServiceStatus": "REGISTERED",
+      "ipEndPoints": [
+        {
+          "ipv4Address": "10.248.73.20",
+          "transport": "TCP",
+          "port": 8080
+        }
+      ]
+    }
+  ]
+}

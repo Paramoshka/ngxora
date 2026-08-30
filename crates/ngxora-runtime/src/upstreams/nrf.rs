@@ -3,6 +3,7 @@ use ngxora_compile::ir::{NrfEndpointScheme, PemSource, Switch};
 use reqwest::{Certificate, Client, Identity};
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::time::Duration;
 
 const DEFAULT_VALIDITY: Duration = Duration::from_secs(30);
@@ -13,6 +14,7 @@ pub(super) struct NrfClient {
     client: Client,
 }
 
+#[derive(Debug)]
 pub(super) struct DiscoveryResult {
     pub endpoints: Vec<CompiledUpstreamServer>,
     pub validity: Duration,
@@ -69,6 +71,8 @@ impl NrfClient {
     pub(super) fn new(config: &CompiledNrfDiscovery) -> Result<Self, String> {
         let mut builder = Client::builder()
             .timeout(config.timeout)
+            .http2_prior_knowledge()
+            .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("ngxora/", env!("CARGO_PKG_VERSION")));
 
         if matches!(config.tls_options.verify_cert, Switch::Off) {
@@ -211,7 +215,10 @@ fn extract_endpoints(
             let endpoint_count = endpoints.len();
             for endpoint in service.ip_end_points {
                 let port = endpoint.port.unwrap_or(default_port);
-                if let Some(host) = endpoint.ipv4_address.or(endpoint.ipv6_address) {
+                if let Some(host) = endpoint.ipv4_address {
+                    add_endpoint(&mut endpoints, &host, port);
+                }
+                if let Some(host) = endpoint.ipv6_address {
                     add_endpoint(&mut endpoints, &host, port);
                 }
             }
@@ -235,7 +242,8 @@ fn extract_endpoints(
 
 fn add_endpoint(endpoints: &mut BTreeSet<(String, u16)>, host: &str, port: u16) {
     let host = host.trim().trim_matches(['[', ']']);
-    if host.is_empty() || port == 0 || url::Host::parse(host).is_err() {
+    let valid_host = host.parse::<IpAddr>().is_ok() || url::Host::parse(host).is_ok();
+    if host.is_empty() || port == 0 || !valid_host {
         return;
     }
     endpoints.insert((host.to_ascii_lowercase(), port));
@@ -252,7 +260,73 @@ fn read_pem_source(source: &PemSource, label: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http2;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response, StatusCode, Version};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
     use ngxora_compile::ir::UpstreamSslOptions;
+    use std::sync::{Arc, Mutex};
+
+    async fn spawn_h2_response(
+        status: StatusCode,
+        body: impl Into<Bytes>,
+        location: Option<&str>,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<(Version, String)>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind h2 test server");
+        let addr = listener.local_addr().expect("h2 test server address");
+        let body = body.into();
+        let location = location.map(str::to_string);
+        let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+        let request_tx = Arc::new(Mutex::new(Some(request_tx)));
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept h2 request");
+            let service = service_fn(move |request: Request<Incoming>| {
+                let body = body.clone();
+                let location = location.clone();
+                let request_tx = Arc::clone(&request_tx);
+                async move {
+                    if let Some(request_tx) = request_tx.lock().unwrap().take() {
+                        let _ = request_tx.send((request.version(), request.uri().to_string()));
+                    }
+                    let mut response = Response::builder().status(status);
+                    if let Some(location) = location {
+                        response = response.header("location", location);
+                    }
+                    Ok::<_, std::convert::Infallible>(
+                        response.body(Full::new(body)).expect("build h2 response"),
+                    )
+                }
+            });
+            let mut connection = Box::pin(
+                http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(socket), service),
+            );
+            let request = tokio::select! {
+                result = &mut connection => panic!("h2 connection ended early: {result:?}"),
+                request = request_rx => request.expect("observe h2 request"),
+            };
+            connection.as_mut().graceful_shutdown();
+            connection.await.expect("serve h2 response");
+            request
+        });
+        (addr, task)
+    }
+
+    fn http_config(addr: std::net::SocketAddr) -> CompiledNrfDiscovery {
+        CompiledNrfDiscovery {
+            api_root: format!("http://{addr}/nnrf-disc/v1").parse().unwrap(),
+            endpoint_scheme: NrfEndpointScheme::Http,
+            ..config()
+        }
+    }
 
     fn config() -> CompiledNrfDiscovery {
         CompiledNrfDiscovery {
@@ -293,5 +367,150 @@ mod tests {
                 weight: 1,
             }]
         );
+    }
+
+    #[test]
+    fn extracts_dual_stack_endpoints_and_deduplicates_them() {
+        let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
+            "nfInstances": [{
+                "nfStatus": "REGISTERED",
+                "nfServices": [{
+                    "serviceName": "nsmf-pdusession",
+                    "scheme": "https",
+                    "nfServiceStatus": "REGISTERED",
+                    "ipEndPoints": [
+                        {"ipv4Address":"192.0.2.10","ipv6Address":"2001:db8::10","port":8443},
+                        {"ipv4Address":"192.0.2.10","port":8443}
+                    ]
+                }]
+            }]
+        }))
+        .unwrap()
+        .nf_instances;
+
+        assert_eq!(
+            extract_endpoints(&config(), profiles),
+            vec![
+                CompiledUpstreamServer {
+                    host: "192.0.2.10".into(),
+                    port: 8443,
+                    weight: 1,
+                },
+                CompiledUpstreamServer {
+                    host: "2001:db8::10".into(),
+                    port: 8443,
+                    weight: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn uses_profile_addresses_and_default_port_as_fallback() {
+        let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
+            "nfInstances": [{
+                "nfStatus": "REGISTERED",
+                "ipv4Addresses": ["192.0.2.20"],
+                "ipv6Addresses": ["2001:db8::20"],
+                "nfServices": [{
+                    "serviceName": "nsmf-pdusession",
+                    "scheme": "https",
+                    "nfServiceStatus": "REGISTERED"
+                }]
+            }]
+        }))
+        .unwrap()
+        .nf_instances;
+
+        let endpoints = extract_endpoints(&config(), profiles);
+        assert_eq!(endpoints.len(), 2);
+        assert!(endpoints.iter().all(|endpoint| endpoint.port == 443));
+    }
+
+    #[tokio::test]
+    async fn discovery_uses_h2_prior_knowledge_and_expected_query() {
+        let body = serde_json::json!({"validityPeriod": 15, "nfInstances": []}).to_string();
+        let (addr, request) = spawn_h2_response(StatusCode::OK, body, None).await;
+
+        let result = NrfClient::new(&http_config(addr))
+            .unwrap()
+            .discover()
+            .await
+            .expect("h2 discovery succeeds");
+        let (version, uri) = request.await.expect("h2 server task");
+
+        assert_eq!(version, Version::HTTP_2);
+        assert!(uri.contains("/nnrf-disc/v1/nf-instances?"));
+        assert!(uri.contains("target-nf-type=SMF"));
+        assert!(uri.contains("requester-nf-type=SCP"));
+        assert!(uri.contains("service-names=nsmf-pdusession"));
+        assert_eq!(result.validity, Duration::from_secs(15));
+        assert!(result.endpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_follow_redirects() {
+        let (addr, request) = spawn_h2_response(
+            StatusCode::TEMPORARY_REDIRECT,
+            Bytes::new(),
+            Some("http://127.0.0.1:1/redirected"),
+        )
+        .await;
+
+        let error = NrfClient::new(&http_config(addr))
+            .unwrap()
+            .discover()
+            .await
+            .expect_err("redirect must fail");
+        request.await.expect("h2 server task");
+
+        assert!(error.contains("HTTP 307"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_malformed_json() {
+        let (addr, request) = spawn_h2_response(StatusCode::OK, "{", None).await;
+
+        let error = NrfClient::new(&http_config(addr))
+            .unwrap()
+            .discover()
+            .await
+            .expect_err("malformed response must fail");
+        request.await.expect("h2 server task");
+
+        assert!(error.contains("invalid NRF SearchResult"));
+    }
+
+    #[tokio::test]
+    async fn discovery_rejects_oversized_body() {
+        let body = Bytes::from(vec![b'x'; MAX_RESPONSE_BODY + 1]);
+        let (addr, request) = spawn_h2_response(StatusCode::OK, body, None).await;
+
+        let error = NrfClient::new(&http_config(addr))
+            .unwrap()
+            .discover()
+            .await
+            .expect_err("oversized response must fail");
+        request.await.expect("h2 server task");
+
+        assert!(
+            error.contains("response exceeds"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_uses_default_validity_for_zero() {
+        let body = serde_json::json!({"validityPeriod": 0, "nfInstances": []}).to_string();
+        let (addr, request) = spawn_h2_response(StatusCode::OK, body, None).await;
+
+        let result = NrfClient::new(&http_config(addr))
+            .unwrap()
+            .discover()
+            .await
+            .expect("zero validity uses the default");
+        request.await.expect("h2 server task");
+
+        assert_eq!(result.validity, DEFAULT_VALIDITY);
     }
 }

@@ -14,7 +14,7 @@ use crate::le::ChallengeTokens;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt, future, stream};
 use ngxora_compile::ir::{
     CacheConfig, PemSource, Switch, UpstreamHashKey, UpstreamHttpProtocol, UpstreamSelectionPolicy,
     UpstreamSslOptions, UpstreamTimeouts,
@@ -44,6 +44,24 @@ use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
+
+const NRF_PREFLIGHT_CONCURRENCY: usize = 16;
+
+fn nrf_failure_retry_at(now: Instant, expires_at: Option<Instant>, failures: u32) -> Instant {
+    let exponent = failures.saturating_sub(1).min(5);
+    let backoff = Duration::from_secs((1u64 << exponent).min(30));
+    let backoff_at = now.checked_add(backoff).unwrap_or(now);
+    expires_at.map_or(backoff_at, |expires_at| backoff_at.min(expires_at))
+}
+
+fn nrf_snapshot_expiry(
+    now: Instant,
+    validity: Duration,
+    stale_if_error: Duration,
+) -> Option<Instant> {
+    now.checked_add(validity)
+        .and_then(|valid_until| valid_until.checked_add(stale_if_error))
+}
 
 pub(crate) type RuntimeTrustedCa = Arc<CaType>;
 pub(crate) type RuntimeClientIdentity = Arc<CertKey>;
@@ -207,14 +225,51 @@ impl RuntimeNrfDiscovery {
         crate::metrics::set_nrf_discovery_snapshot(&self.group_name, age, schedule.endpoint_count);
     }
 
+    async fn expire_snapshot(&self, selector: &RuntimeUpstreamSelector) {
+        if self.schedule.lock().unwrap().endpoint_count == 0 {
+            return;
+        }
+
+        self.source.set(BTreeSet::new());
+        match selector.update().await {
+            Ok(()) => self.schedule.lock().unwrap().endpoint_count = 0,
+            Err(err) => {
+                log::warn!(
+                    "NRF discovery for upstream `{}` failed to expire stale backends: {err}",
+                    self.group_name
+                );
+            }
+        }
+    }
+
+    async fn discover(
+        &self,
+        now: Instant,
+        selector: &RuntimeUpstreamSelector,
+    ) -> Result<super::nrf::DiscoveryResult, String> {
+        let expires_at = self.schedule.lock().unwrap().expires_at;
+        let Some(expires_at) = expires_at.filter(|expires_at| *expires_at > now) else {
+            return self.client.discover().await;
+        };
+
+        let request = self.client.discover();
+        tokio::pin!(request);
+        tokio::select! {
+            result = &mut request => result,
+            _ = tokio::time::sleep_until(expires_at) => {
+                self.expire_snapshot(selector).await;
+                request.await
+            }
+        }
+    }
+
     async fn record_failure(&self, now: Instant, selector: &RuntimeUpstreamSelector) -> Instant {
         crate::metrics::record_nrf_discovery_request(&self.group_name, "error");
         let (next_run_at, expired) = {
             let mut schedule = self.schedule.lock().unwrap();
             schedule.failures = schedule.failures.saturating_add(1);
-            let exponent = schedule.failures.saturating_sub(1).min(5);
-            let backoff = Duration::from_secs((1u64 << exponent).min(30));
-            schedule.next_run_at = now + backoff;
+            schedule.next_run_at =
+                nrf_failure_retry_at(now, schedule.expires_at, schedule.failures);
             (
                 schedule.next_run_at,
                 schedule
@@ -224,14 +279,7 @@ impl RuntimeNrfDiscovery {
         };
 
         if expired {
-            self.source.set(BTreeSet::new());
-            if let Err(err) = selector.update().await {
-                log::warn!(
-                    "NRF discovery for upstream `{}` failed to expire stale backends: {err}",
-                    self.group_name
-                );
-            }
-            self.schedule.lock().unwrap().endpoint_count = 0;
+            self.expire_snapshot(selector).await;
         }
         next_run_at
     }
@@ -363,14 +411,35 @@ impl RuntimeUpstreamGroup {
     pub(crate) async fn run_due_nrf_discovery(&self, now: Instant) -> Option<Instant> {
         let discovery = self.nrf_discovery.as_ref()?;
         discovery.record_metrics(now);
-        let next_run = discovery.schedule.lock().unwrap().next_run_at;
+        let (next_run, expired) = {
+            let schedule = discovery.schedule.lock().unwrap();
+            (
+                schedule.next_run_at,
+                schedule
+                    .expires_at
+                    .is_some_and(|expires_at| now >= expires_at),
+            )
+        };
+        if expired {
+            discovery.expire_snapshot(&self.selector).await;
+        }
         if now < next_run {
             return Some(next_run);
         }
 
-        discovery.schedule.lock().unwrap().next_run_at = now + Duration::from_secs(1);
-        match discovery.client.discover().await {
+        discovery.schedule.lock().unwrap().next_run_at =
+            now.checked_add(Duration::from_secs(1)).unwrap_or(now);
+        match discovery.discover(now, &self.selector).await {
             Ok(result) => {
+                let expires_at =
+                    nrf_snapshot_expiry(now, result.validity, discovery.stale_if_error);
+                let Some(expires_at) = expires_at else {
+                    log::warn!(
+                        "NRF discovery for upstream `{}` returned an unsupported validityPeriod",
+                        discovery.group_name
+                    );
+                    return Some(discovery.record_failure(now, &self.selector).await);
+                };
                 let checker = match discovery.health_check.build() {
                     Ok(checker) => checker,
                     Err(err) => {
@@ -391,12 +460,15 @@ impl RuntimeUpstreamGroup {
                         return Some(discovery.record_failure(now, &self.selector).await);
                     }
                 };
-                let mut ready = BTreeSet::new();
-                for backend in candidates {
-                    if checker.check(&backend).await.is_ok() {
-                        ready.insert(backend);
-                    }
-                }
+                let ready = stream::iter(candidates)
+                    .map(|backend| {
+                        let checker = checker.as_ref();
+                        async move { checker.check(&backend).await.is_ok().then_some(backend) }
+                    })
+                    .buffer_unordered(NRF_PREFLIGHT_CONCURRENCY)
+                    .filter_map(future::ready)
+                    .collect::<BTreeSet<_>>()
+                    .await;
 
                 let endpoint_count = ready.len();
                 discovery.source.set(ready);
@@ -410,10 +482,10 @@ impl RuntimeUpstreamGroup {
                 crate::metrics::record_nrf_discovery_request(&discovery.group_name, "success");
 
                 let delay = nrf_refresh_delay(result.validity, &discovery.group_name);
-                let next_run_at = now + delay;
+                let next_run_at = now.checked_add(delay).unwrap_or(expires_at).min(expires_at);
                 let mut schedule = discovery.schedule.lock().unwrap();
                 schedule.next_run_at = next_run_at;
-                schedule.expires_at = Some(now + result.validity + discovery.stale_if_error);
+                schedule.expires_at = Some(expires_at);
                 schedule.failures = 0;
                 schedule.last_success_at = Some(now);
                 schedule.endpoint_count = endpoint_count;
@@ -1816,6 +1888,29 @@ mod tests {
         let mut session = Session::new_h1(Box::new(server));
         session.read_request().await.expect("read request");
         session
+    }
+
+    #[test]
+    fn nrf_failure_backoff_never_schedules_past_snapshot_expiry() {
+        let now = Instant::now();
+        let expires_at = now + Duration::from_secs(5);
+
+        assert_eq!(
+            nrf_failure_retry_at(now, Some(expires_at), 1),
+            now + Duration::from_secs(1)
+        );
+        assert_eq!(nrf_failure_retry_at(now, Some(expires_at), 6), expires_at);
+    }
+
+    #[test]
+    fn nrf_snapshot_expiry_rejects_unrepresentable_validity() {
+        let now = Instant::now();
+
+        assert_eq!(
+            nrf_snapshot_expiry(now, Duration::from_secs(30), Duration::from_secs(60)),
+            Some(now + Duration::from_secs(90))
+        );
+        assert!(nrf_snapshot_expiry(now, Duration::MAX, Duration::from_secs(1)).is_none());
     }
 
     fn cached_route(cache: CacheConfig, plugins: ngxora_plugin_api::PluginChain) -> SelectedRoute {

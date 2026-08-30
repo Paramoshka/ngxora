@@ -675,6 +675,25 @@ fn proto_nrf_discovery_converts_to_ir() {
 }
 
 #[test]
+fn proto_nrf_discovery_rejects_unknown_endpoint_scheme() {
+    let error = upstreams_from_proto(&[proto::UpstreamGroup {
+        name: "smf_pool".into(),
+        nrf_discovery: Some(proto::NrfDiscovery {
+            api_root: "https://nrf.internal/nnrf-disc/v1".into(),
+            target_nf_type: "SMF".into(),
+            requester_nf_type: "SCP".into(),
+            service_name: "nsmf-pdusession".into(),
+            endpoint_scheme: 99,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }])
+    .expect_err("unknown endpoint scheme must fail");
+
+    assert!(error.contains("endpoint_scheme is required"));
+}
+
+#[test]
 fn proto_snapshot_defaults_tcp_nodelay_to_on() {
     let snapshot = proto::ConfigSnapshot {
         version: "v1".into(),

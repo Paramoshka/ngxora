@@ -32,7 +32,7 @@ CARGO_LOCK_FLAGS ?= --locked
 GO_BUILD_CACHE ?= /tmp/ngxora-go-build
 
 .PHONY: help all ci \
-        test test-unit lint \
+        test test-unit test-e2e test-open5gs lint \
         build build-bin build-image gen-go-sdk \
         publish publish-image publish-release registry-login scan-image \
         clean
@@ -62,7 +62,7 @@ image-builder:
 lint: ## Lint source code
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) fmt --check
 
-test: test-unit ## Run default test suite
+test: test-unit test-e2e ## Run default test suite
 test-unit: ## Run unit tests
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --bin $(APP)
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/ngxora-config/Cargo.toml
@@ -74,6 +74,12 @@ test-unit: ## Run unit tests
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/tls/ngxora.conf
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/sbi-ready/ngxora.conf
 	GOCACHE="$(GO_BUILD_CACHE)" $(GO) -C sdk/go test ./...
+
+test-e2e: ## Run hermetic process-level tests
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --test nrf_e2e
+
+test-open5gs: ## Run the Open5GS NRF interoperability test
+	bash tests/e2e/open5gs/run.sh
 
 # =========================
 # Build section

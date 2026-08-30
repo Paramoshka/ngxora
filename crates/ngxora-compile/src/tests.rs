@@ -817,6 +817,51 @@ http {
     }
 
     #[test]
+    fn validation_rejects_nrf_discovery_without_health_check() {
+        let input = r#"
+http {
+  upstream smf_pool {
+    nrf_discovery {
+      api_root https://nrf.internal/nnrf-disc/v1;
+      target_nf_type SMF;
+      requester_nf_type SCP;
+      service_name nsmf-pdusession;
+      endpoint_scheme https;
+    }
+  }
+  server {
+    listen 8080;
+    location / { proxy_pass https://smf_pool; }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+        let err = ir.validate().expect_err("health check must be required");
+        assert!(err.message.contains("must define health_check"));
+    }
+
+    #[test]
+    fn from_ast_rejects_missing_nrf_discovery_selector() {
+        let input = r#"
+http {
+  upstream smf_pool {
+    nrf_discovery {
+      api_root https://nrf.internal/nnrf-disc/v1;
+      target_nf_type SMF;
+      requester_nf_type SCP;
+      endpoint_scheme https;
+    }
+    health_check { type tcp; }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let err = Ir::from_ast(&ast).expect_err("service_name must be required");
+        assert!(err.message.contains("service_name is required"));
+    }
+
+    #[test]
     fn from_ast_rejects_invalid_upstream_server() {
         let input = r#"
 http {

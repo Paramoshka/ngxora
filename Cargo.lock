@@ -1885,8 +1885,12 @@ name = "ngxora"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "bytes",
  "dashmap",
  "env_logger",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "ngxora-compile",
  "ngxora-config",
  "ngxora-runtime",
@@ -1894,6 +1898,9 @@ dependencies = [
  "pingora-cache",
  "pingora-proxy",
  "rustls",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2022,6 +2029,8 @@ dependencies = [
  "dashmap",
  "futures",
  "http",
+ "http-body-util",
+ "hyper",
  "hyper-util",
  "instant-acme",
  "ipnet",

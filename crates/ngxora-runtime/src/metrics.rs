@@ -406,9 +406,11 @@ pub fn spawn_metrics_service_with_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        CacheStatus, RequestLabels, record_metrics, record_upstream_backend_metrics,
-        replace_upstream_backend_readiness,
+        CacheStatus, RequestLabels, record_metrics, record_nrf_discovery_request,
+        record_upstream_backend_metrics, replace_upstream_backend_readiness,
+        set_nrf_discovery_snapshot,
     };
+    use std::time::Duration;
 
     #[test]
     fn record_metrics_registers_collectors_in_default_registry() {
@@ -474,6 +476,25 @@ mod tests {
             "ngxora_upstream_backend_requests_total",
             "ngxora_upstream_backend_request_duration_seconds",
             "ngxora_upstream_backend_ready",
+        ] {
+            assert!(metric_names.iter().any(|name| name == expected));
+        }
+    }
+
+    #[test]
+    fn nrf_discovery_metrics_register_outcomes_and_snapshot() {
+        record_nrf_discovery_request("smf", "success");
+        record_nrf_discovery_request("smf", "error");
+        set_nrf_discovery_snapshot("smf", Duration::from_secs(3), 2);
+
+        let metric_names = prometheus::gather()
+            .into_iter()
+            .map(|family| family.name().to_string())
+            .collect::<Vec<_>>();
+        for expected in [
+            "ngxora_nrf_discovery_requests_total",
+            "ngxora_nrf_discovery_snapshot_age_seconds",
+            "ngxora_nrf_discovery_endpoints",
         ] {
             assert!(metric_names.iter().any(|name| name == expected));
         }

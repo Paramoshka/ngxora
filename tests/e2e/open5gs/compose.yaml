@@ -1,0 +1,39 @@
+services:
+  nrf:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        OPEN5GS_VERSION: v2.7.7
+    ports:
+      - "127.0.0.1::7777"
+
+  producer:
+    image: hashicorp/http-echo:1.0.0
+    command:
+      - -listen=:8080
+      - -text=open5gs-producer
+    networks:
+      default:
+        ipv4_address: 10.248.73.20
+
+  ngxora:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    command:
+      - /usr/local/bin/ngxora
+      - /etc/ngxora/open5gs.conf
+    volumes:
+      - ./ngxora.conf:/etc/ngxora/open5gs.conf:ro
+    ports:
+      - "127.0.0.1::8080"
+    depends_on:
+      - nrf
+      - producer
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.248.73.0/24

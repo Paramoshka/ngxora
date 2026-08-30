@@ -7,12 +7,18 @@ use super::{
     validate_sni_host_consistency,
 };
 use bytes::Bytes;
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::server::conn::http2;
+use hyper::service::service_fn;
+use hyper::{Request, Response};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use ipnet::IpNet;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationIpRule, LocationMatcher,
-    NrfEndpointScheme, PemSource, ProxyPassTarget, Server, SslProvider, Switch, UpstreamBlock,
-    UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy,
-    UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
+    NrfDiscovery, NrfEndpointScheme, PemSource, ProxyPassTarget, Server, SslProvider, Switch,
+    UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol,
+    UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use pingora::http::ResponseHeader;
@@ -21,8 +27,9 @@ use pingora_proxy::{ProxyHttp, Session};
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+use tokio::io::{AsyncWriteExt, duplex};
 
 #[cfg(feature = "openssl")]
 const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
@@ -876,6 +883,97 @@ fn compiled_router_maps_named_upstream_groups() {
     );
 }
 
+fn http_with_nrf_upstream(
+    api_root: &str,
+    endpoint_scheme: NrfEndpointScheme,
+    proxy_pass: &str,
+) -> Http {
+    Http {
+        upstreams: vec![UpstreamBlock {
+            name: "smf_pool".into(),
+            policy: UpstreamSelectionPolicy::RoundRobin,
+            hash_key: None,
+            servers: Vec::new(),
+            nrf_discovery: Some(NrfDiscovery {
+                api_root: api_root.into(),
+                target_nf_type: "SMF".into(),
+                requester_nf_type: "SCP".into(),
+                service_name: "nsmf-pdusession".into(),
+                endpoint_scheme,
+                timeout: Duration::from_secs(3),
+                stale_if_error: Duration::from_secs(60),
+                tls_options: UpstreamSslOptions::default(),
+            }),
+            health_check: Some(UpstreamHealthCheck {
+                check_type: UpstreamHealthCheckType::Tcp,
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_secs(5),
+                consecutive_success: 1,
+                consecutive_failure: 1,
+            }),
+        }],
+        servers: vec![Server {
+            listens: vec![Listen {
+                default_server: true,
+                ..Listen::default()
+            }],
+            locations: vec![Location {
+                matcher: LocationMatcher::Prefix("/".into()),
+                directives: vec![LocationDirective::ProxyPass(ProxyPassTarget::Url(
+                    proxy_pass.parse().unwrap(),
+                ))],
+                access_rules: Vec::new(),
+                plugins: Vec::new(),
+                cache: None,
+            }],
+            ..Server::default()
+        }],
+        ..Http::default()
+    }
+}
+
+#[test]
+fn compiled_router_rejects_nrf_api_root_query() {
+    let http = http_with_nrf_upstream(
+        "https://nrf.internal/nnrf-disc/v1?tenant=a",
+        NrfEndpointScheme::Https,
+        "https://smf_pool",
+    );
+
+    let error = CompiledRouter::from_http(&http).expect_err("query must be rejected");
+    assert!(error.contains("must not contain a query or fragment"));
+}
+
+#[test]
+fn compiled_router_rejects_nrf_route_scheme_mismatch() {
+    let http = http_with_nrf_upstream(
+        "https://nrf.internal/nnrf-disc/v1",
+        NrfEndpointScheme::Https,
+        "http://smf_pool",
+    );
+
+    let error = CompiledRouter::from_http(&http).expect_err("route scheme must match");
+    assert!(error.contains("must match endpoint_scheme https"));
+}
+
+#[test]
+fn compiled_router_rejects_incomplete_nrf_client_identity() {
+    let mut http = http_with_nrf_upstream(
+        "https://nrf.internal/nnrf-disc/v1",
+        NrfEndpointScheme::Https,
+        "https://smf_pool",
+    );
+    http.upstreams[0]
+        .nrf_discovery
+        .as_mut()
+        .unwrap()
+        .tls_options
+        .client_certificate = Some(PemSource::InlinePem("certificate".into()));
+
+    let error = CompiledRouter::from_http(&http).expect_err("identity pair must be required");
+    assert!(error.contains("must be configured together"));
+}
+
 #[test]
 fn runtime_upstream_group_round_robins_backends() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
@@ -1382,20 +1480,36 @@ async fn nrf_discovery_preflights_and_publishes_reachable_backend() {
         }]
     })
     .to_string();
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let request_tx = Arc::new(Mutex::new(Some(request_tx)));
     let mock = tokio::spawn(async move {
-        let (mut socket, _) = nrf.accept().await.expect("accept NRF request");
-        let mut request = vec![0; 4096];
-        let read = socket.read(&mut request).await.expect("read NRF request");
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
+        let (socket, _) = nrf.accept().await.expect("accept NRF request");
+        let service = service_fn(move |request: Request<Incoming>| {
+            let body = body.clone();
+            let request_tx = Arc::clone(&request_tx);
+            async move {
+                if let Some(request_tx) = request_tx.lock().unwrap().take() {
+                    let _ = request_tx.send(request.uri().to_string());
+                }
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from(body)))
+                        .unwrap(),
+                )
+            }
+        });
+        let mut connection = Box::pin(
+            http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(socket), service),
         );
-        socket
-            .write_all(response.as_bytes())
-            .await
-            .expect("write NRF response");
-        String::from_utf8_lossy(&request[..read]).into_owned()
+        let request = tokio::select! {
+            result = &mut connection => panic!("NRF connection ended early: {result:?}"),
+            request = request_rx => request.expect("observe NRF request"),
+        };
+        connection.as_mut().graceful_shutdown();
+        connection.await.expect("serve NRF response");
+        request
     });
 
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
