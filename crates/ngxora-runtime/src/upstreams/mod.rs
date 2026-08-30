@@ -9,14 +9,15 @@
 
 mod compile;
 mod health;
+mod nrf;
 mod routing;
 mod runtime;
 mod types;
 
 pub use runtime::{DynamicProxy, ProxyContext, RuntimeUpstreamGroup};
 pub use types::{
-    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter,
-    CompiledUpstreamGroup, CompiledUpstreamServer, CompliedRouter, HealthCheckType,
+    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledNrfDiscovery, CompiledRegex,
+    CompiledRouter, CompiledUpstreamGroup, CompiledUpstreamServer, CompliedRouter, HealthCheckType,
     HttpRuntimeOptions, ListenKey, ListenerProtocolConfig, ListenerTlsConfig, ListenerTlsSettings,
     RouteTarget, ServerRoutes, VirtualHostRoutes,
 };

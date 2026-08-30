@@ -148,6 +148,18 @@ message UpstreamGroup {
   UpstreamSelectionPolicy policy = 3;
   UpstreamHealthCheck health_check = 4;
   UpstreamHashKey hash_key = 5;
+  NrfDiscovery nrf_discovery = 6;
+}
+
+message NrfDiscovery {
+  string api_root = 1;
+  string target_nf_type = 2;
+  string requester_nf_type = 3;
+  string service_name = 4;
+  NrfEndpointScheme endpoint_scheme = 5;
+  uint64 timeout_ms = 6;
+  uint64 stale_if_error_ms = 7;
+  UpstreamTlsOptions tls_options = 8;
 }
 
 message UpstreamBackend {
@@ -200,6 +212,12 @@ enum UpstreamHttpProtocol {
   UPSTREAM_HTTP_PROTOCOL_H1 = 1;
   UPSTREAM_HTTP_PROTOCOL_H2 = 2;
   UPSTREAM_HTTP_PROTOCOL_H2C = 3;
+}
+
+enum NrfEndpointScheme {
+  NRF_ENDPOINT_SCHEME_UNSPECIFIED = 0;
+  NRF_ENDPOINT_SCHEME_HTTP = 1;
+  NRF_ENDPOINT_SCHEME_HTTPS = 2;
 }
 
 enum TlsProtocolVersion {

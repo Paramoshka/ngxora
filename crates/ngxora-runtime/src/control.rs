@@ -129,7 +129,7 @@ impl RuntimeState {
     pub fn with_registry(snapshot: ConfigSnapshot, registry: Arc<PluginRegistry>) -> Self {
         let bootstrap_config = restart_fingerprint(&snapshot.router);
         let initial_snapshot =
-            Self::build_runtime_snapshot(&registry, snapshot.version, snapshot.router, 1)
+            Self::build_runtime_snapshot(&registry, snapshot.version, snapshot.router, 1, None)
                 .expect("bootstrap snapshot plugin resolution failed");
         Self {
             current: ArcSwap::from_pointee(initial_snapshot),
@@ -180,15 +180,16 @@ impl RuntimeState {
 
         let next_version = next.version;
         let next_router = next.router;
+        let current = self.snapshot();
         let runtime_snapshot = match Self::build_runtime_snapshot(
             &self.registry,
             next_version.clone(),
             next_router,
             self.generation() + 1,
+            Some(&current),
         ) {
             Ok(snapshot) => snapshot,
             Err(message) => {
-                let current = self.snapshot();
                 return ApplyResult {
                     applied: false,
                     restart_required: false,
@@ -222,9 +223,10 @@ impl RuntimeState {
         version: String,
         router: CompiledRouter,
         generation: u64,
+        previous: Option<&RuntimeSnapshot>,
     ) -> Result<RuntimeSnapshot, String> {
         let plugin_chains = build_plugin_chains(&router, registry)?;
-        let upstream_groups = build_runtime_upstream_groups(&router)?;
+        let upstream_groups = build_runtime_upstream_groups(&router, previous)?;
         let trusted_cas = build_runtime_trusted_cas(&router)?;
         let client_identities = build_runtime_client_identities(&router)?;
 
@@ -271,6 +273,70 @@ impl InProcessControlPlane {
 pub struct RuntimeUpstreamHealthChecks {
     state: Arc<RuntimeState>,
     snapshot_refresh_interval: Duration,
+}
+
+/// RuntimeNrfDiscovery periodically refreshes NRF-backed upstream groups.
+pub struct RuntimeNrfDiscovery {
+    state: Arc<RuntimeState>,
+    snapshot_refresh_interval: Duration,
+}
+
+impl RuntimeNrfDiscovery {
+    pub fn new(state: Arc<RuntimeState>) -> Self {
+        Self {
+            state,
+            snapshot_refresh_interval: Duration::from_secs(1),
+        }
+    }
+
+    async fn run(
+        &self,
+        mut shutdown: pingora::server::ShutdownWatch,
+        mut ready_opt: Option<ServiceReadyNotifier>,
+    ) {
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+
+            let snapshot = self.state.snapshot();
+            let now = Instant::now();
+            let mut next_wake = now + self.snapshot_refresh_interval;
+            for group in snapshot.upstream_groups.values() {
+                if let Some(next_run) = group.run_due_nrf_discovery(now).await {
+                    next_wake = next_wake.min(next_run);
+                }
+            }
+
+            if let Some(ready) = ready_opt.take() {
+                ServiceReadyNotifier::notify_ready(ready);
+            }
+
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return;
+                    }
+                }
+                _ = tokio::time::sleep_until(next_wake) => {}
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl BackgroundService for RuntimeNrfDiscovery {
+    async fn start_with_ready_notifier(
+        &self,
+        shutdown: pingora::server::ShutdownWatch,
+        ready: ServiceReadyNotifier,
+    ) {
+        self.run(shutdown, Some(ready)).await
+    }
+
+    async fn start(&self, shutdown: pingora::server::ShutdownWatch) {
+        self.run(shutdown, None).await
+    }
 }
 
 impl RuntimeUpstreamHealthChecks {
@@ -388,11 +454,19 @@ fn build_plugin_chains(
 
 fn build_runtime_upstream_groups(
     router: &CompiledRouter,
+    previous: Option<&RuntimeSnapshot>,
 ) -> Result<HashMap<String, Arc<RuntimeUpstreamGroup>>, String> {
     router
         .upstreams
         .iter()
         .map(|(name, group)| {
+            if let Some(runtime_group) = previous.and_then(|snapshot| {
+                (snapshot.router.upstreams.get(name) == Some(group))
+                    .then(|| snapshot.upstream_groups.get(name).cloned())
+                    .flatten()
+            }) {
+                return Ok((name.clone(), runtime_group));
+            }
             RuntimeUpstreamGroup::from_compiled(group).map(|group| (name.clone(), Arc::new(group)))
         })
         .collect()

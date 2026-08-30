@@ -1,9 +1,11 @@
 use super::{ConfigSnapshot, InProcessControlPlane, RuntimeState};
 use crate::upstreams::{
-    CompiledLocation, CompiledMatcher, CompiledRouter, ListenKey, RouteTarget, ServerRoutes,
-    VirtualHostRoutes,
+    CompiledLocation, CompiledMatcher, CompiledRouter, CompiledUpstreamGroup,
+    CompiledUpstreamServer, ListenKey, RouteTarget, ServerRoutes, VirtualHostRoutes,
 };
-use ngxora_compile::ir::{Http, Listen, Server, Switch, UpstreamSslOptions, UpstreamTimeouts};
+use ngxora_compile::ir::{
+    Http, Listen, Server, Switch, UpstreamSelectionPolicy, UpstreamSslOptions, UpstreamTimeouts,
+};
 use ngxora_plugin_api::PluginSpec;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -96,6 +98,42 @@ fn runtime_state_applies_compatible_snapshot() {
     assert_eq!(result.active_version, "v2");
     assert_eq!(result.active_generation, 2);
     assert_eq!(snapshot.version, "v2");
+}
+
+#[test]
+fn compatible_snapshot_reuses_unchanged_runtime_upstream_group() {
+    let mut router = router_on_listener(8080);
+    router.upstreams.insert(
+        "backend".into(),
+        CompiledUpstreamGroup {
+            name: "backend".into(),
+            policy: UpstreamSelectionPolicy::RoundRobin,
+            hash_key: None,
+            servers: vec![CompiledUpstreamServer {
+                host: "127.0.0.1".into(),
+                port: 8081,
+                weight: 1,
+            }],
+            nrf_discovery: None,
+            health_check: None,
+        },
+    );
+    let state = RuntimeState::new(ConfigSnapshot::new("v1", router.clone()));
+    let before = state
+        .snapshot()
+        .upstream_group("backend")
+        .expect("runtime upstream exists")
+        .clone();
+
+    let result = state.apply_snapshot(ConfigSnapshot::new("v2", router));
+    let after = state
+        .snapshot()
+        .upstream_group("backend")
+        .expect("runtime upstream exists")
+        .clone();
+
+    assert!(result.applied);
+    assert!(Arc::ptr_eq(&before, &after));
 }
 
 #[test]

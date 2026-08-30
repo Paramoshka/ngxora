@@ -1,7 +1,7 @@
 use super::{
-    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledRegex, CompiledRouter,
-    CompiledUpstreamGroup, CompiledUpstreamServer, HealthCheckType, RouteTarget, ServerRoutes,
-    VirtualHostRoutes, apply_upstream_http_protocol, apply_upstream_ssl_options,
+    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledNrfDiscovery, CompiledRegex,
+    CompiledRouter, CompiledUpstreamGroup, CompiledUpstreamServer, HealthCheckType, RouteTarget,
+    ServerRoutes, VirtualHostRoutes, apply_upstream_http_protocol, apply_upstream_ssl_options,
     apply_upstream_timeouts, content_length_limit_exceeded, downstream_keepalive_timeout_secs,
     listener_routes, select_route_target, update_received_body_bytes, upstream_selection_key,
     validate_sni_host_consistency,
@@ -10,9 +10,9 @@ use bytes::Bytes;
 use ipnet::IpNet;
 use ngxora_compile::ir::{
     Http, KeepaliveTimeout, Listen, Location, LocationDirective, LocationIpRule, LocationMatcher,
-    PemSource, ProxyPassTarget, Server, SslProvider, Switch, UpstreamBlock, UpstreamHealthCheck,
-    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
-    UpstreamSslOptions, UpstreamTimeouts,
+    NrfEndpointScheme, PemSource, ProxyPassTarget, Server, SslProvider, Switch, UpstreamBlock,
+    UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy,
+    UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use pingora::http::ResponseHeader;
@@ -22,7 +22,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
-use tokio::io::{AsyncWriteExt, duplex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
 #[cfg(feature = "openssl")]
 const TEST_CA_PEM: &str = "-----BEGIN CERTIFICATE-----
@@ -819,6 +819,7 @@ fn compiled_router_rejects_tcp_nodelay_off() {
 fn compiled_router_maps_named_upstream_groups() {
     let http = Http {
         upstreams: vec![UpstreamBlock {
+            nrf_discovery: None,
             name: "backend".into(),
             policy: UpstreamSelectionPolicy::RoundRobin,
             hash_key: None,
@@ -878,6 +879,7 @@ fn compiled_router_maps_named_upstream_groups() {
 #[test]
 fn runtime_upstream_group_round_robins_backends() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
         hash_key: None,
@@ -909,6 +911,7 @@ fn runtime_upstream_group_round_robins_backends() {
 #[test]
 fn runtime_upstream_group_honors_round_robin_weights() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
         hash_key: None,
@@ -938,6 +941,7 @@ fn runtime_upstream_group_honors_round_robin_weights() {
 #[test]
 fn runtime_upstream_group_consistent_hash_is_stable_and_distributes_keys() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::ConsistentHash,
         hash_key: Some(ngxora_compile::ir::UpstreamHashKey::Header(
@@ -1018,6 +1022,7 @@ async fn consistent_hash_header_requires_one_nonempty_value() {
 #[test]
 fn runtime_upstream_group_random_selects_configured_backend() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::Random,
         hash_key: None,
@@ -1045,6 +1050,7 @@ fn runtime_upstream_group_random_selects_configured_backend() {
 fn compiled_router_maps_upstream_health_check() {
     let http = Http {
         upstreams: vec![UpstreamBlock {
+            nrf_discovery: None,
             name: "backend".into(),
             policy: UpstreamSelectionPolicy::RoundRobin,
             hash_key: None,
@@ -1088,6 +1094,7 @@ fn compiled_router_maps_upstream_health_check() {
 #[tokio::test]
 async fn runtime_upstream_group_tcp_health_check_marks_unreachable_backends_unhealthy() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
         hash_key: None,
@@ -1123,6 +1130,7 @@ async fn runtime_upstream_group_tcp_health_check_marks_unreachable_backends_unhe
 #[tokio::test]
 async fn runtime_upstream_group_http_health_check_marks_unreachable_backends_unhealthy() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
         hash_key: None,
@@ -1349,4 +1357,102 @@ fn apply_upstream_http_protocol_sets_peer_http_version() {
     apply_upstream_http_protocol(&mut peer, Some(UpstreamHttpProtocol::H1));
     assert_eq!(peer.options.alpn.get_min_http_version(), 1);
     assert_eq!(peer.options.alpn.get_max_http_version(), 1);
+}
+
+#[tokio::test]
+async fn nrf_discovery_preflights_and_publishes_reachable_backend() {
+    let producer = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind producer");
+    let producer_port = producer.local_addr().unwrap().port();
+    let nrf = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock NRF");
+    let nrf_addr = nrf.local_addr().unwrap();
+    let body = serde_json::json!({
+        "validityPeriod": 30,
+        "nfInstances": [{
+            "nfStatus": "REGISTERED",
+            "nfServices": [{
+                "serviceName": "nsmf-pdusession",
+                "scheme": "http",
+                "nfServiceStatus": "REGISTERED",
+                "ipEndPoints": [{"ipv4Address": "127.0.0.1", "port": producer_port}]
+            }]
+        }]
+    })
+    .to_string();
+    let mock = tokio::spawn(async move {
+        let (mut socket, _) = nrf.accept().await.expect("accept NRF request");
+        let mut request = vec![0; 4096];
+        let read = socket.read(&mut request).await.expect("read NRF request");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .expect("write NRF response");
+        String::from_utf8_lossy(&request[..read]).into_owned()
+    });
+
+    let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        name: "smf_pool".into(),
+        policy: UpstreamSelectionPolicy::RoundRobin,
+        hash_key: None,
+        servers: Vec::new(),
+        nrf_discovery: Some(CompiledNrfDiscovery {
+            api_root: format!("http://{nrf_addr}/nnrf-disc/v1").parse().unwrap(),
+            target_nf_type: "SMF".into(),
+            requester_nf_type: "SCP".into(),
+            service_name: "nsmf-pdusession".into(),
+            endpoint_scheme: NrfEndpointScheme::Http,
+            timeout: Duration::from_secs(2),
+            stale_if_error: Duration::from_secs(60),
+            tls_options: UpstreamSslOptions::default(),
+        }),
+        health_check: Some(CompiledHealthCheck {
+            check_type: HealthCheckType::Tcp,
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_secs(5),
+            consecutive_success: 1,
+            consecutive_failure: 1,
+        }),
+    })
+    .expect("build NRF upstream");
+
+    let started_at = tokio::time::Instant::now();
+    assert!(group.select(&[]).is_none());
+    group
+        .run_due_nrf_discovery(started_at)
+        .await
+        .expect("NRF discovery configured");
+    let selected = group.select(&[]).expect("discovered backend selected");
+    assert_eq!(selected.host, "127.0.0.1");
+    assert_eq!(selected.port, producer_port);
+
+    let request = mock.await.expect("mock NRF task");
+    assert!(request.contains("target-nf-type=SMF"));
+    assert!(request.contains("requester-nf-type=SCP"));
+    assert!(request.contains("service-names=nsmf-pdusession"));
+
+    group
+        .run_due_nrf_discovery(started_at + Duration::from_secs(31))
+        .await
+        .expect("NRF discovery configured");
+    assert!(
+        group.select(&[]).is_some(),
+        "last-known-good snapshot must remain available during stale window"
+    );
+
+    group
+        .run_due_nrf_discovery(started_at + Duration::from_secs(91))
+        .await
+        .expect("NRF discovery configured");
+    assert!(
+        group.select(&[]).is_none(),
+        "expired discovery snapshot must fail closed"
+    );
 }

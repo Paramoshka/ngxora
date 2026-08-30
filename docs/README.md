@@ -59,7 +59,7 @@ http {
 | Option | Scope | gRPC ApplySnapshot | Notes |
 | --- | --- | --- | --- |
 | `location` / `proxy_pass` | route | Live | Applied through `RuntimeState` swap |
-| `upstream` blocks / backend sets | upstream group | Live | Rebuilds weighted backend pools, selection state (`round_robin`, `random`, `consistent_hash`), hash keys, and configured health checks |
+| `upstream` blocks / backend sets | upstream group | Live | Rebuilds changed weighted/NRF-discovered pools, selection state, hash keys, and health checks; unchanged groups retain runtime discovery state |
 | `proxy_connect_timeout` / `proxy_read_timeout` / `proxy_write_timeout` | route | Live | Applied to `HttpPeer.options` per selected upstream route |
 | `proxy_upstream_protocol` | route | Live | Applies upstream H1/H2/H2C selection per route; downstream listener HTTP/2 policy is still bootstrap-only |
 | `proxy_ssl_verify` | route | Live | Applied to upstream certificate and hostname verification flags per selected route |

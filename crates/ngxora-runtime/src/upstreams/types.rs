@@ -1,7 +1,7 @@
 use ngxora_compile::ir::{
-    DownstreamTlsOptions, LetsEncryptConfig, Listen, LocationIpRule, LocationMatcher, PemSource,
-    TlsIdentity, TlsProtocolBounds, TlsVerifyClient, UpstreamHashKey, UpstreamHttpProtocol,
-    UpstreamSelectionPolicy, UpstreamSslOptions, UpstreamTimeouts,
+    DownstreamTlsOptions, LetsEncryptConfig, Listen, LocationIpRule, LocationMatcher,
+    NrfEndpointScheme, PemSource, TlsIdentity, TlsProtocolBounds, TlsVerifyClient, UpstreamHashKey,
+    UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use regex::{Regex, RegexBuilder};
@@ -82,11 +82,24 @@ pub struct CompiledHealthCheck {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CompiledNrfDiscovery {
+    pub api_root: url::Url,
+    pub target_nf_type: String,
+    pub requester_nf_type: String,
+    pub service_name: String,
+    pub endpoint_scheme: NrfEndpointScheme,
+    pub timeout: Duration,
+    pub stale_if_error: Duration,
+    pub tls_options: UpstreamSslOptions,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CompiledUpstreamGroup {
     pub name: String,
     pub policy: UpstreamSelectionPolicy,
     pub hash_key: Option<UpstreamHashKey>,
     pub servers: Vec<CompiledUpstreamServer>,
+    pub nrf_discovery: Option<CompiledNrfDiscovery>,
     pub health_check: Option<CompiledHealthCheck>,
 }
 

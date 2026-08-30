@@ -1,4 +1,5 @@
 use super::compile::proxy_pass_sni;
+use super::nrf::NrfClient;
 use super::routing::{ResolvedLocation, listener_routes, resolve_route};
 use super::types::{
     CompiledRouter, CompiledUpstreamGroup, CompiledUpstreamServer, ListenKey, RouteTarget,
@@ -10,6 +11,7 @@ use crate::cache::{
 };
 use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState};
 use crate::le::ChallengeTokens;
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
@@ -24,6 +26,7 @@ use ngxora_plugin_api::{
 use opentelemetry::trace::{Span, TraceContextExt};
 use pingora::Result as PingoraResult;
 use pingora::http::{RequestHeader, ResponseHeader};
+use pingora::lb::discovery::ServiceDiscovery;
 use pingora::lb::{Backend, Backends, LoadBalancer, discovery, selection};
 use pingora::protocols::l4::socket::SocketAddr as PingoraSocketAddr;
 use pingora::protocols::tls::CaType;
@@ -36,6 +39,7 @@ use pingora::utils::tls::CertKey;
 use pingora_proxy::{ProxyHttp, Session};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Display;
+use std::hash::{Hash, Hasher};
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -53,9 +57,31 @@ pub(crate) struct ClientIdentityKey {
 
 pub struct RuntimeUpstreamGroup {
     selector: RuntimeUpstreamSelector,
-    max_iterations: usize,
     hash_key: Option<UpstreamHashKey>,
     health_check: Option<RuntimeHealthCheckSchedule>,
+    nrf_discovery: Option<RuntimeNrfDiscovery>,
+}
+
+#[derive(Clone, Default)]
+struct RuntimeDiscoverySource {
+    backends: Arc<ArcSwap<BTreeSet<Backend>>>,
+}
+
+struct RuntimeNrfDiscovery {
+    group_name: String,
+    client: NrfClient,
+    source: RuntimeDiscoverySource,
+    health_check: super::CompiledHealthCheck,
+    stale_if_error: Duration,
+    schedule: Mutex<NrfRefreshSchedule>,
+}
+
+struct NrfRefreshSchedule {
+    next_run_at: Instant,
+    expires_at: Option<Instant>,
+    failures: u32,
+    last_success_at: Option<Instant>,
+    endpoint_count: usize,
 }
 
 enum RuntimeUpstreamSelector {
@@ -78,7 +104,9 @@ fn synthetic_backends(servers: &[CompiledUpstreamServer]) -> Result<BTreeSet<Bac
             ext.insert(server.clone());
 
             Ok(Backend {
-                addr: PingoraSocketAddr::Inet(synthetic_backend_addr(index)),
+                addr: PingoraSocketAddr::Inet(synthetic_backend_addr(
+                    u64::try_from(index).unwrap_or(u64::MAX),
+                )),
                 weight: usize::from(server.weight),
                 ext,
             })
@@ -86,16 +114,45 @@ fn synthetic_backends(servers: &[CompiledUpstreamServer]) -> Result<BTreeSet<Bac
         .collect()
 }
 
-fn synthetic_backend_addr(index: usize) -> SocketAddr {
-    let index = u64::try_from(index).unwrap_or(u64::MAX);
+fn dynamic_synthetic_backends(
+    servers: &[CompiledUpstreamServer],
+) -> Result<BTreeSet<Backend>, String> {
+    let mut used = BTreeSet::new();
+    servers
+        .iter()
+        .map(|server| {
+            let mut ext = http::Extensions::new();
+            ext.insert(server.clone());
+            let mut id = stable_backend_id(server);
+            while !used.insert(id) {
+                id = id.wrapping_add(1);
+            }
+
+            Ok(Backend {
+                addr: PingoraSocketAddr::Inet(synthetic_backend_addr(id)),
+                weight: usize::from(server.weight),
+                ext,
+            })
+        })
+        .collect()
+}
+
+fn stable_backend_id(server: &CompiledUpstreamServer) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    server.host.hash(&mut hasher);
+    server.port.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn synthetic_backend_addr(id: u64) -> SocketAddr {
     let ip = Ipv6Addr::new(
         0xfd00,
         0,
         0,
         0,
-        ((index >> 32) & 0xffff) as u16,
-        ((index >> 16) & 0xffff) as u16,
-        (index & 0xffff) as u16,
+        ((id >> 32) & 0xffff) as u16,
+        ((id >> 16) & 0xffff) as u16,
+        (id & 0xffff) as u16,
         1,
     );
 
@@ -103,15 +160,13 @@ fn synthetic_backend_addr(index: usize) -> SocketAddr {
 }
 
 fn build_load_balancer<S>(
-    backends: BTreeSet<Backend>,
+    backends: Backends,
     health_check: Option<&super::CompiledHealthCheck>,
 ) -> Result<LoadBalancer<S>, String>
 where
     S: selection::BackendSelection + 'static,
     S::Iter: selection::BackendIter,
 {
-    let discovery = discovery::Static::new(backends);
-    let backends = Backends::new(discovery);
     let mut lb = LoadBalancer::from_backends(backends);
     if let Some(health_check) = health_check {
         lb.set_health_check(health_check.build()?);
@@ -121,6 +176,75 @@ where
         .ok_or_else(|| "static upstream update unexpectedly blocked".to_string())?
         .map_err(|err| format!("failed to initialize upstream load balancer: {err}"))?;
     Ok(lb)
+}
+
+impl RuntimeDiscoverySource {
+    fn with_backends(backends: BTreeSet<Backend>) -> Self {
+        Self {
+            backends: Arc::new(ArcSwap::from_pointee(backends)),
+        }
+    }
+
+    fn set(&self, backends: BTreeSet<Backend>) {
+        self.backends.store(Arc::new(backends));
+    }
+}
+
+#[async_trait]
+impl ServiceDiscovery for RuntimeDiscoverySource {
+    async fn discover(&self) -> PingoraResult<(BTreeSet<Backend>, HashMap<u64, bool>)> {
+        Ok(((**self.backends.load()).clone(), HashMap::new()))
+    }
+}
+
+impl RuntimeNrfDiscovery {
+    fn record_metrics(&self, now: Instant) {
+        let schedule = self.schedule.lock().unwrap();
+        let age = schedule
+            .last_success_at
+            .map(|last_success| now.saturating_duration_since(last_success))
+            .unwrap_or_default();
+        crate::metrics::set_nrf_discovery_snapshot(&self.group_name, age, schedule.endpoint_count);
+    }
+
+    async fn record_failure(&self, now: Instant, selector: &RuntimeUpstreamSelector) -> Instant {
+        crate::metrics::record_nrf_discovery_request(&self.group_name, "error");
+        let (next_run_at, expired) = {
+            let mut schedule = self.schedule.lock().unwrap();
+            schedule.failures = schedule.failures.saturating_add(1);
+            let exponent = schedule.failures.saturating_sub(1).min(5);
+            let backoff = Duration::from_secs((1u64 << exponent).min(30));
+            schedule.next_run_at = now + backoff;
+            (
+                schedule.next_run_at,
+                schedule
+                    .expires_at
+                    .is_some_and(|expires_at| now >= expires_at),
+            )
+        };
+
+        if expired {
+            self.source.set(BTreeSet::new());
+            if let Err(err) = selector.update().await {
+                log::warn!(
+                    "NRF discovery for upstream `{}` failed to expire stale backends: {err}",
+                    self.group_name
+                );
+            }
+            self.schedule.lock().unwrap().endpoint_count = 0;
+        }
+        next_run_at
+    }
+}
+
+fn nrf_refresh_delay(validity: Duration, group_name: &str) -> Duration {
+    let identity = std::env::var("HOSTNAME").unwrap_or_else(|_| std::process::id().to_string());
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    identity.hash(&mut hasher);
+    group_name.hash(&mut hasher);
+    let percent = 70 + hasher.finish() % 21;
+    let millis = validity.as_millis().saturating_mul(u128::from(percent)) / 100;
+    Duration::from_millis(millis.max(1_000).try_into().unwrap_or(u64::MAX))
 }
 
 impl RuntimeUpstreamSelector {
@@ -140,6 +264,14 @@ impl RuntimeUpstreamSelector {
         }
     }
 
+    async fn update(&self) -> PingoraResult<()> {
+        match self {
+            Self::RoundRobin(lb) => lb.update().await,
+            Self::Random(lb) => lb.update().await,
+            Self::ConsistentHash(lb) => lb.update().await,
+        }
+    }
+
     fn backends(&self) -> &Backends {
         match self {
             Self::RoundRobin(lb) => lb.backends(),
@@ -151,14 +283,23 @@ impl RuntimeUpstreamSelector {
 
 impl RuntimeUpstreamGroup {
     pub(crate) fn from_compiled(group: &CompiledUpstreamGroup) -> Result<Self, String> {
-        if group.servers.is_empty() {
+        if group.servers.is_empty() && group.nrf_discovery.is_none() {
             return Err(format!(
-                "upstream `{}` must define at least one server",
+                "upstream `{}` must define at least one server or nrf_discovery",
                 group.name
             ));
         }
 
         let backends = synthetic_backends(&group.servers)?;
+        let nrf_source = group
+            .nrf_discovery
+            .as_ref()
+            .map(|_| RuntimeDiscoverySource::with_backends(backends.clone()));
+        let discovery: Box<dyn ServiceDiscovery + Send + Sync> = match &nrf_source {
+            Some(source) => Box::new(source.clone()),
+            None => discovery::Static::new(backends),
+        };
+        let backends = Backends::new(discovery);
         let selector = match group.policy {
             UpstreamSelectionPolicy::RoundRobin => RuntimeUpstreamSelector::RoundRobin(
                 build_load_balancer(backends, group.health_check.as_ref())?,
@@ -171,13 +312,32 @@ impl RuntimeUpstreamGroup {
             ),
         };
 
+        let nrf_discovery = match (&group.nrf_discovery, nrf_source, &group.health_check) {
+            (Some(config), Some(source), Some(health_check)) => Some(RuntimeNrfDiscovery {
+                group_name: group.name.clone(),
+                client: NrfClient::new(config)?,
+                source,
+                health_check: health_check.clone(),
+                stale_if_error: config.stale_if_error,
+                schedule: Mutex::new(NrfRefreshSchedule {
+                    next_run_at: Instant::now(),
+                    expires_at: None,
+                    failures: 0,
+                    last_success_at: None,
+                    endpoint_count: 0,
+                }),
+            }),
+            (None, None, _) => None,
+            _ => {
+                return Err(format!(
+                    "upstream `{}` has incomplete nrf_discovery runtime state",
+                    group.name
+                ));
+            }
+        };
+
         Ok(Self {
             selector,
-            max_iterations: if group.policy == UpstreamSelectionPolicy::ConsistentHash {
-                group.servers.len().max(256)
-            } else {
-                group.servers.len()
-            },
             hash_key: group.hash_key.clone(),
             health_check: group.health_check.as_ref().map(|health_check| {
                 RuntimeHealthCheckSchedule {
@@ -185,12 +345,88 @@ impl RuntimeUpstreamGroup {
                     next_run_at: Mutex::new(Instant::now()),
                 }
             }),
+            nrf_discovery,
         })
     }
 
     pub(crate) fn select(&self, key: &[u8]) -> Option<CompiledUpstreamServer> {
-        let backend = self.selector.select(key, self.max_iterations)?;
+        let backend_count = self.selector.backends().get_backend().len();
+        let max_iterations = if self.uses_consistent_hash() {
+            backend_count.max(256)
+        } else {
+            backend_count
+        };
+        let backend = self.selector.select(key, max_iterations)?;
         backend.ext.get::<CompiledUpstreamServer>().cloned()
+    }
+
+    pub(crate) async fn run_due_nrf_discovery(&self, now: Instant) -> Option<Instant> {
+        let discovery = self.nrf_discovery.as_ref()?;
+        discovery.record_metrics(now);
+        let next_run = discovery.schedule.lock().unwrap().next_run_at;
+        if now < next_run {
+            return Some(next_run);
+        }
+
+        discovery.schedule.lock().unwrap().next_run_at = now + Duration::from_secs(1);
+        match discovery.client.discover().await {
+            Ok(result) => {
+                let checker = match discovery.health_check.build() {
+                    Ok(checker) => checker,
+                    Err(err) => {
+                        log::warn!(
+                            "NRF discovery for upstream `{}` could not build preflight check: {err}",
+                            discovery.group_name
+                        );
+                        return Some(discovery.record_failure(now, &self.selector).await);
+                    }
+                };
+                let candidates = match dynamic_synthetic_backends(&result.endpoints) {
+                    Ok(candidates) => candidates,
+                    Err(err) => {
+                        log::warn!(
+                            "NRF discovery for upstream `{}` produced invalid backends: {err}",
+                            discovery.group_name
+                        );
+                        return Some(discovery.record_failure(now, &self.selector).await);
+                    }
+                };
+                let mut ready = BTreeSet::new();
+                for backend in candidates {
+                    if checker.check(&backend).await.is_ok() {
+                        ready.insert(backend);
+                    }
+                }
+
+                let endpoint_count = ready.len();
+                discovery.source.set(ready);
+                if let Err(err) = self.selector.update().await {
+                    log::warn!(
+                        "NRF discovery for upstream `{}` failed to publish backends: {err}",
+                        discovery.group_name
+                    );
+                    return Some(discovery.record_failure(now, &self.selector).await);
+                }
+                crate::metrics::record_nrf_discovery_request(&discovery.group_name, "success");
+
+                let delay = nrf_refresh_delay(result.validity, &discovery.group_name);
+                let next_run_at = now + delay;
+                let mut schedule = discovery.schedule.lock().unwrap();
+                schedule.next_run_at = next_run_at;
+                schedule.expires_at = Some(now + result.validity + discovery.stale_if_error);
+                schedule.failures = 0;
+                schedule.last_success_at = Some(now);
+                schedule.endpoint_count = endpoint_count;
+                Some(next_run_at)
+            }
+            Err(err) => {
+                log::warn!(
+                    "NRF discovery for upstream `{}` failed: {err}",
+                    discovery.group_name
+                );
+                Some(discovery.record_failure(now, &self.selector).await)
+            }
+        }
     }
 
     fn hash_key(&self) -> Option<&UpstreamHashKey> {

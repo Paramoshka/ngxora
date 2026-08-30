@@ -102,7 +102,26 @@ pub struct UpstreamBlock {
     pub policy: UpstreamSelectionPolicy,
     pub hash_key: Option<UpstreamHashKey>,
     pub servers: Vec<UpstreamServer>,
+    pub nrf_discovery: Option<NrfDiscovery>,
     pub health_check: Option<UpstreamHealthCheck>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum NrfEndpointScheme {
+    Http,
+    Https,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NrfDiscovery {
+    pub api_root: String,
+    pub target_nf_type: String,
+    pub requester_nf_type: String,
+    pub service_name: String,
+    pub endpoint_scheme: NrfEndpointScheme,
+    pub timeout: Duration,
+    pub stale_if_error: Duration,
+    pub tls_options: UpstreamSslOptions,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

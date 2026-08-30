@@ -63,6 +63,44 @@ Supported directives:
 - `health_check { ... }`
   Configures active backend health checks for the upstream group.
 
+An upstream may use NRF discovery instead of static `server` directives:
+
+```nginx
+upstream smf_pool {
+    nrf_discovery {
+        api_root https://nrf.internal/nnrf-disc/v1;
+        target_nf_type SMF;
+        requester_nf_type SCP;
+        service_name nsmf-pdusession;
+        endpoint_scheme https;
+        timeout 3s;
+        stale_if_error 60s;
+        ssl_verify on;
+    }
+
+    health_check { type tcp; }
+}
+```
+
+`nrf_discovery {}` directives:
+
+- `api_root <http-or-https-url>;` — NRF `nnrf-disc` API root.
+- `target_nf_type <type>;`, `requester_nf_type <type>;`, and
+  `service_name <name>;` — required `Nnrf_NFDiscovery` selectors.
+- `endpoint_scheme http|https;` — required scheme for discovered NF services;
+  it must match the scheme used by `proxy_pass`.
+- `timeout <duration>;` — NRF request timeout, default `3s`.
+- `stale_if_error <duration>;` — bounded last-known-good window after the NRF
+  result expires, default `60s`.
+- `ssl_verify on|off;`, `ssl_trusted_certificate`, `ssl_certificate`, and
+  `ssl_certificate_key` configure NRF TLS independently from producer TLS.
+
+`server` and `nrf_discovery` are mutually exclusive. NRF groups require a
+`health_check`; a newly discovered endpoint is published only after a successful
+preflight. Each process keeps its own in-memory snapshot and refreshes it from
+NRF using `validityPeriod`. OAuth, NF registration, and non-empty `apiPrefix`
+handling are not part of this first implementation.
+
 Supported policies:
 
 - `round_robin` - default policy

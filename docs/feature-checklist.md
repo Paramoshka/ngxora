@@ -28,6 +28,7 @@ The rule is simple:
 | HTTP/2 cleartext (h2c) | ✅ | `h2c on;` | Bootstrap | Restart | |
 | Upstream groups | ✅ | `upstream {}` | ✅ | Live | Weighted round-robin, random, consistent hash |
 | Upstream health checks | ✅ | `health_check {}` | ✅ | Live | TCP + HTTP |
+| NRF NF discovery | ✅ | `nrf_discovery {}` | ✅ | Live | Per-pod snapshot, preflight, bounded stale-on-error |
 | WebSocket proxying | ✅ | `proxy_pass` | ✅ | Live | Auto upgrade, no extra config |
 | gRPC proxying (h2/h2c) | ✅ | `proxy_upstream_protocol` | ✅ | Live | |
 | **Redirect** `return <status> <url>` | ✅ | `return 301 https://...` | ✅ | Live | Text config and gRPC snapshots map to the same runtime return target |

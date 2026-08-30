@@ -1,13 +1,13 @@
 use super::types::{
-    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledRouter, CompiledUpstreamGroup,
-    CompiledUpstreamServer, HealthCheckType, HttpRuntimeOptions, ListenKey, ListenerProtocolConfig,
-    ListenerTlsConfig, ListenerTlsSettings, RouteTarget, ServerRoutes,
+    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledNrfDiscovery, CompiledRouter,
+    CompiledUpstreamGroup, CompiledUpstreamServer, HealthCheckType, HttpRuntimeOptions, ListenKey,
+    ListenerProtocolConfig, ListenerTlsConfig, ListenerTlsSettings, RouteTarget, ServerRoutes,
 };
 use ngxora_compile::ir::{
-    DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective, PemSource,
-    ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity, UpstreamBlock, UpstreamHealthCheck,
-    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
-    UpstreamSslOptions, UpstreamTimeouts,
+    DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
+    NrfDiscovery, PemSource, ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity,
+    UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol,
+    UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -247,6 +247,49 @@ fn compile_upstream_health_check(
     })
 }
 
+fn compile_nrf_discovery(discovery: &NrfDiscovery) -> Result<CompiledNrfDiscovery, String> {
+    let api_root = url::Url::parse(&discovery.api_root)
+        .map_err(|err| format!("nrf_discovery api_root is invalid: {err}"))?;
+    if !matches!(api_root.scheme(), "http" | "https") {
+        return Err("nrf_discovery api_root must use http or https".into());
+    }
+    if api_root.host_str().is_none() || api_root.cannot_be_a_base() {
+        return Err("nrf_discovery api_root must be an absolute HTTP URL".into());
+    }
+    if api_root.query().is_some() || api_root.fragment().is_some() {
+        return Err("nrf_discovery api_root must not contain a query or fragment".into());
+    }
+    if discovery.timeout.is_zero() {
+        return Err("nrf_discovery timeout must be greater than zero".into());
+    }
+    if discovery.stale_if_error.is_zero() {
+        return Err("nrf_discovery stale_if_error must be greater than zero".into());
+    }
+    match (
+        &discovery.tls_options.client_certificate,
+        &discovery.tls_options.client_certificate_key,
+    ) {
+        (Some(_), Some(_)) | (None, None) => {}
+        _ => {
+            return Err(
+                "nrf_discovery ssl_certificate and ssl_certificate_key must be configured together"
+                    .into(),
+            );
+        }
+    }
+
+    Ok(CompiledNrfDiscovery {
+        api_root,
+        target_nf_type: discovery.target_nf_type.trim().to_ascii_uppercase(),
+        requester_nf_type: discovery.requester_nf_type.trim().to_ascii_uppercase(),
+        service_name: discovery.service_name.trim().to_string(),
+        endpoint_scheme: discovery.endpoint_scheme,
+        timeout: discovery.timeout,
+        stale_if_error: discovery.stale_if_error,
+        tls_options: discovery.tls_options.clone(),
+    })
+}
+
 fn compile_upstreams(
     upstreams: &[UpstreamBlock],
 ) -> Result<HashMap<String, CompiledUpstreamGroup>, String> {
@@ -257,9 +300,21 @@ fn compile_upstreams(
         if name.is_empty() {
             return Err("upstream name cannot be empty".into());
         }
-        if upstream.servers.is_empty() {
+        if upstream.servers.is_empty() && upstream.nrf_discovery.is_none() {
             return Err(format!(
-                "upstream `{}` must define at least one server",
+                "upstream `{}` must define at least one server or nrf_discovery",
+                upstream.name
+            ));
+        }
+        if !upstream.servers.is_empty() && upstream.nrf_discovery.is_some() {
+            return Err(format!(
+                "upstream `{}` cannot combine server directives with nrf_discovery",
+                upstream.name
+            ));
+        }
+        if upstream.nrf_discovery.is_some() && upstream.health_check.is_none() {
+            return Err(format!(
+                "upstream `{}` with nrf_discovery must define health_check",
                 upstream.name
             ));
         }
@@ -304,6 +359,11 @@ fn compile_upstreams(
                 .iter()
                 .map(compile_upstream_server)
                 .collect::<Result<Vec<_>, _>>()?,
+            nrf_discovery: upstream
+                .nrf_discovery
+                .as_ref()
+                .map(compile_nrf_discovery)
+                .transpose()?,
             health_check: upstream
                 .health_check
                 .as_ref()
@@ -380,6 +440,7 @@ fn route_target_from_directive(
             if let Some(group) = upstream_group_from_url(url, upstreams) {
                 let tls = proxy_pass_tls(url.scheme())
                     .ok_or_else(|| format!("unsupported proxy_pass scheme `{}`", url.scheme()))?;
+                validate_nrf_route_scheme(group, tls)?;
                 return Ok(Some(RouteTarget::UpstreamGroup {
                     name: group.name.clone(),
                     tls,
@@ -410,6 +471,7 @@ fn route_target_from_directive(
             let group = upstreams
                 .get(&normalized)
                 .ok_or_else(|| format!("proxy_pass references unknown upstream `{name}`"))?;
+            validate_nrf_route_scheme(group, *tls)?;
             Ok(Some(RouteTarget::UpstreamGroup {
                 name: group.name.clone(),
                 tls: *tls,
@@ -423,6 +485,24 @@ fn route_target_from_directive(
 
         _ => Ok(None),
     }
+}
+
+fn validate_nrf_route_scheme(group: &CompiledUpstreamGroup, tls: bool) -> Result<(), String> {
+    let Some(discovery) = group.nrf_discovery.as_ref() else {
+        return Ok(());
+    };
+    let expects_tls = matches!(
+        discovery.endpoint_scheme,
+        ngxora_compile::ir::NrfEndpointScheme::Https
+    );
+    if tls != expects_tls {
+        return Err(format!(
+            "proxy_pass scheme for NRF upstream `{}` must match endpoint_scheme {}",
+            group.name,
+            if expects_tls { "https" } else { "http" }
+        ));
+    }
+    Ok(())
 }
 
 fn route_target(

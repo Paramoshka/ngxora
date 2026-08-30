@@ -12,9 +12,9 @@ mod tests {
 
     use crate::ir::{
         CacheKeyMode, Ir, KeepaliveTimeout, LocationDirective, LocationIpRule, LocationMatcher,
-        PemSource, ProxyPassTarget, SslProvider, Switch, TlsProtocolBounds, TlsProtocolVersion,
-        TlsVerifyClient, UpstreamHashKey, UpstreamHealthCheckType, UpstreamHttpProtocol,
-        UpstreamSelectionPolicy,
+        NrfEndpointScheme, PemSource, ProxyPassTarget, SslProvider, Switch, TlsProtocolBounds,
+        TlsProtocolVersion, TlsVerifyClient, UpstreamHashKey, UpstreamHealthCheckType,
+        UpstreamHttpProtocol, UpstreamSelectionPolicy,
     };
     use ipnet::IpNet;
 
@@ -735,6 +735,85 @@ http {
         assert_eq!(health_check.interval, Duration::from_secs(10));
         assert_eq!(health_check.consecutive_success, 2);
         assert_eq!(health_check.consecutive_failure, 3);
+    }
+
+    #[test]
+    fn from_ast_parses_nrf_discovery_upstream() {
+        let input = r#"
+http {
+  upstream smf_pool {
+    nrf_discovery {
+      api_root https://nrf.internal/nnrf-disc/v1;
+      target_nf_type SMF;
+      requester_nf_type SCP;
+      service_name nsmf-pdusession;
+      endpoint_scheme https;
+      timeout 2s;
+      stale_if_error 45s;
+      ssl_verify on;
+      ssl_trusted_certificate /etc/ngxora/nrf/ca.pem;
+      ssl_certificate /etc/ngxora/nrf/client.crt;
+      ssl_certificate_key /etc/ngxora/nrf/client.key;
+    }
+    health_check {
+      type tcp;
+    }
+  }
+  server {
+    listen 8080;
+    location / {
+      proxy_pass https://smf_pool;
+      proxy_upstream_protocol h2;
+    }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+        ir.validate().expect("NRF config should validate");
+        let discovery = ir.http.unwrap().upstreams[0]
+            .nrf_discovery
+            .clone()
+            .expect("NRF discovery present");
+
+        assert_eq!(discovery.api_root, "https://nrf.internal/nnrf-disc/v1");
+        assert_eq!(discovery.target_nf_type, "SMF");
+        assert_eq!(discovery.requester_nf_type, "SCP");
+        assert_eq!(discovery.service_name, "nsmf-pdusession");
+        assert_eq!(discovery.endpoint_scheme, NrfEndpointScheme::Https);
+        assert_eq!(discovery.timeout, Duration::from_secs(2));
+        assert_eq!(discovery.stale_if_error, Duration::from_secs(45));
+        assert_eq!(
+            discovery.tls_options.client_certificate,
+            Some(PemSource::Path(PathBuf::from("/etc/ngxora/nrf/client.crt")))
+        );
+    }
+
+    #[test]
+    fn validation_rejects_static_and_nrf_discovery_together() {
+        let input = r#"
+http {
+  upstream smf_pool {
+    server 127.0.0.1:8443;
+    nrf_discovery {
+      api_root https://nrf.internal/nnrf-disc/v1;
+      target_nf_type SMF;
+      requester_nf_type SCP;
+      service_name nsmf-pdusession;
+      endpoint_scheme https;
+    }
+    health_check { type tcp; }
+  }
+  server {
+    listen 8080;
+    location / { proxy_pass https://smf_pool; }
+  }
+}
+"#;
+        let ast = Ast::parse_config(input).unwrap();
+        let ir = Ir::from_ast(&ast).expect("from_ast failed");
+        let err = ir.validate().expect_err("mixed discovery must fail");
+        assert!(err.message.contains("cannot combine server directives"));
     }
 
     #[test]

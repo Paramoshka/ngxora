@@ -11,6 +11,49 @@ The 3GPP baseline for future protocol semantics is Release 18:
 - [TS 29.510](https://portal.3gpp.org/desktopmodules/Specifications/SpecificationDetails.aspx?specificationId=3345) — NRF services;
 - [TS 29.571](https://www.3gpp.org/ftp/Specs/archive/29_series/29.571/) — common SBI data types.
 
+## How NRF discovery fits
+
+```mermaid
+flowchart TB
+    NRF["NRF<br/>NF registry and discovery"]
+
+    subgraph CORE["5G Core service-based architecture"]
+        AMF["AMF<br/>access and mobility"]
+        SMF["SMF<br/>PDU sessions"]
+        UDM["UDM / AUSF<br/>subscriber data and authentication"]
+        PCF["PCF / NSSF<br/>policy and slicing"]
+    end
+
+    subgraph K8S["Kubernetes"]
+        SVC["Service<br/>SBI ingress"]
+        P1["ngxora pod 1<br/>local discovery snapshot"]
+        P2["ngxora pod 2<br/>local discovery snapshot"]
+        P3["ngxora pod 3<br/>local discovery snapshot"]
+        SVC --> P1
+        SVC --> P2
+        SVC --> P3
+    end
+
+    AMF -->|"SBI HTTP/2 request"| SVC
+    UDM -->|"SBI HTTP/2 request"| SVC
+    PCF -->|"SBI HTTP/2 request"| SVC
+    P1 -->|"HTTP/2 + TLS/mTLS"| SMF
+    P2 -->|"HTTP/2 + TLS/mTLS"| SMF
+    P3 -->|"HTTP/2 + TLS/mTLS"| SMF
+
+    SMF -->|"Nnrf_NFManagement registration"| NRF
+    P1 -. "Nnrf_NFDiscovery" .-> NRF
+    P2 -. "Nnrf_NFDiscovery" .-> NRF
+    P3 -. "Nnrf_NFDiscovery" .-> NRF
+
+    UPF["UPF user plane<br/>user traffic does not traverse the SBI proxy"]
+```
+
+Solid arrows are request traffic. Dashed arrows are control-plane discovery.
+NRF is the source of truth; each ngxora pod independently keeps an in-memory
+snapshot and performs refresh and health checks. The pods do not replicate NRF
+data to one another and do not require Redis or etcd.
+
 ## Available now
 
 - upstream HTTP/2 over TLS;
@@ -21,6 +64,8 @@ The 3GPP baseline for future protocol semantics is Release 18:
 - active health checks and fail-closed `503` behavior when no backend is usable;
 - per-group/per-backend request, latency and readiness metrics;
 - structured access logs with `upstream_group` and selected backend.
+- read-only NRF NF discovery with per-pod snapshots, bounded stale-on-error,
+  preflight health checks and atomic backend replacement.
 
 These features do not interpret 3GPP messages. Headers, bodies, HTTP/2 trailers and
 unknown methods remain ordinary HTTP data and are forwarded by the Pingora proxy
@@ -28,14 +73,12 @@ path.
 
 ## Planned Release 18 semantics
 
-1. NRF client support: NF discovery, registration data consumption, caching and
-   expiry handling from TS 29.510.
-2. SCP routing policy: direct and indirect communication selection using the
+1. SCP routing policy: direct and indirect communication selection using the
    applicable TS 29.500 discovery and routing information.
-3. SBI error and control handling: `ProblemDetails`, overload/load-control data,
+2. SBI error and control handling: `ProblemDetails`, overload/load-control data,
    retries and failure classification without retrying unsafe requests blindly.
-4. OAuth 2.0 access-token acquisition and forwarding for NF service access.
-5. Conformance fixtures generated from the Release 18 3GPP OpenAPI definitions,
+3. OAuth 2.0 access-token acquisition and forwarding for NF service access.
+4. Conformance fixtures generated from the Release 18 3GPP OpenAPI definitions,
    plus negative and interoperability tests.
 
 The protocol-aware code should live as a normal ngxora crate or plugin above
@@ -47,8 +90,9 @@ is large enough to justify its own test boundary.
 ## Non-goals for the first SBI-ready release
 
 - claiming 3GPP conformance;
-- NRF discovery or NF registration;
+- NF registration or operating as an NRF server;
 - SCP/SEPP topology hiding and roaming security;
 - parsing or rewriting service-specific OpenAPI payloads;
+- routing services with a non-empty NRF `apiPrefix`;
 - trusting `X-Forwarded-For` as a hash identity without an explicit trusted-proxy
   policy.

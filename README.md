@@ -216,7 +216,8 @@ upstream sbi_pool {
 }
 ```
 
-See [`examples/sbi-ready`](./examples/sbi-ready/) for a complete config and the
+See [`examples/sbi-ready`](./examples/sbi-ready/) for static and NRF-discovered
+upstream configs and the
 [3GPP Release 18 roadmap](./docs/3gpp-roadmap.md) for the boundary between the
 available generic proxy features and planned SBI-aware behavior. `ngxora` does
 not currently claim SCP, SEPP, NRF, or general 3GPP conformance.

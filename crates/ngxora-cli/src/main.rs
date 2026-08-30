@@ -1,7 +1,8 @@
 use ngxora_compile::ir::Ir;
 use ngxora_config::{Ast, include::IncludeResolver};
 use ngxora_runtime::control::{
-    ConfigSnapshot, InProcessControlPlane, RuntimeState, RuntimeUpstreamHealthChecks,
+    ConfigSnapshot, InProcessControlPlane, RuntimeNrfDiscovery, RuntimeState,
+    RuntimeUpstreamHealthChecks,
 };
 use ngxora_runtime::grpc::{GrpcTlsConfig, spawn_control_plane, spawn_control_plane_uds};
 use ngxora_runtime::le::{self, LeReconcilerService};
@@ -113,6 +114,10 @@ fn run(cli: CliArgs) -> Result<(), String> {
         "upstream health checks",
         RuntimeUpstreamHealthChecks::new(Arc::clone(&state)),
     );
+    let nrf_discovery = background_service(
+        "NRF discovery",
+        RuntimeNrfDiscovery::new(Arc::clone(&state)),
+    );
     bind_listeners_from_state(&mut proxy, Arc::clone(control.state()))
         .map_err(|err| format!("failed to bind listeners from config: {err}"))?;
 
@@ -148,6 +153,7 @@ fn run(cli: CliArgs) -> Result<(), String> {
 
     server.add_service(proxy);
     server.add_service(upstream_health_checks);
+    server.add_service(nrf_discovery);
     server.run_forever();
 }
 

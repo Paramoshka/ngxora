@@ -2,7 +2,7 @@
 use super::set_uds_permissions;
 use super::{
     GrpcControlPlane, GrpcTlsConfig, grpc_runtime, grpc_server, proto, proto_snapshot_from_runtime,
-    runtime_snapshot_from_proto,
+    runtime_snapshot_from_proto, upstreams_from_proto,
 };
 use crate::control::{ConfigSnapshot, InProcessControlPlane, RuntimeState};
 use crate::upstreams::{
@@ -455,6 +455,7 @@ fn proto_snapshot_converts_into_runtime_router() {
             tls_options: None,
         }],
         upstreams: vec![proto::UpstreamGroup {
+            nrf_discovery: None,
             name: "backend-pool".into(),
             backends: vec![
                 proto::UpstreamBackend {
@@ -626,6 +627,51 @@ fn proto_snapshot_converts_into_runtime_router() {
             consecutive_failure: 3,
         })
     );
+}
+
+#[test]
+fn proto_nrf_discovery_converts_to_ir() {
+    let upstreams = upstreams_from_proto(&[proto::UpstreamGroup {
+        name: "smf_pool".into(),
+        backends: Vec::new(),
+        policy: proto::UpstreamSelectionPolicy::RoundRobin as i32,
+        health_check: Some(proto::UpstreamHealthCheck {
+            kind: Some(proto::upstream_health_check::Kind::Tcp(
+                proto::UpstreamTcpHealthCheck {},
+            )),
+            timeout_ms: 1_000,
+            interval_ms: 5_000,
+            consecutive_success: 1,
+            consecutive_failure: 2,
+        }),
+        hash_key: None,
+        nrf_discovery: Some(proto::NrfDiscovery {
+            api_root: "https://nrf.internal/nnrf-disc/v1".into(),
+            target_nf_type: "SMF".into(),
+            requester_nf_type: "SCP".into(),
+            service_name: "nsmf-pdusession".into(),
+            endpoint_scheme: proto::NrfEndpointScheme::Https as i32,
+            timeout_ms: 2_000,
+            stale_if_error_ms: 60_000,
+            tls_options: Some(proto::UpstreamTlsOptions {
+                verify: proto::Switch::On as i32,
+                trusted_certificate: None,
+                client_certificate: None,
+                client_certificate_key: None,
+            }),
+        }),
+    }])
+    .expect("NRF proto converts");
+
+    let discovery = upstreams[0]
+        .nrf_discovery
+        .as_ref()
+        .expect("NRF discovery present");
+    assert_eq!(discovery.target_nf_type, "SMF");
+    assert_eq!(discovery.requester_nf_type, "SCP");
+    assert_eq!(discovery.timeout, Duration::from_secs(2));
+    assert_eq!(discovery.stale_if_error, Duration::from_secs(60));
+    assert!(upstreams[0].servers.is_empty());
 }
 
 #[test]
@@ -1041,6 +1087,7 @@ fn proto_snapshot_rejects_client_cert_without_key() {
 fn router_with_tls_and_plugin() -> CompiledRouter {
     let http = Http {
         upstreams: vec![UpstreamBlock {
+            nrf_discovery: None,
             name: "backend-pool".into(),
             policy: UpstreamSelectionPolicy::ConsistentHash,
             hash_key: Some(UpstreamHashKey::Header("X-Tenant-ID".into())),

@@ -11,10 +11,11 @@ use crate::{
     consts,
     ir::{
         CacheConfig, Http, Ir, KeepaliveTimeout, LetsEncryptConfig, Listen, Location,
-        LocationDirective, LocationIpRule, LocationMatcher, PemSource, ProxyPassTarget, Server,
-        SslProvider, Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
-        UpstreamBlock, UpstreamHashKey, UpstreamHealthCheck, UpstreamHealthCheckType,
-        UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
+        LocationDirective, LocationIpRule, LocationMatcher, NrfDiscovery, NrfEndpointScheme,
+        PemSource, ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity, TlsProtocolBounds,
+        TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHashKey, UpstreamHealthCheck,
+        UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
+        UpstreamSslOptions,
     },
 };
 
@@ -356,6 +357,7 @@ fn lower_upstream(block: &Block) -> Result<UpstreamBlock, LowerErr> {
         policy: UpstreamSelectionPolicy::RoundRobin,
         hash_key: None,
         servers: Vec::new(),
+        nrf_discovery: None,
         health_check: None,
     };
 
@@ -371,6 +373,14 @@ fn lower_upstream(block: &Block) -> Result<UpstreamBlock, LowerErr> {
                     }
                     upstream.health_check = Some(lower_upstream_health_check(nested)?);
                 }
+                consts::NRF_DISCOVERY => {
+                    if upstream.nrf_discovery.is_some() {
+                        return Err(LowerErr {
+                            message: "upstream block: nrf_discovery block is duplicated".into(),
+                        });
+                    }
+                    upstream.nrf_discovery = Some(lower_nrf_discovery(nested)?);
+                }
                 _ => {
                     return Err(LowerErr {
                         message: format!(
@@ -384,6 +394,139 @@ fn lower_upstream(block: &Block) -> Result<UpstreamBlock, LowerErr> {
     }
 
     Ok(upstream)
+}
+
+#[derive(Default)]
+struct NrfDiscoveryDraft {
+    api_root: Option<String>,
+    target_nf_type: Option<String>,
+    requester_nf_type: Option<String>,
+    service_name: Option<String>,
+    endpoint_scheme: Option<NrfEndpointScheme>,
+    timeout: Option<std::time::Duration>,
+    stale_if_error: Option<std::time::Duration>,
+    tls_options: UpstreamSslOptions,
+}
+
+fn lower_nrf_discovery(block: &Block) -> Result<NrfDiscovery, LowerErr> {
+    if !block.args.is_empty() {
+        return Err(LowerErr {
+            message: "nrf_discovery block: does not accept arguments".into(),
+        });
+    }
+
+    let mut draft = NrfDiscoveryDraft::default();
+    for child in &block.children {
+        let Node::Directive(directive) = child else {
+            return Err(LowerErr {
+                message: "nrf_discovery block: nested blocks are not supported".into(),
+            });
+        };
+        apply_nrf_discovery_directive(&mut draft, directive)?;
+    }
+
+    let required = |value: Option<String>, name: &str| {
+        value.ok_or_else(|| LowerErr {
+            message: format!("nrf_discovery: {name} is required"),
+        })
+    };
+
+    Ok(NrfDiscovery {
+        api_root: required(draft.api_root, consts::API_ROOT)?,
+        target_nf_type: required(draft.target_nf_type, consts::TARGET_NF_TYPE)?,
+        requester_nf_type: required(draft.requester_nf_type, consts::REQUESTER_NF_TYPE)?,
+        service_name: required(draft.service_name, consts::SERVICE_NAME)?,
+        endpoint_scheme: draft.endpoint_scheme.ok_or_else(|| LowerErr {
+            message: "nrf_discovery: endpoint_scheme is required".into(),
+        })?,
+        timeout: draft
+            .timeout
+            .unwrap_or_else(|| std::time::Duration::from_secs(3)),
+        stale_if_error: draft
+            .stale_if_error
+            .unwrap_or_else(|| std::time::Duration::from_secs(60)),
+        tls_options: draft.tls_options,
+    })
+}
+
+fn apply_nrf_discovery_directive(
+    draft: &mut NrfDiscoveryDraft,
+    directive: &Directive,
+) -> Result<(), LowerErr> {
+    let name = directive.name.as_str();
+    match name {
+        consts::API_ROOT
+        | consts::TARGET_NF_TYPE
+        | consts::REQUESTER_NF_TYPE
+        | consts::SERVICE_NAME => {
+            let value = parse_exactly_one_argument(&directive.args, name)?;
+            if value.trim().is_empty() {
+                return Err(LowerErr {
+                    message: format!("nrf_discovery {name}: value cannot be empty"),
+                });
+            }
+            let slot = match name {
+                consts::API_ROOT => &mut draft.api_root,
+                consts::TARGET_NF_TYPE => &mut draft.target_nf_type,
+                consts::REQUESTER_NF_TYPE => &mut draft.requester_nf_type,
+                _ => &mut draft.service_name,
+            };
+            set_once(slot, value, &format!("nrf_discovery {name}"))?;
+        }
+        consts::ENDPOINT_SCHEME => {
+            let value =
+                parse_exactly_one_argument(&directive.args, "nrf_discovery endpoint_scheme")?;
+            let scheme = match value.as_str() {
+                "http" => NrfEndpointScheme::Http,
+                "https" => NrfEndpointScheme::Https,
+                _ => {
+                    return Err(LowerErr {
+                        message: format!(
+                            "nrf_discovery endpoint_scheme: unsupported value `{value}`; expected http|https"
+                        ),
+                    });
+                }
+            };
+            set_once(
+                &mut draft.endpoint_scheme,
+                scheme,
+                "nrf_discovery endpoint_scheme",
+            )?;
+        }
+        consts::TIMEOUT | consts::STALE_IF_ERROR => {
+            let context = format!("nrf_discovery {name}");
+            let value = parse_single_duration_directive(&directive.args, &context)?;
+            ensure_non_zero_duration(value, &context)?;
+            let slot = if name == consts::TIMEOUT {
+                &mut draft.timeout
+            } else {
+                &mut draft.stale_if_error
+            };
+            set_once(slot, value, &context)?;
+        }
+        consts::SSL_VERIFY => {
+            draft.tls_options.verify_cert = get_directive_switch(directive)?;
+        }
+        consts::SSL_TRUSTED_CERTIFICATE | consts::SSL_CERTIFICATE | consts::SSL_CERTIFICATE_KEY => {
+            let value = parse_exactly_one_argument(&directive.args, name)?;
+            let source =
+                PemSource::new(std::slice::from_ref(&value), false).map_err(|_| LowerErr {
+                    message: format!("nrf_discovery {name}: invalid PEM source"),
+                })?;
+            let slot = match name {
+                consts::SSL_TRUSTED_CERTIFICATE => &mut draft.tls_options.trusted_certificate,
+                consts::SSL_CERTIFICATE => &mut draft.tls_options.client_certificate,
+                _ => &mut draft.tls_options.client_certificate_key,
+            };
+            set_once(slot, source, &format!("nrf_discovery {name}"))?;
+        }
+        _ => {
+            return Err(LowerErr {
+                message: format!("unsupported nrf_discovery directive: {name}"),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn apply_server_directive(server: &mut Server, d: &Directive) -> Result<(), LowerErr> {

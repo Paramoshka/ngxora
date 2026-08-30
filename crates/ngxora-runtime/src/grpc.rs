@@ -8,11 +8,11 @@ use crate::upstreams::{
 };
 use ngxora_compile::ir::{
     CacheConfig, CacheKeyMode, DownstreamTlsOptions, Http, KeepaliveTimeout, LetsEncryptConfig,
-    Listen, Location, LocationDirective, LocationMatcher, PemSource, ProxyPassTarget, Server,
-    SslProvider, Switch, TlsIdentity, TlsProtocolBounds, TlsProtocolVersion, TlsVerifyClient,
-    UpstreamBlock, UpstreamHashKey, UpstreamHealthCheck, UpstreamHealthCheckType,
-    UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions,
-    UpstreamTimeouts,
+    Listen, Location, LocationDirective, LocationMatcher, NrfDiscovery, NrfEndpointScheme,
+    PemSource, ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity, TlsProtocolBounds,
+    TlsProtocolVersion, TlsVerifyClient, UpstreamBlock, UpstreamHashKey, UpstreamHealthCheck,
+    UpstreamHealthCheckType, UpstreamHttpProtocol, UpstreamSelectionPolicy, UpstreamServer,
+    UpstreamSslOptions, UpstreamTimeouts,
 };
 use ngxora_plugin_api::PluginSpec;
 use serde_json::Value;
@@ -44,6 +44,7 @@ use proto::{
     ConfigSnapshot as ProtoConfigSnapshot, GetSnapshotRequest as ProtoGetSnapshotRequest,
     HttpOptions as ProtoHttpOptions, LetsEncryptConfig as ProtoLetsEncryptConfig,
     Listener as ProtoListener, ListenerTlsOptions as ProtoListenerTlsOptions, Match as ProtoMatch,
+    NrfDiscovery as ProtoNrfDiscovery, NrfEndpointScheme as ProtoNrfEndpointScheme,
     PemSource as ProtoPemSource, Plugin as ProtoPlugin, Redirect as ProtoRedirect,
     Regex as ProtoRegex, Route as ProtoRoute, RouteCache as ProtoRouteCache,
     RouteTimeouts as ProtoRouteTimeouts, Switch as ProtoSwitch, TlsBinding as ProtoTlsBinding,
@@ -332,9 +333,14 @@ fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<Upstream
                 .iter()
                 .map(upstream_backend_from_proto)
                 .collect::<Result<Vec<_>, _>>()?;
-            if servers.is_empty() {
+            if servers.is_empty() && upstream.nrf_discovery.is_none() {
                 return Err(format!(
-                    "upstream group `{name}` must define at least one backend"
+                    "upstream group `{name}` must define at least one backend or nrf_discovery"
+                ));
+            }
+            if !servers.is_empty() && upstream.nrf_discovery.is_some() {
+                return Err(format!(
+                    "upstream group `{name}` cannot combine backends with nrf_discovery"
                 ));
             }
 
@@ -347,6 +353,11 @@ fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<Upstream
                     .map(upstream_hash_key_from_proto)
                     .transpose()?,
                 servers,
+                nrf_discovery: upstream
+                    .nrf_discovery
+                    .as_ref()
+                    .map(nrf_discovery_from_proto)
+                    .transpose()?,
                 health_check: upstream
                     .health_check
                     .as_ref()
@@ -355,6 +366,47 @@ fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<Upstream
             })
         })
         .collect()
+}
+
+fn nrf_discovery_from_proto(value: &ProtoNrfDiscovery) -> Result<NrfDiscovery, String> {
+    let required = |value: &str, field: &str| {
+        let value = value.trim();
+        if value.is_empty() {
+            Err(format!("nrf_discovery {field} is required"))
+        } else {
+            Ok(value.to_string())
+        }
+    };
+
+    let endpoint_scheme = match ProtoNrfEndpointScheme::try_from(value.endpoint_scheme)
+        .unwrap_or(ProtoNrfEndpointScheme::Unspecified)
+    {
+        ProtoNrfEndpointScheme::Http => NrfEndpointScheme::Http,
+        ProtoNrfEndpointScheme::Https => NrfEndpointScheme::Https,
+        ProtoNrfEndpointScheme::Unspecified => {
+            return Err("nrf_discovery endpoint_scheme is required".into());
+        }
+    };
+
+    Ok(NrfDiscovery {
+        api_root: required(&value.api_root, "api_root")?,
+        target_nf_type: required(&value.target_nf_type, "target_nf_type")?,
+        requester_nf_type: required(&value.requester_nf_type, "requester_nf_type")?,
+        service_name: required(&value.service_name, "service_name")?,
+        endpoint_scheme,
+        timeout: Duration::from_millis(if value.timeout_ms == 0 {
+            3_000
+        } else {
+            value.timeout_ms
+        }),
+        stale_if_error: Duration::from_millis(if value.stale_if_error_ms == 0 {
+            60_000
+        } else {
+            value.stale_if_error_ms
+        }),
+        tls_options: upstream_tls_options_from_proto(value.tls_options.as_ref())?
+            .unwrap_or_default(),
+    })
 }
 
 // ListenerDef normalizes wire listeners into one listener record that can be
@@ -920,8 +972,34 @@ fn proto_upstreams_from_runtime(
                 .hash_key
                 .as_ref()
                 .map(proto_upstream_hash_key_from_runtime),
+            nrf_discovery: group
+                .nrf_discovery
+                .as_ref()
+                .map(proto_nrf_discovery_from_runtime),
         })
         .collect()
+}
+
+fn proto_nrf_discovery_from_runtime(
+    value: &crate::upstreams::CompiledNrfDiscovery,
+) -> ProtoNrfDiscovery {
+    ProtoNrfDiscovery {
+        api_root: value.api_root.to_string().trim_end_matches('/').to_string(),
+        target_nf_type: value.target_nf_type.clone(),
+        requester_nf_type: value.requester_nf_type.clone(),
+        service_name: value.service_name.clone(),
+        endpoint_scheme: match value.endpoint_scheme {
+            NrfEndpointScheme::Http => ProtoNrfEndpointScheme::Http as i32,
+            NrfEndpointScheme::Https => ProtoNrfEndpointScheme::Https as i32,
+        },
+        timeout_ms: value.timeout.as_millis().try_into().unwrap_or(u64::MAX),
+        stale_if_error_ms: value
+            .stale_if_error
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+        tls_options: Some(proto_upstream_tls_options_from_runtime(&value.tls_options)),
+    }
 }
 
 fn proto_upstream_hash_key_from_runtime(value: &UpstreamHashKey) -> ProtoUpstreamHashKey {

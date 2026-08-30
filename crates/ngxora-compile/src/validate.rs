@@ -17,6 +17,30 @@ impl Ir {
         }
 
         for upstream in &http.upstreams {
+            if upstream.servers.is_empty() && upstream.nrf_discovery.is_none() {
+                return Err(ValidateErr {
+                    message: format!(
+                        "upstream `{}` must define at least one server or nrf_discovery",
+                        upstream.name
+                    ),
+                });
+            }
+            if !upstream.servers.is_empty() && upstream.nrf_discovery.is_some() {
+                return Err(ValidateErr {
+                    message: format!(
+                        "upstream `{}` cannot combine server directives with nrf_discovery",
+                        upstream.name
+                    ),
+                });
+            }
+            if upstream.nrf_discovery.is_some() && upstream.health_check.is_none() {
+                return Err(ValidateErr {
+                    message: format!(
+                        "upstream `{}` with nrf_discovery must define health_check",
+                        upstream.name
+                    ),
+                });
+            }
             let total_weight = upstream.servers.iter().try_fold(0u32, |total, server| {
                 if server.weight == 0 {
                     return Err(ValidateErr {

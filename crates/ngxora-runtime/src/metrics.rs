@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 // ---- Registry ----
 
@@ -142,12 +143,63 @@ fn upstream_backend_ready() -> &'static IntGaugeVec {
     )
 }
 
+fn nrf_discovery_requests_total() -> &'static IntCounterVec {
+    metric!(
+        IntCounterVec,
+        IntCounterVec::new,
+        Opts::new(
+            "ngxora_nrf_discovery_requests_total",
+            "Total NRF discovery requests by outcome."
+        ),
+        &["upstream_group", "result"]
+    )
+}
+
+fn nrf_discovery_snapshot_age_seconds() -> &'static IntGaugeVec {
+    metric!(
+        IntGaugeVec,
+        IntGaugeVec::new,
+        Opts::new(
+            "ngxora_nrf_discovery_snapshot_age_seconds",
+            "Age of the last successful NRF discovery snapshot in seconds."
+        ),
+        &["upstream_group"]
+    )
+}
+
+fn nrf_discovery_endpoints() -> &'static IntGaugeVec {
+    metric!(
+        IntGaugeVec,
+        IntGaugeVec::new,
+        Opts::new(
+            "ngxora_nrf_discovery_endpoints",
+            "Number of NRF-discovered endpoints published for traffic."
+        ),
+        &["upstream_group"]
+    )
+}
+
 fn readiness_series() -> &'static std::sync::Mutex<HashSet<(String, String)>> {
     static SERIES: OnceLock<std::sync::Mutex<HashSet<(String, String)>>> = OnceLock::new();
     SERIES.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
 }
 
 // ---- Metrics recording ----
+
+pub(crate) fn record_nrf_discovery_request(group: &str, result: &str) {
+    nrf_discovery_requests_total()
+        .with_label_values(&[group, result])
+        .inc();
+}
+
+pub(crate) fn set_nrf_discovery_snapshot(group: &str, age: Duration, endpoints: usize) {
+    nrf_discovery_snapshot_age_seconds()
+        .with_label_values(&[group])
+        .set(age.as_secs().try_into().unwrap_or(i64::MAX));
+    nrf_discovery_endpoints()
+        .with_label_values(&[group])
+        .set(endpoints.try_into().unwrap_or(i64::MAX));
+}
 
 /// Common labels attached to every metric.
 #[derive(Debug, Clone)]
