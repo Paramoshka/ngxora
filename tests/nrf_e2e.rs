@@ -63,6 +63,7 @@ impl MockNrf {
                                 "serviceName": "nsmf-pdusession",
                                 "scheme": "http",
                                 "nfServiceStatus": "REGISTERED",
+                                "apiPrefix": "/operator/edge/",
                                 "ipEndPoints": [{
                                     "ipv4Address": addr.ip().to_string(),
                                     "port": addr.port()
@@ -118,17 +119,23 @@ async fn spawn_mock_nrf(mock: MockNrf) -> SocketAddr {
     addr
 }
 
-async fn spawn_producer(name: &'static str) -> SocketAddr {
+async fn spawn_producer(name: &'static str) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed_requests = Arc::clone(&requests);
     tokio::spawn(async move {
         loop {
             let (socket, _) = listener.accept().await.unwrap();
+            let requests = Arc::clone(&observed_requests);
             tokio::spawn(async move {
-                let service = service_fn(move |_request: Request<Incoming>| async move {
-                    Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from_static(
-                        name.as_bytes(),
-                    ))))
+                let service = service_fn(move |request: Request<Incoming>| {
+                    requests.lock().unwrap().push(request.uri().to_string());
+                    async move {
+                        Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                            Bytes::from_static(name.as_bytes()),
+                        )))
+                    }
                 });
                 let _ = http1::Builder::new()
                     .serve_connection(TokioIo::new(socket), service)
@@ -136,7 +143,7 @@ async fn spawn_producer(name: &'static str) -> SocketAddr {
             });
         }
     });
-    addr
+    (addr, requests)
 }
 
 fn unused_loopback_port() -> u16 {
@@ -229,9 +236,10 @@ async fn wait_for_counter(counter: &AtomicUsize, minimum: usize, timeout: Durati
 async fn real_process_discovers_refreshes_and_expires_nrf_backends() {
     let mock = MockNrf::new();
     let nrf_addr = spawn_mock_nrf(mock.clone()).await;
-    let producer_a = spawn_producer("producer-a").await;
-    let producer_b = spawn_producer("producer-b").await;
+    let (producer_a, producer_a_requests) = spawn_producer("producer-a").await;
+    let (producer_b, producer_b_requests) = spawn_producer("producer-b").await;
     let proxy_port = unused_loopback_port();
+    let request_path = "/nsmf-pdusession/v1/session?trace=e2e";
     let config = format!(
         r#"
 http {{
@@ -274,7 +282,7 @@ http {{
 
     wait_for_response(
         SocketAddr::from(([127, 0, 0, 1], proxy_port)),
-        "/session",
+        request_path,
         StatusCode::SERVICE_UNAVAILABLE,
         None,
         Duration::from_secs(5),
@@ -284,7 +292,7 @@ http {{
     mock.set_mode(NrfMode::Endpoint(producer_a)).await;
     wait_for_response(
         SocketAddr::from(([127, 0, 0, 1], proxy_port)),
-        "/session",
+        request_path,
         StatusCode::OK,
         Some("producer-a"),
         Duration::from_secs(8),
@@ -294,7 +302,7 @@ http {{
     mock.set_mode(NrfMode::Endpoint(producer_b)).await;
     wait_for_response(
         SocketAddr::from(([127, 0, 0, 1], proxy_port)),
-        "/session",
+        request_path,
         StatusCode::OK,
         Some("producer-b"),
         Duration::from_secs(8),
@@ -305,7 +313,7 @@ http {{
     wait_for_counter(&mock.error_requests, 1, Duration::from_secs(5)).await;
     wait_for_response(
         SocketAddr::from(([127, 0, 0, 1], proxy_port)),
-        "/session",
+        request_path,
         StatusCode::OK,
         Some("producer-b"),
         Duration::from_secs(1),
@@ -313,7 +321,7 @@ http {{
     .await;
     wait_for_response(
         SocketAddr::from(([127, 0, 0, 1], proxy_port)),
-        "/session",
+        request_path,
         StatusCode::SERVICE_UNAVAILABLE,
         None,
         Duration::from_secs(8),
@@ -333,4 +341,16 @@ http {{
             && uri.contains("requester-nf-type=SCP")
             && uri.contains("service-names=nsmf-pdusession")
     }));
+
+    let expected_upstream_path = "/operator/edge/nsmf-pdusession/v1/session?trace=e2e";
+    for producer_requests in [&producer_a_requests, &producer_b_requests] {
+        let producer_requests = producer_requests.lock().unwrap();
+        assert!(!producer_requests.is_empty());
+        assert!(
+            producer_requests
+                .iter()
+                .all(|path| path == expected_upstream_path),
+            "unexpected producer requests: {producer_requests:?}"
+        );
+    }
 }

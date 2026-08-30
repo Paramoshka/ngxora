@@ -63,9 +63,9 @@ data to one another and do not require Redis or etcd.
   the fallback;
 - active health checks and fail-closed `503` behavior when no backend is usable;
 - per-group/per-backend request, latency and readiness metrics;
-- structured access logs with `upstream_group` and selected backend.
+- structured access logs with `upstream_group` and selected backend;
 - read-only NRF NF discovery with per-pod snapshots, bounded stale-on-error,
-  preflight health checks and atomic backend replacement.
+  preflight health checks, atomic backend replacement and `apiPrefix` routing.
 
 These features do not interpret 3GPP messages. Headers, bodies, HTTP/2 trailers and
 unknown methods remain ordinary HTTP data and are forwarded by the Pingora proxy
@@ -93,6 +93,5 @@ is large enough to justify its own test boundary.
 - NF registration or operating as an NRF server;
 - SCP/SEPP topology hiding and roaming security;
 - parsing or rewriting service-specific OpenAPI payloads;
-- routing services with a non-empty NRF `apiPrefix`;
 - trusting `X-Forwarded-For` as a hash identity without an explicit trusted-proxy
   policy.

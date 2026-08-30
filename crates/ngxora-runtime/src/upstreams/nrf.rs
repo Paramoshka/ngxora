@@ -187,13 +187,20 @@ fn extract_endpoints(
             if service.service_name != config.service_name
                 || !service.nf_service_status.eq_ignore_ascii_case("REGISTERED")
                 || !service.scheme.eq_ignore_ascii_case(expected_scheme)
-                || service
-                    .api_prefix
-                    .as_deref()
-                    .is_some_and(|prefix| !prefix.is_empty())
             {
                 continue;
             }
+            let raw_api_prefix = service.api_prefix.as_deref();
+            let api_prefix = match normalize_api_prefix(raw_api_prefix) {
+                Ok(api_prefix) => api_prefix,
+                Err(err) => {
+                    log::warn!(
+                        "ignoring NRF service `{}` with invalid apiPrefix {raw_api_prefix:?}: {err}",
+                        service.service_name,
+                    );
+                    continue;
+                }
+            };
 
             let ports = service
                 .ip_end_points
@@ -207,7 +214,7 @@ fn extract_endpoints(
                     ports
                 };
                 for port in ports {
-                    add_endpoint(&mut endpoints, host, port);
+                    add_endpoint(&mut endpoints, host, port, api_prefix.as_deref());
                 }
                 continue;
             }
@@ -216,15 +223,15 @@ fn extract_endpoints(
             for endpoint in service.ip_end_points {
                 let port = endpoint.port.unwrap_or(default_port);
                 if let Some(host) = endpoint.ipv4_address {
-                    add_endpoint(&mut endpoints, &host, port);
+                    add_endpoint(&mut endpoints, &host, port, api_prefix.as_deref());
                 }
                 if let Some(host) = endpoint.ipv6_address {
-                    add_endpoint(&mut endpoints, &host, port);
+                    add_endpoint(&mut endpoints, &host, port, api_prefix.as_deref());
                 }
             }
             if endpoints.len() == endpoint_count {
                 for host in profile.ipv4_addresses.iter().chain(&profile.ipv6_addresses) {
-                    add_endpoint(&mut endpoints, host, default_port);
+                    add_endpoint(&mut endpoints, host, default_port, api_prefix.as_deref());
                 }
             }
         }
@@ -232,21 +239,52 @@ fn extract_endpoints(
 
     endpoints
         .into_iter()
-        .map(|(host, port)| CompiledUpstreamServer {
+        .map(|(host, port, api_prefix)| CompiledUpstreamServer {
             host,
             port,
             weight: 1,
+            api_prefix,
         })
         .collect()
 }
 
-fn add_endpoint(endpoints: &mut BTreeSet<(String, u16)>, host: &str, port: u16) {
+fn normalize_api_prefix(prefix: Option<&str>) -> Result<Option<String>, String> {
+    let Some(prefix) = prefix.filter(|prefix| !prefix.is_empty()) else {
+        return Ok(None);
+    };
+    if !prefix.starts_with('/') || prefix.starts_with("//") {
+        return Err("expected an absolute path beginning with one `/`".into());
+    }
+    if prefix.contains('#') {
+        return Err("fragments are not allowed".into());
+    }
+    let path_and_query = prefix
+        .parse::<http::uri::PathAndQuery>()
+        .map_err(|err| format!("invalid path: {err}"))?;
+    if path_and_query.query().is_some() {
+        return Err("query parameters are not allowed".into());
+    }
+
+    let prefix = prefix.trim_end_matches('/');
+    Ok((!prefix.is_empty()).then(|| prefix.to_string()))
+}
+
+fn add_endpoint(
+    endpoints: &mut BTreeSet<(String, u16, Option<String>)>,
+    host: &str,
+    port: u16,
+    api_prefix: Option<&str>,
+) {
     let host = host.trim().trim_matches(['[', ']']);
     let valid_host = host.parse::<IpAddr>().is_ok() || url::Host::parse(host).is_ok();
     if host.is_empty() || port == 0 || !valid_host {
         return;
     }
-    endpoints.insert((host.to_ascii_lowercase(), port));
+    endpoints.insert((
+        host.to_ascii_lowercase(),
+        port,
+        api_prefix.map(str::to_string),
+    ));
 }
 
 fn read_pem_source(source: &PemSource, label: &str) -> Result<Vec<u8>, String> {
@@ -342,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn filters_unregistered_wrong_service_and_api_prefix() {
+    fn filters_unregistered_wrong_service_and_invalid_api_prefix() {
         let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
             "validityPeriod": 30,
             "nfInstances": [{
@@ -365,8 +403,78 @@ mod tests {
                 host: "smf.example".into(),
                 port: 8443,
                 weight: 1,
+                api_prefix: None,
             }]
         );
+    }
+
+    #[test]
+    fn preserves_distinct_normalized_api_prefixes_for_the_same_endpoint() {
+        let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
+            "nfInstances": [{
+                "nfStatus": "REGISTERED",
+                "nfServices": [
+                    {
+                        "serviceName": "nsmf-pdusession",
+                        "scheme": "https",
+                        "nfServiceStatus": "REGISTERED",
+                        "apiPrefix": "/edge/a/",
+                        "ipEndPoints": [{"ipv4Address":"192.0.2.30","port":8443}]
+                    },
+                    {
+                        "serviceName": "nsmf-pdusession",
+                        "scheme": "https",
+                        "nfServiceStatus": "REGISTERED",
+                        "apiPrefix": "/edge/b",
+                        "ipEndPoints": [{"ipv4Address":"192.0.2.30","port":8443}]
+                    }
+                ]
+            }]
+        }))
+        .unwrap()
+        .nf_instances;
+
+        assert_eq!(
+            extract_endpoints(&config(), profiles),
+            vec![
+                CompiledUpstreamServer {
+                    host: "192.0.2.30".into(),
+                    port: 8443,
+                    weight: 1,
+                    api_prefix: Some("/edge/a".into()),
+                },
+                CompiledUpstreamServer {
+                    host: "192.0.2.30".into(),
+                    port: 8443,
+                    weight: 1,
+                    api_prefix: Some("/edge/b".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn validates_and_normalizes_api_prefix() {
+        assert_eq!(normalize_api_prefix(None).unwrap(), None);
+        assert_eq!(normalize_api_prefix(Some("")).unwrap(), None);
+        assert_eq!(normalize_api_prefix(Some("/")).unwrap(), None);
+        assert_eq!(
+            normalize_api_prefix(Some("/operator/edge/")).unwrap(),
+            Some("/operator/edge".into())
+        );
+
+        for invalid in [
+            "edge",
+            "//edge",
+            "/edge?tenant=a",
+            "/edge#fragment",
+            "/bad path",
+        ] {
+            assert!(
+                normalize_api_prefix(Some(invalid)).is_err(),
+                "prefix {invalid:?} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -395,11 +503,13 @@ mod tests {
                     host: "192.0.2.10".into(),
                     port: 8443,
                     weight: 1,
+                    api_prefix: None,
                 },
                 CompiledUpstreamServer {
                     host: "2001:db8::10".into(),
                     port: 8443,
                     weight: 1,
+                    api_prefix: None,
                 },
             ]
         );

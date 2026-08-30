@@ -193,6 +193,7 @@ fn compile_upstream_server(server: &UpstreamServer) -> Result<CompiledUpstreamSe
         host: server.host.clone(),
         port: server.port,
         weight: server.weight,
+        api_prefix: None,
     })
 }
 

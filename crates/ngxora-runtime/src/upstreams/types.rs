@@ -54,11 +54,16 @@ pub struct CompiledUpstreamServer {
     pub host: String,
     pub port: u16,
     pub weight: u16,
+    pub api_prefix: Option<String>,
 }
 
 impl Display for CompiledUpstreamServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.host, self.port)
+        write!(f, "{}:{}", self.host, self.port)?;
+        if let Some(prefix) = self.api_prefix.as_deref() {
+            f.write_str(prefix)?;
+        }
+        Ok(())
     }
 }
 

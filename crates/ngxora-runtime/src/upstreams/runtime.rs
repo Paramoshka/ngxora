@@ -63,6 +63,24 @@ fn nrf_snapshot_expiry(
         .and_then(|valid_until| valid_until.checked_add(stale_if_error))
 }
 
+fn prefixed_upstream_uri(uri: &http::Uri, prefix: &str) -> Result<http::Uri, String> {
+    let mut path_and_query = String::with_capacity(
+        prefix
+            .len()
+            .saturating_add(uri.path_and_query().map_or(1, |value| value.as_str().len())),
+    );
+    path_and_query.push_str(prefix);
+    path_and_query.push_str(uri.path());
+    if let Some(query) = uri.query() {
+        path_and_query.push('?');
+        path_and_query.push_str(query);
+    }
+
+    path_and_query
+        .parse()
+        .map_err(|err| format!("failed to apply NRF apiPrefix `{prefix}`: {err}"))
+}
+
 pub(crate) type RuntimeTrustedCa = Arc<CaType>;
 pub(crate) type RuntimeClientIdentity = Arc<CertKey>;
 
@@ -159,6 +177,7 @@ fn stable_backend_id(server: &CompiledUpstreamServer) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     server.host.hash(&mut hasher);
     server.port.hash(&mut hasher);
+    server.api_prefix.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -549,6 +568,7 @@ struct SelectedPeer {
     tls: bool,
     sni: String,
     upstream_group: Option<String>,
+    api_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -752,6 +772,7 @@ impl SelectedRoute {
                 tls: *tls,
                 sni: sni.clone(),
                 upstream_group: None,
+                api_prefix: None,
             }),
             RouteTarget::UpstreamGroup { name, tls } => {
                 let group = snapshot.upstream_group(name).ok_or_else(|| {
@@ -778,6 +799,7 @@ impl SelectedRoute {
                     port: backend.port,
                     tls: *tls,
                     upstream_group: Some(name.trim_end_matches('.').to_ascii_lowercase()),
+                    api_prefix: backend.api_prefix,
                 })
             }
         };
@@ -1486,6 +1508,14 @@ impl ProxyHttp for DynamicProxy {
             return Ok(());
         };
 
+        if let SelectedTarget::Upstream(peer) = &selected.target
+            && let Some(prefix) = peer.api_prefix.as_deref()
+        {
+            let uri = prefixed_upstream_uri(&upstream_request.uri, prefix)
+                .map_err(|err| pingora::Error::explain(pingora::ErrorType::InternalError, err))?;
+            upstream_request.set_uri(uri);
+        }
+
         let mut headers = RequestHeaderEditor {
             inner: upstream_request,
         };
@@ -1913,6 +1943,30 @@ mod tests {
         assert!(nrf_snapshot_expiry(now, Duration::MAX, Duration::from_secs(1)).is_none());
     }
 
+    #[test]
+    fn nrf_api_prefix_rewrites_path_and_preserves_query() {
+        let uri: http::Uri = "/nsmf-pdusession/v1/sm-contexts?trace=1".parse().unwrap();
+
+        assert_eq!(
+            prefixed_upstream_uri(&uri, "/operator/edge")
+                .unwrap()
+                .to_string(),
+            "/operator/edge/nsmf-pdusession/v1/sm-contexts?trace=1"
+        );
+    }
+
+    #[test]
+    fn nrf_api_prefix_preserves_root_path_separator() {
+        let uri: http::Uri = "/".parse().unwrap();
+
+        assert_eq!(
+            prefixed_upstream_uri(&uri, "/operator/edge")
+                .unwrap()
+                .to_string(),
+            "/operator/edge/"
+        );
+    }
+
     fn cached_route(cache: CacheConfig, plugins: ngxora_plugin_api::PluginChain) -> SelectedRoute {
         SelectedRoute {
             route_id: 1,
@@ -1923,6 +1977,7 @@ mod tests {
                 tls: false,
                 sni: String::new(),
                 upstream_group: Some("backend".into()),
+                api_prefix: None,
             }),
             upstream_timeouts: UpstreamTimeouts::default(),
             upstream_protocol: None,

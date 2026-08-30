@@ -98,8 +98,9 @@ upstream smf_pool {
 `server` and `nrf_discovery` are mutually exclusive. NRF groups require a
 `health_check`; a newly discovered endpoint is published only after a successful
 preflight. Each process keeps its own in-memory snapshot and refreshes it from
-NRF using `validityPeriod`. OAuth, NF registration, and non-empty `apiPrefix`
-handling are not part of this first implementation.
+NRF using `validityPeriod`. A discovered service `apiPrefix` is prepended to the
+upstream request path. OAuth and NF registration are not part of this first
+implementation.
 
 Supported policies:
 
