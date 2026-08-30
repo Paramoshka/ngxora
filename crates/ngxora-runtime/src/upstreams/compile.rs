@@ -194,6 +194,7 @@ fn compile_upstream_server(server: &UpstreamServer) -> Result<CompiledUpstreamSe
         port: server.port,
         weight: server.weight,
         api_prefix: None,
+        nrf_service: None,
     })
 }
 

@@ -1,4 +1,4 @@
-use super::types::{CompiledNrfDiscovery, CompiledUpstreamServer};
+use super::types::{CompiledNrfDiscovery, CompiledUpstreamServer, NrfServiceMetadata};
 use ngxora_compile::ir::{NrfEndpointScheme, PemSource, Switch};
 use reqwest::{Certificate, Client, Identity};
 use serde::Deserialize;
@@ -31,7 +31,13 @@ struct SearchResult {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NfProfile {
+    #[serde(default)]
+    nf_instance_id: Option<String>,
     nf_status: String,
+    #[serde(default)]
+    priority: Option<u64>,
+    #[serde(default)]
+    capacity: Option<u64>,
     #[serde(default)]
     fqdn: Option<String>,
     #[serde(default)]
@@ -45,9 +51,15 @@ struct NfProfile {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NfService {
+    #[serde(default)]
+    service_instance_id: Option<String>,
     service_name: String,
     scheme: String,
     nf_service_status: String,
+    #[serde(default)]
+    priority: Option<u64>,
+    #[serde(default)]
+    capacity: Option<u64>,
     #[serde(default)]
     fqdn: Option<String>,
     #[serde(default)]
@@ -183,6 +195,25 @@ fn extract_endpoints(
         if !profile.nf_status.eq_ignore_ascii_case("REGISTERED") {
             continue;
         }
+        let Some(nf_instance_id) = non_empty_id(profile.nf_instance_id.as_deref()) else {
+            log::warn!("ignoring registered NRF profile without nfInstanceId");
+            continue;
+        };
+        let profile_priority = match optional_u16(profile.priority, "profile priority") {
+            Ok(value) => value,
+            Err(err) => {
+                log::warn!("ignoring NRF profile `{nf_instance_id}`: {err}");
+                continue;
+            }
+        };
+        let profile_capacity = match optional_u16(profile.capacity, "profile capacity") {
+            Ok(value) => value,
+            Err(err) => {
+                log::warn!("ignoring NRF profile `{nf_instance_id}`: {err}");
+                continue;
+            }
+        };
+
         for service in profile.nf_services {
             if service.service_name != config.service_name
                 || !service.nf_service_status.eq_ignore_ascii_case("REGISTERED")
@@ -190,6 +221,38 @@ fn extract_endpoints(
             {
                 continue;
             }
+            let Some(service_instance_id) = non_empty_id(service.service_instance_id.as_deref())
+            else {
+                log::warn!(
+                    "ignoring NRF service `{}` without serviceInstanceId",
+                    service.service_name
+                );
+                continue;
+            };
+            let service_priority = match optional_u16(service.priority, "service priority") {
+                Ok(value) => value,
+                Err(err) => {
+                    log::warn!(
+                        "ignoring NRF service `{service_instance_id}` in profile `{nf_instance_id}`: {err}"
+                    );
+                    continue;
+                }
+            };
+            let service_capacity = match optional_u16(service.capacity, "service capacity") {
+                Ok(value) => value,
+                Err(err) => {
+                    log::warn!(
+                        "ignoring NRF service `{service_instance_id}` in profile `{nf_instance_id}`: {err}"
+                    );
+                    continue;
+                }
+            };
+            let metadata = NrfServiceMetadata {
+                nf_instance_id: nf_instance_id.to_string(),
+                service_instance_id: service_instance_id.to_string(),
+                priority: service_priority.or(profile_priority).unwrap_or(u16::MAX),
+                capacity: service_capacity.or(profile_capacity).unwrap_or(1),
+            };
             let raw_api_prefix = service.api_prefix.as_deref();
             let api_prefix = match normalize_api_prefix(raw_api_prefix) {
                 Ok(api_prefix) => api_prefix,
@@ -214,7 +277,7 @@ fn extract_endpoints(
                     ports
                 };
                 for port in ports {
-                    add_endpoint(&mut endpoints, host, port, api_prefix.as_deref());
+                    add_endpoint(&mut endpoints, host, port, api_prefix.as_deref(), &metadata);
                 }
                 continue;
             }
@@ -223,15 +286,33 @@ fn extract_endpoints(
             for endpoint in service.ip_end_points {
                 let port = endpoint.port.unwrap_or(default_port);
                 if let Some(host) = endpoint.ipv4_address {
-                    add_endpoint(&mut endpoints, &host, port, api_prefix.as_deref());
+                    add_endpoint(
+                        &mut endpoints,
+                        &host,
+                        port,
+                        api_prefix.as_deref(),
+                        &metadata,
+                    );
                 }
                 if let Some(host) = endpoint.ipv6_address {
-                    add_endpoint(&mut endpoints, &host, port, api_prefix.as_deref());
+                    add_endpoint(
+                        &mut endpoints,
+                        &host,
+                        port,
+                        api_prefix.as_deref(),
+                        &metadata,
+                    );
                 }
             }
             if endpoints.len() == endpoint_count {
                 for host in profile.ipv4_addresses.iter().chain(&profile.ipv6_addresses) {
-                    add_endpoint(&mut endpoints, host, default_port, api_prefix.as_deref());
+                    add_endpoint(
+                        &mut endpoints,
+                        host,
+                        default_port,
+                        api_prefix.as_deref(),
+                        &metadata,
+                    );
                 }
             }
         }
@@ -239,13 +320,28 @@ fn extract_endpoints(
 
     endpoints
         .into_iter()
-        .map(|(host, port, api_prefix)| CompiledUpstreamServer {
-            host,
-            port,
-            weight: 1,
-            api_prefix,
-        })
+        .map(
+            |(metadata, host, port, api_prefix)| CompiledUpstreamServer {
+                host,
+                port,
+                weight: 1,
+                api_prefix,
+                nrf_service: Some(metadata),
+            },
+        )
         .collect()
+}
+
+fn non_empty_id(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn optional_u16(value: Option<u64>, label: &str) -> Result<Option<u16>, String> {
+    value
+        .map(|value| {
+            u16::try_from(value).map_err(|_| format!("{label} must be in the range 0..=65535"))
+        })
+        .transpose()
 }
 
 fn normalize_api_prefix(prefix: Option<&str>) -> Result<Option<String>, String> {
@@ -270,10 +366,11 @@ fn normalize_api_prefix(prefix: Option<&str>) -> Result<Option<String>, String> 
 }
 
 fn add_endpoint(
-    endpoints: &mut BTreeSet<(String, u16, Option<String>)>,
+    endpoints: &mut BTreeSet<(NrfServiceMetadata, String, u16, Option<String>)>,
     host: &str,
     port: u16,
     api_prefix: Option<&str>,
+    metadata: &NrfServiceMetadata,
 ) {
     let host = host.trim().trim_matches(['[', ']']);
     let valid_host = host.parse::<IpAddr>().is_ok() || url::Host::parse(host).is_ok();
@@ -281,6 +378,7 @@ fn add_endpoint(
         return;
     }
     endpoints.insert((
+        metadata.clone(),
         host.to_ascii_lowercase(),
         port,
         api_prefix.map(str::to_string),
@@ -312,6 +410,7 @@ mod tests {
         status: StatusCode,
         body: impl Into<Bytes>,
         location: Option<&str>,
+        client_may_disconnect: bool,
     ) -> (
         std::net::SocketAddr,
         tokio::task::JoinHandle<(Version, String)>,
@@ -352,7 +451,10 @@ mod tests {
                 request = request_rx => request.expect("observe h2 request"),
             };
             connection.as_mut().graceful_shutdown();
-            connection.await.expect("serve h2 response");
+            let result = connection.await;
+            if !client_may_disconnect {
+                result.expect("serve h2 response");
+            }
             request
         });
         (addr, task)
@@ -379,18 +481,33 @@ mod tests {
         }
     }
 
+    fn metadata(
+        nf_instance_id: &str,
+        service_instance_id: &str,
+        priority: u16,
+        capacity: u16,
+    ) -> NrfServiceMetadata {
+        NrfServiceMetadata {
+            nf_instance_id: nf_instance_id.into(),
+            service_instance_id: service_instance_id.into(),
+            priority,
+            capacity,
+        }
+    }
+
     #[test]
     fn filters_unregistered_wrong_service_and_invalid_api_prefix() {
         let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
             "validityPeriod": 30,
             "nfInstances": [{
+                "nfInstanceId": "nf-filter",
                 "nfStatus": "REGISTERED",
                 "fqdn": "smf.example",
                 "nfServices": [
-                    {"serviceName":"wrong","scheme":"https","nfServiceStatus":"REGISTERED"},
-                    {"serviceName":"nsmf-pdusession","scheme":"https","nfServiceStatus":"SUSPENDED"},
-                    {"serviceName":"nsmf-pdusession","scheme":"https","nfServiceStatus":"REGISTERED","apiPrefix":"edge"},
-                    {"serviceName":"nsmf-pdusession","scheme":"https","nfServiceStatus":"REGISTERED","ipEndPoints":[{"port":8443}]}
+                    {"serviceInstanceId":"wrong","serviceName":"wrong","scheme":"https","nfServiceStatus":"REGISTERED"},
+                    {"serviceInstanceId":"suspended","serviceName":"nsmf-pdusession","scheme":"https","nfServiceStatus":"SUSPENDED"},
+                    {"serviceInstanceId":"bad-prefix","serviceName":"nsmf-pdusession","scheme":"https","nfServiceStatus":"REGISTERED","apiPrefix":"edge"},
+                    {"serviceInstanceId":"valid","serviceName":"nsmf-pdusession","scheme":"https","nfServiceStatus":"REGISTERED","ipEndPoints":[{"port":8443}]}
                 ]
             }]
         }))
@@ -404,6 +521,7 @@ mod tests {
                 port: 8443,
                 weight: 1,
                 api_prefix: None,
+                nrf_service: Some(metadata("nf-filter", "valid", u16::MAX, 1)),
             }]
         );
     }
@@ -412,9 +530,11 @@ mod tests {
     fn preserves_distinct_normalized_api_prefixes_for_the_same_endpoint() {
         let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
             "nfInstances": [{
+                "nfInstanceId": "nf-prefix",
                 "nfStatus": "REGISTERED",
                 "nfServices": [
                     {
+                        "serviceInstanceId": "edge-a",
                         "serviceName": "nsmf-pdusession",
                         "scheme": "https",
                         "nfServiceStatus": "REGISTERED",
@@ -422,6 +542,7 @@ mod tests {
                         "ipEndPoints": [{"ipv4Address":"192.0.2.30","port":8443}]
                     },
                     {
+                        "serviceInstanceId": "edge-b",
                         "serviceName": "nsmf-pdusession",
                         "scheme": "https",
                         "nfServiceStatus": "REGISTERED",
@@ -442,12 +563,14 @@ mod tests {
                     port: 8443,
                     weight: 1,
                     api_prefix: Some("/edge/a".into()),
+                    nrf_service: Some(metadata("nf-prefix", "edge-a", u16::MAX, 1)),
                 },
                 CompiledUpstreamServer {
                     host: "192.0.2.30".into(),
                     port: 8443,
                     weight: 1,
                     api_prefix: Some("/edge/b".into()),
+                    nrf_service: Some(metadata("nf-prefix", "edge-b", u16::MAX, 1)),
                 },
             ]
         );
@@ -478,11 +601,107 @@ mod tests {
     }
 
     #[test]
+    fn service_selection_metadata_overrides_profile_defaults() {
+        let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
+            "nfInstances": [{
+                "nfInstanceId": "nf-metadata",
+                "nfStatus": "REGISTERED",
+                "priority": 20,
+                "capacity": 30,
+                "nfServices": [
+                    {
+                        "serviceInstanceId": "inherits",
+                        "serviceName": "nsmf-pdusession",
+                        "scheme": "https",
+                        "nfServiceStatus": "REGISTERED",
+                        "ipEndPoints": [{"ipv4Address":"192.0.2.40","port":8443}]
+                    },
+                    {
+                        "serviceInstanceId": "overrides",
+                        "serviceName": "nsmf-pdusession",
+                        "scheme": "https",
+                        "nfServiceStatus": "REGISTERED",
+                        "priority": 5,
+                        "capacity": 7,
+                        "ipEndPoints": [{"ipv4Address":"192.0.2.41","port":8443}]
+                    },
+                    {
+                        "serviceInstanceId": "invalid",
+                        "serviceName": "nsmf-pdusession",
+                        "scheme": "https",
+                        "nfServiceStatus": "REGISTERED",
+                        "priority": 65536,
+                        "ipEndPoints": [{"ipv4Address":"192.0.2.42","port":8443}]
+                    }
+                ]
+            }]
+        }))
+        .unwrap()
+        .nf_instances;
+
+        let endpoints = extract_endpoints(&config(), profiles);
+
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.host == "192.0.2.41")
+                .unwrap()
+                .nrf_service
+                .clone(),
+            Some(metadata("nf-metadata", "overrides", 5, 7))
+        );
+        assert_eq!(
+            endpoints
+                .iter()
+                .find(|endpoint| endpoint.host == "192.0.2.40")
+                .unwrap()
+                .nrf_service
+                .clone(),
+            Some(metadata("nf-metadata", "inherits", 20, 30))
+        );
+    }
+
+    #[test]
+    fn skips_registered_profiles_and_services_without_ids() {
+        let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
+            "nfInstances": [
+                {
+                    "nfStatus": "REGISTERED",
+                    "nfServices": [{
+                        "serviceInstanceId": "service",
+                        "serviceName": "nsmf-pdusession",
+                        "scheme": "https",
+                        "nfServiceStatus": "REGISTERED",
+                        "ipEndPoints": [{"ipv4Address":"192.0.2.50","port":8443}]
+                    }]
+                },
+                {
+                    "nfInstanceId": "nf",
+                    "nfStatus": "REGISTERED",
+                    "nfServices": [{
+                        "serviceName": "nsmf-pdusession",
+                        "scheme": "https",
+                        "nfServiceStatus": "REGISTERED",
+                        "ipEndPoints": [{"ipv4Address":"192.0.2.51","port":8443}]
+                    }]
+                }
+            ]
+        }))
+        .unwrap()
+        .nf_instances;
+
+        assert!(extract_endpoints(&config(), profiles).is_empty());
+    }
+
+    #[test]
     fn extracts_dual_stack_endpoints_and_deduplicates_them() {
         let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
             "nfInstances": [{
+                "nfInstanceId": "nf-dual",
                 "nfStatus": "REGISTERED",
                 "nfServices": [{
+                    "serviceInstanceId": "dual",
                     "serviceName": "nsmf-pdusession",
                     "scheme": "https",
                     "nfServiceStatus": "REGISTERED",
@@ -504,12 +723,14 @@ mod tests {
                     port: 8443,
                     weight: 1,
                     api_prefix: None,
+                    nrf_service: Some(metadata("nf-dual", "dual", u16::MAX, 1)),
                 },
                 CompiledUpstreamServer {
                     host: "2001:db8::10".into(),
                     port: 8443,
                     weight: 1,
                     api_prefix: None,
+                    nrf_service: Some(metadata("nf-dual", "dual", u16::MAX, 1)),
                 },
             ]
         );
@@ -519,10 +740,12 @@ mod tests {
     fn uses_profile_addresses_and_default_port_as_fallback() {
         let profiles = serde_json::from_value::<SearchResult>(serde_json::json!({
             "nfInstances": [{
+                "nfInstanceId": "nf-fallback",
                 "nfStatus": "REGISTERED",
                 "ipv4Addresses": ["192.0.2.20"],
                 "ipv6Addresses": ["2001:db8::20"],
                 "nfServices": [{
+                    "serviceInstanceId": "fallback",
                     "serviceName": "nsmf-pdusession",
                     "scheme": "https",
                     "nfServiceStatus": "REGISTERED"
@@ -540,7 +763,7 @@ mod tests {
     #[tokio::test]
     async fn discovery_uses_h2_prior_knowledge_and_expected_query() {
         let body = serde_json::json!({"validityPeriod": 15, "nfInstances": []}).to_string();
-        let (addr, request) = spawn_h2_response(StatusCode::OK, body, None).await;
+        let (addr, request) = spawn_h2_response(StatusCode::OK, body, None, false).await;
 
         let result = NrfClient::new(&http_config(addr))
             .unwrap()
@@ -564,6 +787,7 @@ mod tests {
             StatusCode::TEMPORARY_REDIRECT,
             Bytes::new(),
             Some("http://127.0.0.1:1/redirected"),
+            false,
         )
         .await;
 
@@ -579,7 +803,7 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_rejects_malformed_json() {
-        let (addr, request) = spawn_h2_response(StatusCode::OK, "{", None).await;
+        let (addr, request) = spawn_h2_response(StatusCode::OK, "{", None, false).await;
 
         let error = NrfClient::new(&http_config(addr))
             .unwrap()
@@ -594,7 +818,7 @@ mod tests {
     #[tokio::test]
     async fn discovery_rejects_oversized_body() {
         let body = Bytes::from(vec![b'x'; MAX_RESPONSE_BODY + 1]);
-        let (addr, request) = spawn_h2_response(StatusCode::OK, body, None).await;
+        let (addr, request) = spawn_h2_response(StatusCode::OK, body, None, true).await;
 
         let error = NrfClient::new(&http_config(addr))
             .unwrap()
@@ -612,7 +836,7 @@ mod tests {
     #[tokio::test]
     async fn discovery_uses_default_validity_for_zero() {
         let body = serde_json::json!({"validityPeriod": 0, "nfInstances": []}).to_string();
-        let (addr, request) = spawn_h2_response(StatusCode::OK, body, None).await;
+        let (addr, request) = spawn_h2_response(StatusCode::OK, body, None, false).await;
 
         let result = NrfClient::new(&http_config(addr))
             .unwrap()

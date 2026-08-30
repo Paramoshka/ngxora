@@ -55,6 +55,15 @@ pub struct CompiledUpstreamServer {
     pub port: u16,
     pub weight: u16,
     pub api_prefix: Option<String>,
+    pub nrf_service: Option<NrfServiceMetadata>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct NrfServiceMetadata {
+    pub nf_instance_id: String,
+    pub service_instance_id: String,
+    pub priority: u16,
+    pub capacity: u16,
 }
 
 impl Display for CompiledUpstreamServer {

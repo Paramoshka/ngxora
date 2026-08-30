@@ -114,6 +114,7 @@ fn compatible_snapshot_reuses_unchanged_runtime_upstream_group() {
                 port: 8081,
                 weight: 1,
                 api_prefix: None,
+                nrf_service: None,
             }],
             nrf_discovery: None,
             health_check: None,

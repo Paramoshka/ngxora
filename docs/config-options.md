@@ -99,7 +99,14 @@ upstream smf_pool {
 `health_check`; a newly discovered endpoint is published only after a successful
 preflight. Each process keeps its own in-memory snapshot and refreshes it from
 NRF using `validityPeriod`. A discovered service `apiPrefix` is prepended to the
-upstream request path. OAuth and NF registration are not part of this first
+upstream request path. NF Service `priority` and `capacity` override profile-level
+values: the lowest healthy priority tier is selected first, and capacity is the
+relative service weight within that tier. A service with multiple endpoints keeps
+one service-level weight and round-robins over its healthy endpoints. Missing
+priority defaults to `65535`, missing capacity defaults to `1`, and zero-capacity
+services are used only when their tier has no healthy positive-capacity service.
+The NRF `load` attribute is not applied because its selection policy is
+implementation-specific. OAuth and NF registration are not part of this first
 implementation.
 
 Supported policies:

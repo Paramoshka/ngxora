@@ -12,10 +12,28 @@ services:
     image: hashicorp/http-echo:1.0.0
     command:
       - -listen=:8080
-      - -text=open5gs-producer
+      - -text=open5gs-producer-a
     networks:
       default:
         ipv4_address: 10.248.73.20
+
+  producer-b:
+    image: hashicorp/http-echo:1.0.0
+    command:
+      - -listen=:8080
+      - -text=open5gs-producer-b
+    networks:
+      default:
+        ipv4_address: 10.248.73.21
+
+  producer-standby:
+    image: hashicorp/http-echo:1.0.0
+    command:
+      - -listen=:8080
+      - -text=open5gs-producer-standby
+    networks:
+      default:
+        ipv4_address: 10.248.73.22
 
   ngxora:
     build:
@@ -31,6 +49,8 @@ services:
     depends_on:
       - nrf
       - producer
+      - producer-b
+      - producer-standby
 
 networks:
   default:

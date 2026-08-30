@@ -65,7 +65,8 @@ data to one another and do not require Redis or etcd.
 - per-group/per-backend request, latency and readiness metrics;
 - structured access logs with `upstream_group` and selected backend;
 - read-only NRF NF discovery with per-pod snapshots, bounded stale-on-error,
-  preflight health checks, atomic backend replacement and `apiPrefix` routing.
+  preflight health checks, atomic backend replacement, `apiPrefix` routing and
+  service-level `priority`/`capacity` selection.
 
 These features do not interpret 3GPP messages. Headers, bodies, HTTP/2 trailers and
 unknown methods remain ordinary HTTP data and are forwarded by the Pingora proxy

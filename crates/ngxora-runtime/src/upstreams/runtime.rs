@@ -2,8 +2,8 @@ use super::compile::proxy_pass_sni;
 use super::nrf::NrfClient;
 use super::routing::{ResolvedLocation, listener_routes, resolve_route};
 use super::types::{
-    CompiledRouter, CompiledUpstreamGroup, CompiledUpstreamServer, ListenKey, RouteTarget,
-    VirtualHostRoutes,
+    CompiledRouter, CompiledUpstreamGroup, CompiledUpstreamServer, ListenKey, NrfServiceMetadata,
+    RouteTarget, VirtualHostRoutes,
 };
 use crate::cache::{
     CacheBackend, CacheKey, build_cache_key, estimated_headers_size, is_cacheable,
@@ -11,7 +11,7 @@ use crate::cache::{
 };
 use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState};
 use crate::le::ChallengeTokens;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use futures::{FutureExt, StreamExt, future, stream};
@@ -37,10 +37,11 @@ use pingora::tls::x509::X509;
 use pingora::upstreams::peer::HttpPeer;
 use pingora::utils::tls::CertKey;
 use pingora_proxy::{ProxyHttp, Session};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -109,6 +110,8 @@ struct RuntimeNrfDiscovery {
     source: RuntimeDiscoverySource,
     health_check: super::CompiledHealthCheck,
     stale_if_error: Duration,
+    policy: UpstreamSelectionPolicy,
+    selection: ArcSwapOption<NrfServiceTopology>,
     schedule: Mutex<NrfRefreshSchedule>,
 }
 
@@ -129,6 +132,36 @@ enum RuntimeUpstreamSelector {
 struct RuntimeHealthCheckSchedule {
     interval: Duration,
     next_run_at: Mutex<Instant>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct NrfTopologySignature(Vec<(NrfServiceMetadata, Vec<NrfEndpointIdentity>)>);
+
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
+struct NrfEndpointIdentity {
+    host: String,
+    port: u16,
+    api_prefix: Option<String>,
+}
+
+struct NrfServiceTopology {
+    signature: NrfTopologySignature,
+    tiers: Vec<NrfServiceTier>,
+}
+
+struct NrfServiceTier {
+    positive_capacity: Option<NrfServicePool>,
+    zero_capacity: Option<NrfServicePool>,
+}
+
+struct NrfServicePool {
+    selector: RuntimeUpstreamSelector,
+    services: HashMap<NrfServiceMetadata, RuntimeNrfService>,
+}
+
+struct RuntimeNrfService {
+    endpoints: Vec<Backend>,
+    next_endpoint: AtomicUsize,
 }
 
 fn synthetic_backends(servers: &[CompiledUpstreamServer]) -> Result<BTreeSet<Backend>, String> {
@@ -178,6 +211,16 @@ fn stable_backend_id(server: &CompiledUpstreamServer) -> u64 {
     server.host.hash(&mut hasher);
     server.port.hash(&mut hasher);
     server.api_prefix.hash(&mut hasher);
+    if let Some(service) = server.nrf_service.as_ref() {
+        service.nf_instance_id.hash(&mut hasher);
+        service.service_instance_id.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn stable_nrf_service_id(service: &NrfServiceMetadata) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    service.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -215,6 +258,247 @@ where
     Ok(lb)
 }
 
+fn build_runtime_selector(
+    policy: UpstreamSelectionPolicy,
+    backends: Backends,
+    health_check: Option<&super::CompiledHealthCheck>,
+) -> Result<RuntimeUpstreamSelector, String> {
+    match policy {
+        UpstreamSelectionPolicy::RoundRobin => Ok(RuntimeUpstreamSelector::RoundRobin(
+            build_load_balancer(backends, health_check)?,
+        )),
+        UpstreamSelectionPolicy::Random => Ok(RuntimeUpstreamSelector::Random(
+            build_load_balancer(backends, health_check)?,
+        )),
+        UpstreamSelectionPolicy::ConsistentHash => Ok(RuntimeUpstreamSelector::ConsistentHash(
+            build_load_balancer(backends, health_check)?,
+        )),
+    }
+}
+
+fn normalized_capacities(capacities: &[u16]) -> Result<Vec<u16>, String> {
+    if capacities.is_empty() {
+        return Ok(Vec::new());
+    }
+    if capacities.contains(&0) {
+        return Err("positive-capacity NRF pool contains a zero capacity".into());
+    }
+
+    let limit = u64::from(u16::MAX);
+    let service_count = u64::try_from(capacities.len()).unwrap_or(u64::MAX);
+    if service_count > limit {
+        return Err(format!(
+            "NRF priority tier contains more than {limit} services"
+        ));
+    }
+
+    let total = capacities
+        .iter()
+        .map(|capacity| u64::from(*capacity))
+        .sum::<u64>();
+    if total <= limit {
+        return Ok(capacities.to_vec());
+    }
+
+    let remaining = limit - service_count;
+    let mut weights = Vec::with_capacity(capacities.len());
+    let mut remainders = Vec::with_capacity(capacities.len());
+    let mut assigned = 0u64;
+    for (index, capacity) in capacities.iter().enumerate() {
+        let scaled = u64::from(*capacity) * remaining;
+        let weight = 1 + scaled / total;
+        weights.push(u16::try_from(weight).unwrap_or(u16::MAX));
+        remainders.push((scaled % total, index));
+        assigned += weight;
+    }
+
+    remainders.sort_unstable_by(|left, right| right.cmp(left));
+    for (_, index) in remainders.into_iter().take((limit - assigned) as usize) {
+        weights[index] = weights[index].saturating_add(1);
+    }
+    Ok(weights)
+}
+
+impl NrfServiceTopology {
+    fn build(
+        backends: &BTreeSet<Backend>,
+        policy: UpstreamSelectionPolicy,
+    ) -> Result<Option<Self>, String> {
+        let mut services = BTreeMap::<NrfServiceMetadata, Vec<Backend>>::new();
+        for backend in backends {
+            let server = backend
+                .ext
+                .get::<CompiledUpstreamServer>()
+                .ok_or_else(|| "NRF backend is missing compiled endpoint metadata".to_string())?;
+            let service = server
+                .nrf_service
+                .as_ref()
+                .ok_or_else(|| "NRF backend is missing service metadata".to_string())?;
+            services
+                .entry(service.clone())
+                .or_default()
+                .push(backend.clone());
+        }
+        if services.is_empty() {
+            return Ok(None);
+        }
+
+        let signature = NrfTopologySignature(
+            services
+                .iter()
+                .map(|(service, endpoints)| {
+                    let endpoints = endpoints
+                        .iter()
+                        .filter_map(|backend| backend.ext.get::<CompiledUpstreamServer>())
+                        .map(|server| NrfEndpointIdentity {
+                            host: server.host.clone(),
+                            port: server.port,
+                            api_prefix: server.api_prefix.clone(),
+                        })
+                        .collect();
+                    (service.clone(), endpoints)
+                })
+                .collect(),
+        );
+
+        let mut by_priority = BTreeMap::<u16, Vec<(NrfServiceMetadata, Vec<Backend>)>>::new();
+        for (service, endpoints) in services {
+            by_priority
+                .entry(service.priority)
+                .or_default()
+                .push((service, endpoints));
+        }
+        let tiers = by_priority
+            .into_values()
+            .map(|services| NrfServiceTier::build(services, policy))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Some(Self { signature, tiers }))
+    }
+
+    fn select<F>(&self, key: &[u8], ready: F) -> Option<CompiledUpstreamServer>
+    where
+        F: Fn(&Backend) -> bool,
+    {
+        for tier in &self.tiers {
+            if let Some(server) = tier.select(key, &ready) {
+                return Some(server);
+            }
+        }
+        None
+    }
+}
+
+impl NrfServiceTier {
+    fn build(
+        services: Vec<(NrfServiceMetadata, Vec<Backend>)>,
+        policy: UpstreamSelectionPolicy,
+    ) -> Result<Self, String> {
+        let (positive, zero): (Vec<_>, Vec<_>) = services
+            .into_iter()
+            .partition(|(service, _)| service.capacity > 0);
+        Ok(Self {
+            positive_capacity: NrfServicePool::build(positive, policy)?,
+            zero_capacity: NrfServicePool::build(zero, policy)?,
+        })
+    }
+
+    fn select<F>(&self, key: &[u8], ready: &F) -> Option<CompiledUpstreamServer>
+    where
+        F: Fn(&Backend) -> bool,
+    {
+        self.positive_capacity
+            .as_ref()
+            .and_then(|pool| pool.select(key, ready))
+            .or_else(|| {
+                self.zero_capacity
+                    .as_ref()
+                    .and_then(|pool| pool.select(key, ready))
+            })
+    }
+}
+
+impl NrfServicePool {
+    fn build(
+        services: Vec<(NrfServiceMetadata, Vec<Backend>)>,
+        policy: UpstreamSelectionPolicy,
+    ) -> Result<Option<Self>, String> {
+        if services.is_empty() {
+            return Ok(None);
+        }
+
+        let capacities = services
+            .iter()
+            .map(|(service, _)| service.capacity.max(1))
+            .collect::<Vec<_>>();
+        let weights = normalized_capacities(&capacities)?;
+        let mut used = BTreeSet::new();
+        let mut representative_backends = BTreeSet::new();
+        let mut runtime_services = HashMap::with_capacity(services.len());
+        for ((service, endpoints), weight) in services.into_iter().zip(weights) {
+            let mut id = stable_nrf_service_id(&service);
+            while !used.insert(id) {
+                id = id.wrapping_add(1);
+            }
+            let mut ext = http::Extensions::new();
+            ext.insert(service.clone());
+            representative_backends.insert(Backend {
+                addr: PingoraSocketAddr::Inet(synthetic_backend_addr(id)),
+                weight: usize::from(weight),
+                ext,
+            });
+            runtime_services.insert(
+                service,
+                RuntimeNrfService {
+                    endpoints,
+                    next_endpoint: AtomicUsize::new(0),
+                },
+            );
+        }
+
+        let backends = Backends::new(discovery::Static::new(representative_backends));
+        Ok(Some(Self {
+            selector: build_runtime_selector(policy, backends, None)?,
+            services: runtime_services,
+        }))
+    }
+
+    fn select<F>(&self, key: &[u8], ready: &F) -> Option<CompiledUpstreamServer>
+    where
+        F: Fn(&Backend) -> bool,
+    {
+        let max_iterations = self.services.len().max(256);
+        let backend = self
+            .selector
+            .select_with(key, max_iterations, |backend, _| {
+                backend
+                    .ext
+                    .get::<NrfServiceMetadata>()
+                    .and_then(|service| self.services.get(service))
+                    .is_some_and(|service| service.endpoints.iter().any(ready))
+            })?;
+        let metadata = backend.ext.get::<NrfServiceMetadata>()?;
+        self.services.get(metadata)?.select_endpoint(ready)
+    }
+}
+
+impl RuntimeNrfService {
+    fn select_endpoint<F>(&self, ready: &F) -> Option<CompiledUpstreamServer>
+    where
+        F: Fn(&Backend) -> bool,
+    {
+        let len = self.endpoints.len();
+        let start = self.next_endpoint.fetch_add(1, Ordering::Relaxed);
+        for offset in 0..len {
+            let backend = &self.endpoints[(start + offset) % len];
+            if ready(backend) {
+                return backend.ext.get::<CompiledUpstreamServer>().cloned();
+            }
+        }
+        None
+    }
+}
+
 impl RuntimeDiscoverySource {
     fn with_backends(backends: BTreeSet<Backend>) -> Self {
         Self {
@@ -249,6 +533,7 @@ impl RuntimeNrfDiscovery {
             return;
         }
 
+        self.selection.store(None);
         self.source.set(BTreeSet::new());
         match selector.update().await {
             Ok(()) => self.schedule.lock().unwrap().endpoint_count = 0,
@@ -259,6 +544,16 @@ impl RuntimeNrfDiscovery {
                 );
             }
         }
+    }
+
+    fn publish_selection(&self, selection: Option<NrfServiceTopology>) {
+        let current = self.selection.load_full();
+        if current.as_ref().map(|value| &value.signature)
+            == selection.as_ref().map(|value| &value.signature)
+        {
+            return;
+        }
+        self.selection.store(selection.map(Arc::new));
     }
 
     async fn discover(
@@ -323,6 +618,17 @@ impl RuntimeUpstreamSelector {
         }
     }
 
+    fn select_with<F>(&self, key: &[u8], max_iterations: usize, accept: F) -> Option<Backend>
+    where
+        F: Fn(&Backend, bool) -> bool,
+    {
+        match self {
+            Self::RoundRobin(lb) => lb.select_with(key, max_iterations, accept),
+            Self::Random(lb) => lb.select_with(key, max_iterations, accept),
+            Self::ConsistentHash(lb) => lb.select_with(key, max_iterations, accept),
+        }
+    }
+
     async fn run_health_check(&self) {
         match self {
             Self::RoundRobin(lb) => lb.backends().run_health_check(false).await,
@@ -367,17 +673,7 @@ impl RuntimeUpstreamGroup {
             None => discovery::Static::new(backends),
         };
         let backends = Backends::new(discovery);
-        let selector = match group.policy {
-            UpstreamSelectionPolicy::RoundRobin => RuntimeUpstreamSelector::RoundRobin(
-                build_load_balancer(backends, group.health_check.as_ref())?,
-            ),
-            UpstreamSelectionPolicy::Random => RuntimeUpstreamSelector::Random(
-                build_load_balancer(backends, group.health_check.as_ref())?,
-            ),
-            UpstreamSelectionPolicy::ConsistentHash => RuntimeUpstreamSelector::ConsistentHash(
-                build_load_balancer(backends, group.health_check.as_ref())?,
-            ),
-        };
+        let selector = build_runtime_selector(group.policy, backends, group.health_check.as_ref())?;
 
         let nrf_discovery = match (&group.nrf_discovery, nrf_source, &group.health_check) {
             (Some(config), Some(source), Some(health_check)) => Some(RuntimeNrfDiscovery {
@@ -386,6 +682,8 @@ impl RuntimeUpstreamGroup {
                 source,
                 health_check: health_check.clone(),
                 stale_if_error: config.stale_if_error,
+                policy: group.policy,
+                selection: ArcSwapOption::empty(),
                 schedule: Mutex::new(NrfRefreshSchedule {
                     next_run_at: Instant::now(),
                     expires_at: None,
@@ -417,6 +715,11 @@ impl RuntimeUpstreamGroup {
     }
 
     pub(crate) fn select(&self, key: &[u8]) -> Option<CompiledUpstreamServer> {
+        if let Some(discovery) = self.nrf_discovery.as_ref() {
+            let selection = discovery.selection.load_full()?;
+            return selection.select(key, |backend| self.selector.backends().ready(backend));
+        }
+
         let backend_count = self.selector.backends().get_backend().len();
         let max_iterations = if self.uses_consistent_hash() {
             backend_count.max(256)
@@ -490,6 +793,16 @@ impl RuntimeUpstreamGroup {
                     .await;
 
                 let endpoint_count = ready.len();
+                let selection = match NrfServiceTopology::build(&ready, discovery.policy) {
+                    Ok(selection) => selection,
+                    Err(err) => {
+                        log::warn!(
+                            "NRF discovery for upstream `{}` produced an invalid service topology: {err}",
+                            discovery.group_name
+                        );
+                        return Some(discovery.record_failure(now, &self.selector).await);
+                    }
+                };
                 discovery.source.set(ready);
                 if let Err(err) = self.selector.update().await {
                     log::warn!(
@@ -498,6 +811,7 @@ impl RuntimeUpstreamGroup {
                     );
                     return Some(discovery.record_failure(now, &self.selector).await);
                 }
+                discovery.publish_selection(selection);
                 crate::metrics::record_nrf_discovery_request(&discovery.group_name, "success");
 
                 let delay = nrf_refresh_delay(result.validity, &discovery.group_name);
@@ -1965,6 +2279,186 @@ mod tests {
                 .to_string(),
             "/operator/edge/"
         );
+    }
+
+    fn nrf_server(
+        nf_instance_id: &str,
+        service_instance_id: &str,
+        priority: u16,
+        capacity: u16,
+        host: &str,
+        port: u16,
+    ) -> CompiledUpstreamServer {
+        CompiledUpstreamServer {
+            host: host.into(),
+            port,
+            weight: 1,
+            api_prefix: None,
+            nrf_service: Some(NrfServiceMetadata {
+                nf_instance_id: nf_instance_id.into(),
+                service_instance_id: service_instance_id.into(),
+                priority,
+                capacity,
+            }),
+        }
+    }
+
+    fn nrf_topology(
+        policy: UpstreamSelectionPolicy,
+        servers: Vec<CompiledUpstreamServer>,
+    ) -> NrfServiceTopology {
+        let backends = dynamic_synthetic_backends(&servers).unwrap();
+        NrfServiceTopology::build(&backends, policy)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn nrf_service_capacity_weights_services_not_endpoints() {
+        let topology = nrf_topology(
+            UpstreamSelectionPolicy::RoundRobin,
+            vec![
+                nrf_server("nf-a", "service-a", 10, 1, "192.0.2.1", 80),
+                nrf_server("nf-a", "service-a", 10, 1, "192.0.2.2", 80),
+                nrf_server("nf-b", "service-b", 10, 1, "192.0.2.3", 80),
+            ],
+        );
+        let mut service_a = 0;
+        let mut service_b = 0;
+        let mut endpoint_a = HashMap::new();
+
+        for _ in 0..40 {
+            let selected = topology.select(b"", |_| true).unwrap();
+            let service = selected.nrf_service.as_ref().unwrap();
+            match service.service_instance_id.as_str() {
+                "service-a" => {
+                    service_a += 1;
+                    *endpoint_a.entry(selected.host).or_insert(0) += 1;
+                }
+                "service-b" => service_b += 1,
+                other => panic!("unexpected service {other}"),
+            }
+        }
+
+        assert_eq!((service_a, service_b), (20, 20));
+        assert_eq!(
+            endpoint_a.values().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([10])
+        );
+    }
+
+    #[test]
+    fn nrf_service_capacity_controls_weight_within_priority_tier() {
+        let topology = nrf_topology(
+            UpstreamSelectionPolicy::RoundRobin,
+            vec![
+                nrf_server("nf-a", "service-a", 10, 3, "192.0.2.1", 80),
+                nrf_server("nf-b", "service-b", 10, 1, "192.0.2.2", 80),
+            ],
+        );
+        let mut counts = HashMap::new();
+
+        for _ in 0..40 {
+            let selected = topology.select(b"", |_| true).unwrap();
+            let id = selected.nrf_service.unwrap().service_instance_id;
+            *counts.entry(id).or_insert(0) += 1;
+        }
+
+        assert_eq!(counts.get("service-a"), Some(&30));
+        assert_eq!(counts.get("service-b"), Some(&10));
+    }
+
+    #[test]
+    fn nrf_service_selection_falls_back_by_health_then_priority() {
+        let topology = nrf_topology(
+            UpstreamSelectionPolicy::RoundRobin,
+            vec![
+                nrf_server("nf-a", "preferred", 1, 1, "192.0.2.1", 80),
+                nrf_server("nf-b", "standby", 20, 1, "192.0.2.2", 80),
+            ],
+        );
+
+        let preferred = topology.select(b"", |_| true).unwrap();
+        assert_eq!(
+            preferred.nrf_service.unwrap().service_instance_id,
+            "preferred"
+        );
+
+        let standby = topology
+            .select(b"", |backend| {
+                backend
+                    .ext
+                    .get::<CompiledUpstreamServer>()
+                    .is_some_and(|server| server.host != "192.0.2.1")
+            })
+            .unwrap();
+        assert_eq!(standby.nrf_service.unwrap().service_instance_id, "standby");
+    }
+
+    #[test]
+    fn nrf_zero_capacity_is_used_only_without_positive_capacity() {
+        let topology = nrf_topology(
+            UpstreamSelectionPolicy::RoundRobin,
+            vec![
+                nrf_server("nf-a", "positive", 1, 1, "192.0.2.1", 80),
+                nrf_server("nf-b", "zero", 1, 0, "192.0.2.2", 80),
+            ],
+        );
+
+        for _ in 0..10 {
+            let selected = topology.select(b"", |_| true).unwrap();
+            assert_eq!(
+                selected.nrf_service.unwrap().service_instance_id,
+                "positive"
+            );
+        }
+
+        let selected = topology
+            .select(b"", |backend| {
+                backend
+                    .ext
+                    .get::<CompiledUpstreamServer>()
+                    .is_some_and(|server| server.host != "192.0.2.1")
+            })
+            .unwrap();
+        assert_eq!(selected.nrf_service.unwrap().service_instance_id, "zero");
+    }
+
+    #[test]
+    fn nrf_consistent_hash_stays_on_one_service() {
+        let topology = nrf_topology(
+            UpstreamSelectionPolicy::ConsistentHash,
+            vec![
+                nrf_server("nf-a", "service-a", 1, 1, "192.0.2.1", 80),
+                nrf_server("nf-b", "service-b", 1, 1, "192.0.2.2", 80),
+            ],
+        );
+        let selected_service = topology
+            .select(b"subscriber-1", |_| true)
+            .unwrap()
+            .nrf_service
+            .unwrap()
+            .service_instance_id;
+
+        for _ in 0..20 {
+            let selected = topology.select(b"subscriber-1", |_| true).unwrap();
+            assert_eq!(
+                selected.nrf_service.unwrap().service_instance_id,
+                selected_service
+            );
+        }
+    }
+
+    #[test]
+    fn nrf_capacity_normalization_is_bounded_and_positive() {
+        let weights = normalized_capacities(&[u16::MAX, u16::MAX - 1, 1]).unwrap();
+
+        assert_eq!(
+            weights.iter().map(|weight| u64::from(*weight)).sum::<u64>(),
+            u64::from(u16::MAX)
+        );
+        assert!(weights.iter().all(|weight| *weight > 0));
+        assert!(normalized_capacities(&[0]).is_err());
     }
 
     fn cached_route(cache: CacheConfig, plugins: ngxora_plugin_api::PluginChain) -> SelectedRoute {

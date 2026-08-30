@@ -1,12 +1,12 @@
 {
-  "nfInstanceId": "c3b8f2c4-66bb-4a59-a334-715f25d9f3a5",
+  "nfInstanceId": "a3b8f2c4-66bb-4a59-a334-715f25d9f3a7",
   "nfType": "SMF",
   "nfStatus": "REGISTERED",
   "heartBeatTimer": 300,
-  "ipv4Addresses": ["10.248.73.20"],
+  "ipv4Addresses": ["10.248.73.22"],
   "nfServices": [
     {
-      "serviceInstanceId": "d9707af8-892b-45eb-b642-cdd957b4a817",
+      "serviceInstanceId": "f9707af8-892b-45eb-b642-cdd957b4a819",
       "serviceName": "nsmf-pdusession",
       "versions": [
         {
@@ -16,11 +16,11 @@
       ],
       "scheme": "http",
       "nfServiceStatus": "REGISTERED",
-      "priority": 10,
-      "capacity": 3,
+      "priority": 20,
+      "capacity": 1,
       "ipEndPoints": [
         {
-          "ipv4Address": "10.248.73.20",
+          "ipv4Address": "10.248.73.22",
           "transport": "TCP",
           "port": 8080
         }

@@ -1897,10 +1897,12 @@ dependencies = [
  "pingora",
  "pingora-cache",
  "pingora-proxy",
+ "rcgen",
  "rustls",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
