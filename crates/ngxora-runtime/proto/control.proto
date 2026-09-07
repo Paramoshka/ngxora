@@ -25,6 +25,14 @@ message ConfigSnapshot {
   repeated VirtualHost virtual_hosts = 4;
   repeated UpstreamGroup upstreams = 5;
   LetsEncryptConfig le_config = 6;
+  repeated ScpProfile scp_profiles = 7;
+}
+
+message ScpProfile {
+  string name = 1;
+  string api_root = 2;
+  repeated string discovery_upstreams = 3;
+  repeated string allowed_target_api_roots = 4;
 }
 
 message HttpOptions {
@@ -79,6 +87,7 @@ message Route {
   oneof action {
     Upstream upstream = 2;
     Redirect redirect = 7;
+    string scp_profile = 9;
   }
   RouteTimeouts timeouts = 3;
   repeated Plugin plugins = 4;

@@ -31,6 +31,9 @@ impl From<&Listen> for ListenKey {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RouteTarget {
+    Scp {
+        profile: String,
+    },
     ProxyPass {
         host: String,
         port: u16,
@@ -60,6 +63,7 @@ pub struct CompiledUpstreamServer {
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct NrfServiceMetadata {
+    pub authority: Option<String>,
     pub nf_instance_id: String,
     pub service_instance_id: String,
     pub priority: u16,
@@ -262,6 +266,7 @@ pub struct HttpRuntimeOptions {
 // request time and by restart-boundary checks at apply time.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct CompiledRouter {
+    pub scp_profiles: HashMap<String, ngxora_compile::ir::ScpProfile>,
     pub upstreams: HashMap<String, CompiledUpstreamGroup>,
     pub listeners: HashMap<ListenKey, VirtualHostRoutes>,
     pub listener_protocols: HashMap<ListenKey, ListenerProtocolConfig>,

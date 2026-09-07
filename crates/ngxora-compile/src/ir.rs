@@ -38,6 +38,7 @@ pub struct Ir {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Http {
+    pub scp_profiles: Vec<ScpProfile>,
     pub upstreams: Vec<UpstreamBlock>,
     pub servers: Vec<Server>,
     pub keepalive_timeout: KeepaliveTimeout,
@@ -53,6 +54,7 @@ pub struct Http {
 impl Default for Http {
     fn default() -> Self {
         Self {
+            scp_profiles: Vec::new(),
             upstreams: Vec::new(),
             servers: Vec::new(),
             keepalive_timeout: KeepaliveTimeout::default(),
@@ -65,6 +67,16 @@ impl Default for Http {
             ssl_provider: None,
         }
     }
+}
+
+/// A bounded SBI routing domain. Discovery upstreams supply the allowed
+/// NF type/service/requester combinations and the existing NRF transport policy.
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+pub struct ScpProfile {
+    pub name: String,
+    pub api_root: String,
+    pub discovery_upstreams: Vec<String>,
+    pub allowed_target_api_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -339,6 +351,7 @@ pub enum LocationMatcher {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum LocationDirective {
+    ScpPass(String),
     ProxyPass(ProxyPassTarget),
     ProxyConnectTimeout(Duration),
     ProxyReadTimeout(Duration),

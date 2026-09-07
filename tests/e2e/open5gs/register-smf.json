@@ -3,7 +3,7 @@
   "nfType": "SMF",
   "nfStatus": "REGISTERED",
   "heartBeatTimer": 300,
-  "ipv4Addresses": ["10.248.73.20"],
+  "ipv4Addresses": ["10.248.73.10"],
   "nfServices": [
     {
       "serviceInstanceId": "d9707af8-892b-45eb-b642-cdd957b4a817",
@@ -20,9 +20,9 @@
       "capacity": 3,
       "ipEndPoints": [
         {
-          "ipv4Address": "10.248.73.20",
+          "ipv4Address": "10.248.73.10",
           "transport": "TCP",
-          "port": 8080
+          "port": 8081
         }
       ]
     }

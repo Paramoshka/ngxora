@@ -22,8 +22,11 @@ use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock};
 use tokio_rustls::TlsAcceptor;
 
+mod scp;
+
 #[derive(Clone)]
 enum NrfMode {
+    Json(serde_json::Value),
     Hold,
     Endpoint(SocketAddr),
     Services(Vec<MockService>),
@@ -70,17 +73,28 @@ impl MockNrf {
 
         loop {
             let changed = self.changed.notified();
-            match self.mode.read().await.clone() {
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let mode = self.mode.read().await.clone();
+            match mode {
+                NrfMode::Json(body) => {
+                    return Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from(body.to_string())))
+                        .unwrap();
+                }
                 NrfMode::Hold => changed.await,
                 NrfMode::Endpoint(addr) => {
                     let body = serde_json::json!({
                         "validityPeriod": 2,
                         "nfInstances": [{
                             "nfInstanceId": "11111111-1111-4111-8111-111111111111",
+                            "nfType": "SMF",
                             "nfStatus": "REGISTERED",
                             "nfServices": [{
                                 "serviceInstanceId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                                 "serviceName": "nsmf-pdusession",
+                                "versions": [{"apiVersionInUri":"v1","apiFullVersion":"1.0.0"}],
                                 "scheme": "http",
                                 "nfServiceStatus": "REGISTERED",
                                 "priority": 10,
@@ -115,10 +129,12 @@ impl MockNrf {
                                 .collect::<Vec<_>>();
                             serde_json::json!({
                                 "nfInstanceId": service.nf_instance_id,
+                                "nfType": "SMF",
                                 "nfStatus": "REGISTERED",
                                 "nfServices": [{
                                     "serviceInstanceId": service.service_instance_id,
                                     "serviceName": "nsmf-pdusession",
+                                    "versions": [{"apiVersionInUri":"v1","apiFullVersion":"1.0.0"}],
                                     "scheme": "http",
                                     "nfServiceStatus": "REGISTERED",
                                     "priority": service.priority,
@@ -209,6 +225,9 @@ struct TestIdentity {
 
 fn test_ca(common_name: &str) -> TestCertificateAuthority {
     let mut params = CertificateParams::new(vec![common_name.to_string()]).expect("CA params");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, common_name);
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let key = KeyPair::generate().expect("CA key");

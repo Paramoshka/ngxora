@@ -302,6 +302,16 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
     }
 
     Ok(Http {
+        scp_profiles: snapshot
+            .scp_profiles
+            .iter()
+            .map(|p| ngxora_compile::ir::ScpProfile {
+                name: p.name.clone(),
+                api_root: p.api_root.clone(),
+                discovery_upstreams: p.discovery_upstreams.clone(),
+                allowed_target_api_roots: p.allowed_target_api_roots.clone(),
+            })
+            .collect(),
         upstreams: upstreams_from_proto(&snapshot.upstreams)?,
         servers,
         keepalive_timeout: keepalive_timeout_from_proto(
@@ -511,6 +521,9 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
         .as_ref()
         .ok_or_else(|| "route action is required".to_string())?;
     match action {
+        proto::route::Action::ScpProfile(name) => {
+            directives.push(LocationDirective::ScpPass(name.clone()))
+        }
         proto::route::Action::Upstream(upstream) => {
             directives.push(LocationDirective::ProxyPass(proxy_pass_target_from_proto(
                 upstream,
@@ -929,6 +942,19 @@ fn proto_snapshot_from_runtime(snapshot: &RuntimeSnapshot) -> Result<ProtoConfig
     }
 
     Ok(ProtoConfigSnapshot {
+        scp_profiles: {
+            let mut profiles = snapshot.router.scp_profiles.values().collect::<Vec<_>>();
+            profiles.sort_by(|a, b| a.name.cmp(&b.name));
+            profiles
+                .into_iter()
+                .map(|p| proto::ScpProfile {
+                    name: p.name.clone(),
+                    api_root: p.api_root.clone(),
+                    discovery_upstreams: p.discovery_upstreams.clone(),
+                    allowed_target_api_roots: p.allowed_target_api_roots.clone(),
+                })
+                .collect()
+        },
         version: snapshot.version.clone(),
         http: Some(proto_http_options_from_runtime(
             &snapshot.router.http_options,
@@ -1204,6 +1230,7 @@ fn proto_match_from_runtime(matcher: &CompiledMatcher) -> ProtoMatch {
 
 fn proto_route_action_from_runtime(target: &RouteTarget) -> proto::route::Action {
     match target {
+        RouteTarget::Scp { profile } => proto::route::Action::ScpProfile(profile.clone()),
         RouteTarget::ProxyPass {
             host, port, tls, ..
         } => proto::route::Action::Upstream(ProtoUpstream {

@@ -30,6 +30,8 @@ The snapshot is responsible for carrying:
 - virtual hosts
 - route matchers
 - upstream groups
+- named SCP profiles (`scp_profiles`) and route `scp_profile` actions; references
+  resolve to allowed NRF upstream templates and explicit target roots
 - TLS bindings and listener TLS options
 - upstream TLS configurations (including inline CA certificate payloads and mTLS client identities)
 - plugin configuration already compiled for runtime use

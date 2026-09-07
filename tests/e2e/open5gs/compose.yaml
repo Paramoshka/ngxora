@@ -36,6 +36,9 @@ services:
         ipv4_address: 10.248.73.22
 
   ngxora:
+    networks:
+      default:
+        ipv4_address: 10.248.73.10
     build:
       context: ../../..
       dockerfile: Dockerfile

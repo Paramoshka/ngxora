@@ -73,6 +73,7 @@ test-unit: ## Run unit tests
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/basic/ngxora.conf
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/tls/ngxora.conf
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/sbi-ready/ngxora.conf
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/scp/ngxora.conf
 	GOCACHE="$(GO_BUILD_CACHE)" $(GO) -C sdk/go test ./...
 
 test-e2e: ## Run hermetic process-level tests

@@ -12,7 +12,9 @@ mod health;
 mod nrf;
 mod routing;
 mod runtime;
+pub(crate) mod scp;
 mod types;
+pub(crate) use types::NrfServiceMetadata;
 
 pub use runtime::{DynamicProxy, ProxyContext, RuntimeUpstreamGroup};
 pub use types::{

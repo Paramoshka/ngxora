@@ -43,6 +43,17 @@ impl CompiledRouter {
         };
         let mut next_route_id = 1;
 
+        for profile in &http.scp_profiles {
+            super::scp::validate_profile(profile, &router.upstreams)?;
+            if router
+                .scp_profiles
+                .insert(profile.name.clone(), profile.clone())
+                .is_some()
+            {
+                return Err(format!("duplicate scp profile `{}`", profile.name));
+            }
+        }
+
         for server in &http.servers {
             router.add_server(server, &mut next_route_id)?;
         }
@@ -61,6 +72,22 @@ impl CompiledRouter {
         let routes = ServerRoutes {
             locations: compile_locations(&server.locations, &self.upstreams, next_route_id)?,
         };
+        for location in &routes.locations {
+            if let RouteTarget::Scp { profile } = &location.target {
+                if !self.scp_profiles.contains_key(profile) {
+                    return Err(format!("scp_pass references unknown profile `{profile}`"));
+                }
+                if server.listens.iter().any(|listen| {
+                    if listen.ssl {
+                        !listen.http2
+                    } else {
+                        !self.http_options.h2c
+                    }
+                }) {
+                    return Err("scp_pass requires an HTTP/2 listener".into());
+                }
+            }
+        }
 
         for listen in &server.listens {
             let listen_key = ListenKey::from(listen);
@@ -438,6 +465,9 @@ fn route_target_from_directive(
     upstreams: &HashMap<String, CompiledUpstreamGroup>,
 ) -> Result<Option<RouteTarget>, String> {
     match directive {
+        LocationDirective::ScpPass(profile) => Ok(Some(RouteTarget::Scp {
+            profile: profile.clone(),
+        })),
         LocationDirective::ProxyPass(ProxyPassTarget::Url(url)) => {
             if let Some(group) = upstream_group_from_url(url, upstreams) {
                 let tls = proxy_pass_tls(url.scheme())
@@ -561,6 +591,7 @@ fn compile_upstream_protocol(
 
     if let Some(protocol) = protocol {
         let target_uses_tls = match target {
+            RouteTarget::Scp { .. } => return Err("scp_pass chooses HTTP/2 transport from the target scheme; omit proxy_upstream_protocol".into()),
             RouteTarget::ProxyPass { tls, .. } | RouteTarget::UpstreamGroup { tls, .. } => *tls,
             RouteTarget::Return { .. } => return Ok(None),
         };
@@ -644,7 +675,9 @@ fn compile_location(
     let mut action_count = 0;
     for directive in &location.directives {
         match directive {
-            LocationDirective::ProxyPass(_) | LocationDirective::Return { .. } => {
+            LocationDirective::ProxyPass(_)
+            | LocationDirective::ScpPass(_)
+            | LocationDirective::Return { .. } => {
                 action_count += 1;
             }
             LocationDirective::Root(_) => return Err("root is not supported at runtime".into()),
@@ -662,6 +695,9 @@ fn compile_location(
         return Ok(None);
     };
     let upstream_protocol = compile_upstream_protocol(location, &target)?;
+    if matches!(target, RouteTarget::Scp { .. }) && location.cache.is_some() {
+        return Err("scp_pass cannot be combined with proxy_cache".into());
+    }
 
     let compiled = CompiledLocation {
         route_id: *next_route_id,

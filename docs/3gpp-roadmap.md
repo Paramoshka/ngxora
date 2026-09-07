@@ -1,9 +1,9 @@
 # SBI-ready and 3GPP roadmap
 
 `ngxora` is an SBI-ready HTTP proxy, not a 3GPP-compliant SCP or SEPP. The current
-scope is deliberately transport-level: it provides the HTTP/2, TLS, mTLS,
-balancing, health and observability primitives on which an SBI-aware component can
-be built.
+scope includes transport primitives and an opt-in, limited
+[Practical SBI/SCP v1 profile](scp.md): direct routing, delegated discovery and
+instance binding. This is not a complete SCP implementation.
 
 The 3GPP baseline for future protocol semantics is Release 18:
 
@@ -68,19 +68,20 @@ data to one another and do not require Redis or etcd.
   preflight health checks, atomic backend replacement, `apiPrefix` routing and
   service-level `priority`/`capacity` selection.
 
-These features do not interpret 3GPP messages. Headers, bodies, HTTP/2 trailers and
+With ordinary `proxy_pass`, these features do not interpret 3GPP messages. Headers, bodies, HTTP/2 trailers and
 unknown methods remain ordinary HTTP data and are forwarded by the Pingora proxy
 path.
 
 ## Planned Release 18 semantics
 
-1. SCP routing policy: direct and indirect communication selection using the
-   applicable TS 29.500 discovery and routing information.
-2. SBI error and control handling: `ProblemDetails`, overload/load-control data,
-   retries and failure classification without retrying unsafe requests blindly.
+1. Extend the implemented single-hop direct/delegated routing and instance binding
+   to NF/service sets, slice/PLMN selection and delegated callbacks.
+2. Extend the implemented `ProblemDetails` and bounded connect-only retry policy
+   with overload/load control and standardized overload behavior.
 3. OAuth 2.0 access-token acquisition and forwarding for NF service access.
 4. Conformance fixtures generated from the Release 18 3GPP OpenAPI definitions,
    plus negative and interoperability tests.
+5. SCP registration/NRF subscriptions and multi-hop routing where required.
 
 The protocol-aware code should live as a normal ngxora crate or plugin above
 Pingora. A Pingora fork or Git submodule is not required: Pingora already supplies

@@ -90,7 +90,9 @@ impl Ir {
                 let mut action_count = 0;
                 for directive in &location.directives {
                     match directive {
-                        LocationDirective::ProxyPass(_) | LocationDirective::Return { .. } => {
+                        LocationDirective::ProxyPass(_)
+                        | LocationDirective::ScpPass(_)
+                        | LocationDirective::Return { .. } => {
                             action_count += 1;
                         }
                         LocationDirective::Root(_) => {

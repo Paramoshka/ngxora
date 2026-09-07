@@ -2038,6 +2038,7 @@ dependencies = [
  "ipnet",
  "log",
  "ngxora-compile",
+ "ngxora-config",
  "ngxora-plugin-api",
  "ngxora-plugin-registry",
  "openssl",

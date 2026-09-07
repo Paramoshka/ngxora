@@ -49,6 +49,7 @@ opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "trace"] }
 
 [dev-dependencies]
+ngxora-config = { path = "../ngxora-config" }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http2"] }
 rcgen = "0.14"

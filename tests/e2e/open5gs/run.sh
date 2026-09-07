@@ -114,6 +114,33 @@ if (( primary_a != 30 || primary_b != 10 || standby != 0 )); then
   exit 1
 fi
 
+scp_request() {
+  curl --http2-prior-knowledge --connect-timeout 1 --max-time 5 --fail --silent --show-error \
+    --header '3gpp-sbi-discovery-target-nf-type: SMF' \
+    --header '3gpp-sbi-discovery-requester-nf-type: SCP' \
+    --header '3gpp-sbi-discovery-service-names: nsmf-pdusession' \
+    "$@" "${proxy_origin}/scp/nsmf-pdusession/v1/sm-contexts"
+}
+
+primary_a=0
+primary_b=0
+for _ in {1..40}; do
+  response="$(scp_request)"
+  case "${response}" in
+    *open5gs-producer-a*) ((primary_a += 1)) ;;
+    *open5gs-producer-b*) ((primary_b += 1)) ;;
+    *) echo "Unexpected SCP producer: ${response}" >&2; exit 1 ;;
+  esac
+done
+if (( primary_a != 30 || primary_b != 10 )); then
+  echo "Unexpected SCP distribution: A=${primary_a} B=${primary_b}" >&2
+  exit 1
+fi
+response="$(scp_request --header "3gpp-sbi-discovery-target-nf-instance-id: ${nf_instance_b}")"
+[[ "${response}" == *open5gs-producer-b* ]]
+response="$(scp_request --header "3gpp-sbi-routing-binding: bl=nf-instance; nfinst=${nf_instance_a}")"
+[[ "${response}" == *open5gs-producer-a* ]]
+
 docker compose -f "${compose_file}" stop producer producer-b >/dev/null
 standby_ready=false
 for _ in {1..60}; do
@@ -127,6 +154,19 @@ for _ in {1..60}; do
 done
 if [[ "${standby_ready}" != true ]]; then
   echo "ngxora did not fail over to the lower-priority Open5GS service" >&2
+  exit 1
+fi
+
+scp_standby_ready=false
+for _ in {1..60}; do
+  if response="$(scp_request 2>/dev/null)" && [[ "${response}" == *open5gs-producer-standby* ]]; then
+    scp_standby_ready=true
+    break
+  fi
+  sleep 0.5
+done
+if [[ "${scp_standby_ready}" != true ]]; then
+  echo "SCP did not fail over to the lower-priority service" >&2
   exit 1
 fi
 

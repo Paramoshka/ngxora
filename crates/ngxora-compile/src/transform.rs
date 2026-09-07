@@ -136,6 +136,7 @@ fn lower_http(block: &Block) -> Result<Http, LowerErr> {
         match children_block {
             Node::Directive(directive) => apply_http_directive(&mut http, directive)?,
             Node::Block(block) => match block.name.as_str() {
+                "scp" => http.scp_profiles.push(lower_scp(block)?),
                 consts::SERVER => {
                     let server = lower_server(block)?;
                     http.servers.push(server);
@@ -335,6 +336,35 @@ fn lower_server(block: &Block) -> Result<Server, LowerErr> {
 
     validate_server(&server)?;
     Ok(server)
+}
+
+fn lower_scp(block: &Block) -> Result<crate::ir::ScpProfile, LowerErr> {
+    let mut profile = crate::ir::ScpProfile {
+        name: parse_exactly_one_argument(&block.args, "scp")?.to_string(),
+        ..Default::default()
+    };
+    for child in &block.children {
+        let Node::Directive(directive) = child else {
+            return Err(LowerErr {
+                message: "scp: nested blocks are not supported".into(),
+            });
+        };
+        let value = parse_exactly_one_argument(&directive.args, &directive.name)?.to_string();
+        match directive.name.as_str() {
+            "api_root" if profile.api_root.is_empty() => profile.api_root = value,
+            "discovery_upstream" => profile.discovery_upstreams.push(value),
+            "allow_target_api_root" => profile.allowed_target_api_roots.push(value),
+            _ => {
+                return Err(LowerErr {
+                    message: format!(
+                        "scp: unsupported or duplicate directive `{}`",
+                        directive.name
+                    ),
+                });
+            }
+        }
+    }
+    Ok(profile)
 }
 
 fn lower_upstream(block: &Block) -> Result<UpstreamBlock, LowerErr> {
@@ -1955,6 +1985,9 @@ fn parse_proxy_upstream_protocol(args: &[String]) -> Result<UpstreamHttpProtocol
 
 fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, LowerErr> {
     match directive.name.as_str() {
+        "scp_pass" => Ok(LocationDirective::ScpPass(
+            parse_exactly_one_argument(&directive.args, "scp_pass")?.to_string(),
+        )),
         consts::PROXY_PASS => match directive.args.as_slice() {
             [raw_url] => {
                 let parsed_url = Url::parse(raw_url).map_err(|e| LowerErr {

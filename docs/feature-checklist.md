@@ -29,6 +29,7 @@ The rule is simple:
 | Upstream groups | ✅ | `upstream {}` | ✅ | Live | Weighted round-robin, random, consistent hash |
 | Upstream health checks | ✅ | `health_check {}` | ✅ | Live | TCP + HTTP |
 | NRF NF discovery | ✅ | `nrf_discovery {}` | ✅ | Live | Per-pod snapshot, preflight, bounded stale-on-error, service priority/capacity |
+| Single-hop SBI routing profile | ✅ | `scp {}` / `scp_pass` | ✅ | Live | Direct/delegated routing, instance binding, ProblemDetails; [limited v1 scope](scp.md), not full SCP conformance |
 | WebSocket proxying | ✅ | `proxy_pass` | ✅ | Live | Auto upgrade, no extra config |
 | gRPC proxying (h2/h2c) | ✅ | `proxy_upstream_protocol` | ✅ | Live | |
 | **Redirect** `return <status> <url>` | ✅ | `return 301 https://...` | ✅ | Live | Text config and gRPC snapshots map to the same runtime return target |

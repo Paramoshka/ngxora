@@ -12,12 +12,23 @@ const MAX_RESPONSE_BODY: usize = 1024 * 1024;
 pub(super) struct NrfClient {
     config: CompiledNrfDiscovery,
     client: Client,
+    pub(super) query: Option<NrfQuery>,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq, Hash)]
+pub(super) struct NrfQuery {
+    pub nf_instance_id: Option<String>,
+    pub requester_instance_id: Option<String>,
+    pub service_instance_id: Option<String>,
+    pub api_version: String,
+    pub service_names: Vec<String>,
 }
 
 #[derive(Debug)]
 pub(super) struct DiscoveryResult {
     pub endpoints: Vec<CompiledUpstreamServer>,
     pub validity: Duration,
+    pub invalid_api: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +42,8 @@ struct SearchResult {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NfProfile {
+    #[serde(default)]
+    nf_type: Option<String>,
     #[serde(default)]
     nf_instance_id: Option<String>,
     nf_status: String,
@@ -46,11 +59,15 @@ struct NfProfile {
     ipv6_addresses: Vec<String>,
     #[serde(default)]
     nf_services: Vec<NfService>,
+    #[serde(default)]
+    nf_service_list: std::collections::BTreeMap<String, NfService>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NfService {
+    #[serde(default)]
+    versions: Vec<NfServiceVersion>,
     #[serde(default)]
     service_instance_id: Option<String>,
     service_name: String,
@@ -66,6 +83,12 @@ struct NfService {
     ip_end_points: Vec<IpEndPoint>,
     #[serde(default)]
     api_prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NfServiceVersion {
+    api_version_in_uri: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +144,7 @@ impl NrfClient {
         Ok(Self {
             config: config.clone(),
             client,
+            query: None,
         })
     }
 
@@ -132,6 +156,21 @@ impl NrfClient {
             .append_pair("target-nf-type", &self.config.target_nf_type)
             .append_pair("requester-nf-type", &self.config.requester_nf_type)
             .append_pair("service-names", &self.config.service_name);
+        if let Some(query) = &self.query {
+            url.set_query(None);
+            url.query_pairs_mut()
+                .append_pair("target-nf-type", &self.config.target_nf_type)
+                .append_pair("requester-nf-type", &self.config.requester_nf_type)
+                .append_pair("service-names", &query.service_names.join(","));
+            if let Some(id) = &query.nf_instance_id {
+                url.query_pairs_mut()
+                    .append_pair("target-nf-instance-id", id);
+            }
+            if let Some(id) = &query.requester_instance_id {
+                url.query_pairs_mut()
+                    .append_pair("requester-nf-instance-id", id);
+            }
+        }
 
         let mut response = self
             .client
@@ -168,9 +207,11 @@ impl NrfClient {
 
         let result: SearchResult = serde_json::from_slice(&body)
             .map_err(|err| format!("invalid NRF SearchResult: {err}"))?;
-        let endpoints = extract_endpoints(&self.config, result.nf_instances);
+        let (endpoints, invalid_api) =
+            extract_query_endpoints(&self.config, result.nf_instances, self.query.as_ref());
         Ok(DiscoveryResult {
             endpoints,
+            invalid_api,
             validity: result
                 .validity_period
                 .map(Duration::from_secs)
@@ -180,10 +221,20 @@ impl NrfClient {
     }
 }
 
+#[cfg(test)]
 fn extract_endpoints(
     config: &CompiledNrfDiscovery,
     profiles: Vec<NfProfile>,
 ) -> Vec<CompiledUpstreamServer> {
+    extract_query_endpoints(config, profiles, None).0
+}
+
+fn extract_query_endpoints(
+    config: &CompiledNrfDiscovery,
+    profiles: Vec<NfProfile>,
+    query: Option<&NrfQuery>,
+) -> (Vec<CompiledUpstreamServer>, bool) {
+    let mut invalid_api = false;
     let expected_scheme = match config.endpoint_scheme {
         NrfEndpointScheme::Http => "http",
         NrfEndpointScheme::Https => "https",
@@ -192,6 +243,9 @@ fn extract_endpoints(
     let mut endpoints = BTreeSet::new();
 
     for profile in profiles {
+        if query.is_some() && profile.nf_type.as_deref() != Some(config.target_nf_type.as_str()) {
+            continue;
+        }
         if !profile.nf_status.eq_ignore_ascii_case("REGISTERED") {
             continue;
         }
@@ -199,6 +253,12 @@ fn extract_endpoints(
             log::warn!("ignoring registered NRF profile without nfInstanceId");
             continue;
         };
+        if query
+            .and_then(|q| q.nf_instance_id.as_deref())
+            .is_some_and(|id| id != nf_instance_id)
+        {
+            continue;
+        }
         let profile_priority = match optional_u16(profile.priority, "profile priority") {
             Ok(value) => value,
             Err(err) => {
@@ -214,7 +274,23 @@ fn extract_endpoints(
             }
         };
 
-        for service in profile.nf_services {
+        for service in
+            profile
+                .nf_services
+                .into_iter()
+                .chain(profile.nf_service_list.into_iter().filter_map(
+                |(key, service)| {
+                    if service.service_instance_id.as_deref() != Some(key.as_str()) {
+                        log::warn!(
+                            "ignoring NRF nfServiceList entry with mismatched serviceInstanceId"
+                        );
+                        None
+                    } else {
+                        Some(service)
+                    }
+                },
+            ))
+        {
             if service.service_name != config.service_name
                 || !service.nf_service_status.eq_ignore_ascii_case("REGISTERED")
                 || !service.scheme.eq_ignore_ascii_case(expected_scheme)
@@ -229,6 +305,23 @@ fn extract_endpoints(
                 );
                 continue;
             };
+            if let Some(query) = query {
+                if query
+                    .service_instance_id
+                    .as_deref()
+                    .is_some_and(|id| id != service_instance_id)
+                {
+                    continue;
+                }
+                if !service
+                    .versions
+                    .iter()
+                    .any(|v| v.api_version_in_uri == query.api_version)
+                {
+                    invalid_api = true;
+                    continue;
+                }
+            }
             let service_priority = match optional_u16(service.priority, "service priority") {
                 Ok(value) => value,
                 Err(err) => {
@@ -248,11 +341,18 @@ fn extract_endpoints(
                 }
             };
             let metadata = NrfServiceMetadata {
+                authority: query.and_then(|_| service.fqdn.clone().or(profile.fqdn.clone())),
                 nf_instance_id: nf_instance_id.to_string(),
                 service_instance_id: service_instance_id.to_string(),
                 priority: service_priority.or(profile_priority).unwrap_or(u16::MAX),
                 capacity: service_capacity.or(profile_capacity).unwrap_or(1),
             };
+            if query.is_some()
+                && (!super::scp::token(nf_instance_id) || !super::scp::token(service_instance_id))
+            {
+                log::warn!("ignoring NRF service with invalid instance identifiers");
+                continue;
+            }
             let raw_api_prefix = service.api_prefix.as_deref();
             let api_prefix = match normalize_api_prefix(raw_api_prefix) {
                 Ok(api_prefix) => api_prefix,
@@ -264,13 +364,32 @@ fn extract_endpoints(
                     continue;
                 }
             };
+            if query.is_some() {
+                let host = metadata.authority.as_deref().unwrap_or("nf.invalid");
+                if super::scp::ApiRoot::parse(&format!(
+                    "{expected_scheme}://{host}{}",
+                    api_prefix.as_deref().unwrap_or("")
+                ))
+                .map_or(true, |root| {
+                    root.host != host.to_ascii_lowercase() || root.port != default_port
+                }) {
+                    log::warn!("ignoring NRF service with invalid SBI authority or apiPrefix");
+                    continue;
+                }
+            }
 
             let ports = service
                 .ip_end_points
                 .iter()
                 .filter_map(|endpoint| endpoint.port)
                 .collect::<BTreeSet<_>>();
-            if let Some(host) = service.fqdn.as_deref().or(profile.fqdn.as_deref()) {
+            if let Some(host) = service.fqdn.as_deref().or(profile.fqdn.as_deref())
+                && (query.is_none()
+                    || service
+                        .ip_end_points
+                        .iter()
+                        .all(|e| e.ipv4_address.is_none() && e.ipv6_address.is_none()))
+            {
                 let ports = if ports.is_empty() {
                     BTreeSet::from([default_port])
                 } else {
@@ -318,7 +437,7 @@ fn extract_endpoints(
         }
     }
 
-    endpoints
+    let endpoints = endpoints
         .into_iter()
         .map(
             |(metadata, host, port, api_prefix)| CompiledUpstreamServer {
@@ -329,7 +448,9 @@ fn extract_endpoints(
                 nrf_service: Some(metadata),
             },
         )
-        .collect()
+        .collect::<Vec<_>>();
+    let invalid_api = invalid_api && endpoints.is_empty();
+    (endpoints, invalid_api)
 }
 
 fn non_empty_id(value: Option<&str>) -> Option<&str> {
@@ -488,6 +609,7 @@ mod tests {
         capacity: u16,
     ) -> NrfServiceMetadata {
         NrfServiceMetadata {
+            authority: None,
             nf_instance_id: nf_instance_id.into(),
             service_instance_id: service_instance_id.into(),
             priority,
@@ -523,6 +645,85 @@ mod tests {
                 api_prefix: None,
                 nrf_service: Some(metadata("nf-filter", "valid", u16::MAX, 1)),
             }]
+        );
+    }
+
+    #[test]
+    fn delegated_query_filters_nrf_profiles_locally_and_preserves_fqdn_with_ip() {
+        let profile = serde_json::json!({
+            "nfInstanceId":"nf-a", "nfType":"SMF", "nfStatus":"REGISTERED",
+            "nfServiceList": { "service-a": {
+                "serviceInstanceId":"service-a", "serviceName":"nsmf-pdusession",
+                "nfServiceStatus":"REGISTERED", "scheme":"https", "fqdn":"nf.test",
+                "versions":[{"apiVersionInUri":"v1"}], "apiPrefix":"/edge",
+                "ipEndPoints":[{"ipv4Address":"192.0.2.10", "port":8443}]
+            }}
+        });
+        let query = NrfQuery {
+            nf_instance_id: Some("nf-a".into()),
+            service_instance_id: Some("service-a".into()),
+            api_version: "v1".into(),
+            service_names: vec!["nsmf-pdusession".into()],
+            ..Default::default()
+        };
+        let extract = |profile: serde_json::Value, query: &NrfQuery| {
+            extract_query_endpoints(
+                &config(),
+                vec![serde_json::from_value(profile).unwrap()],
+                Some(query),
+            )
+        };
+        let (backends, invalid_api) = extract(profile.clone(), &query);
+        assert!(!invalid_api);
+        assert_eq!(backends.len(), 1);
+        assert_eq!(backends[0].host, "192.0.2.10");
+        assert_eq!(
+            backends[0]
+                .nrf_service
+                .as_ref()
+                .unwrap()
+                .authority
+                .as_deref(),
+            Some("nf.test")
+        );
+        for (field, value) in [
+            ("nfType", "UDM"),
+            ("nfInstanceId", "nf-b"),
+            ("nfStatus", "SUSPENDED"),
+        ] {
+            let mut bad = profile.clone();
+            bad[field] = value.into();
+            assert_eq!(extract(bad, &query), (vec![], false));
+        }
+        for (field, value) in [
+            ("serviceInstanceId", "wrong-key"),
+            ("nfServiceStatus", "SUSPENDED"),
+            ("fqdn", "nf.test/escape"),
+            ("apiPrefix", "/edge/../private"),
+        ] {
+            let mut bad = profile.clone();
+            bad["nfServiceList"]["service-a"][field] = value.into();
+            assert_eq!(extract(bad, &query), (vec![], false));
+        }
+        assert_eq!(
+            extract(
+                profile.clone(),
+                &NrfQuery {
+                    api_version: "v2".into(),
+                    ..query.clone()
+                }
+            ),
+            (vec![], true)
+        );
+        assert_eq!(
+            extract(
+                profile,
+                &NrfQuery {
+                    service_instance_id: Some("other".into()),
+                    ..query
+                }
+            ),
+            (vec![], false)
         );
     }
 

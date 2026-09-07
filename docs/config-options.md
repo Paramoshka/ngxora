@@ -25,6 +25,16 @@ For `gRPC ApplySnapshot` reload semantics, see [docs/README.md](./README.md).
 
 ## Upstream Blocks
 
+For SBI-aware routes, an HTTP-level `scp <name> { ... }` block supports one
+`api_root <http(s)://authority[/prefix]>;`, repeated
+`discovery_upstream <nrf-upstream-name>;` and repeated
+`allow_target_api_root <http(s)://authority[/prefix]>;`. At least one discovery
+template or explicit target is required. A location selects the profile with
+`scp_pass <name>;`, mutually exclusive with other route actions, response caching
+and `proxy_upstream_protocol`. The listener must support HTTP/2 (`h2c on` for
+plaintext, `listen ... ssl http2` for TLS). See [Practical SBI/SCP v1](scp.md) for
+the supported headers, policy boundary, TLS and complete example.
+
 Supported shape:
 
 ```nginx

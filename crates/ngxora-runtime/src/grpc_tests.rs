@@ -436,6 +436,7 @@ URSca2xnSfE3tGjoFkbktp4=
 fn proto_snapshot_converts_into_runtime_router() {
     let snapshot = proto::ConfigSnapshot {
         version: "v2".into(),
+        scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions {
             downstream_keepalive_timeout_seconds: 15,
             tcp_nodelay: true,
@@ -630,6 +631,47 @@ fn proto_snapshot_converts_into_runtime_router() {
 }
 
 #[test]
+fn scp_profiles_round_trip_and_reload_keeps_only_compatible_caches() {
+    let ast = ngxora_config::Ast::parse_config(
+        r#"http { h2c on;
+        scp core { api_root http://scp.test/scp; allow_target_api_root https://nf.test/edge; }
+        server { listen 127.0.0.1:8080; location /scp/ { scp_pass core; } }
+    }"#,
+    )
+    .unwrap();
+    let ir = ngxora_compile::ir::Ir::from_ast(&ast).unwrap();
+    ir.validate().unwrap();
+    let router = CompiledRouter::from_http(&ir.http.unwrap()).unwrap();
+    let state = crate::control::RuntimeState::bootstrap(router.clone());
+    let first = state.snapshot();
+    let wire = proto_snapshot_from_runtime(&first).unwrap();
+    assert_eq!(wire.scp_profiles.len(), 1);
+    assert_eq!(wire.scp_profiles[0].api_root, "http://scp.test/scp");
+    let decoded = runtime_snapshot_from_proto(wire).unwrap();
+    assert_eq!(decoded.router.scp_profiles, router.scp_profiles);
+    assert!(state.apply_snapshot(decoded).applied);
+    assert!(Arc::ptr_eq(
+        &first.scp_profiles["core"],
+        &state.snapshot().scp_profiles["core"]
+    ));
+    let mut changed = router;
+    changed
+        .scp_profiles
+        .get_mut("core")
+        .unwrap()
+        .allowed_target_api_roots = vec!["https://other.test/edge".into()];
+    assert!(
+        state
+            .apply_snapshot(crate::control::ConfigSnapshot::new("changed", changed))
+            .applied
+    );
+    assert!(!Arc::ptr_eq(
+        &first.scp_profiles["core"],
+        &state.snapshot().scp_profiles["core"]
+    ));
+}
+
+#[test]
 fn proto_nrf_discovery_converts_to_ir() {
     let upstreams = upstreams_from_proto(&[proto::UpstreamGroup {
         name: "smf_pool".into(),
@@ -697,6 +739,7 @@ fn proto_nrf_discovery_rejects_unknown_endpoint_scheme() {
 fn proto_snapshot_defaults_tcp_nodelay_to_on() {
     let snapshot = proto::ConfigSnapshot {
         version: "v1".into(),
+        scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
             name: "edge".into(),
@@ -741,6 +784,7 @@ fn proto_snapshot_defaults_tcp_nodelay_to_on() {
 fn proto_redirect_route_converts_into_runtime_return_target() {
     let snapshot = proto::ConfigSnapshot {
         version: "v-redirect".into(),
+        scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
             name: "edge".into(),
@@ -980,6 +1024,7 @@ fn proto_snapshot_roundtrips_upstream_client_certificate() {
 
     let snapshot = proto::ConfigSnapshot {
         version: "mtls-v1".into(),
+        scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
             name: "edge".into(),
@@ -1055,6 +1100,7 @@ fn proto_snapshot_rejects_client_cert_without_key() {
 
     let snapshot = proto::ConfigSnapshot {
         version: "mtls-broken".into(),
+        scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
             name: "edge".into(),
@@ -1105,6 +1151,7 @@ fn proto_snapshot_rejects_client_cert_without_key() {
 
 fn router_with_tls_and_plugin() -> CompiledRouter {
     let http = Http {
+        scp_profiles: Vec::new(),
         upstreams: vec![UpstreamBlock {
             nrf_discovery: None,
             name: "backend-pool".into(),
@@ -1199,6 +1246,7 @@ fn proto_upstream_tls_options_roundtrips_client_certificate() {
 
     let snapshot = proto::ConfigSnapshot {
         version: "v-mtls".into(),
+        scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
             name: "edge".into(),
@@ -1300,6 +1348,7 @@ fn proto_upstream_tls_options_roundtrips_client_certificate() {
 fn proto_rejects_client_certificate_without_key() {
     let snapshot = proto::ConfigSnapshot {
         version: "v-bad".into(),
+        scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
             name: "edge".into(),

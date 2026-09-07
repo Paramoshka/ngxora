@@ -52,6 +52,7 @@ pub struct ApplyResult {
 /// chains, upstream groups, and trusted CA material prebuilt.
 #[derive(Clone)]
 pub struct RuntimeSnapshot {
+    pub(crate) scp_profiles: HashMap<String, Arc<crate::upstreams::scp::RuntimeScp>>,
     pub generation: u64,
     pub version: String,
     pub router: CompiledRouter,
@@ -229,8 +230,23 @@ impl RuntimeState {
         let upstream_groups = build_runtime_upstream_groups(&router, previous)?;
         let trusted_cas = build_runtime_trusted_cas(&router)?;
         let client_identities = build_runtime_client_identities(&router)?;
+        let scp_profiles = router
+            .scp_profiles
+            .iter()
+            .map(|(name, profile)| {
+                if let Some(runtime) = previous
+                    .and_then(|p| p.scp_profiles.get(name))
+                    .filter(|runtime| runtime.matches(profile, &router.upstreams))
+                {
+                    return Ok((name.clone(), runtime.clone()));
+                }
+                crate::upstreams::scp::RuntimeScp::new(profile, &router.upstreams)
+                    .map(|runtime| (name.clone(), Arc::new(runtime)))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
 
         Ok(RuntimeSnapshot {
+            scp_profiles,
             generation,
             version,
             router,
@@ -306,6 +322,9 @@ impl RuntimeNrfDiscovery {
                 if let Some(next_run) = group.run_due_nrf_discovery(now).await {
                     next_wake = next_wake.min(next_run);
                 }
+            }
+            for profile in snapshot.scp_profiles.values() {
+                profile.maintain();
             }
 
             if let Some(ready) = ready_opt.take() {

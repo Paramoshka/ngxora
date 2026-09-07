@@ -93,6 +93,8 @@ pub(crate) struct ClientIdentityKey {
 }
 
 pub struct RuntimeUpstreamGroup {
+    scp_refreshing: std::sync::atomic::AtomicBool,
+    scp_refreshed: tokio::sync::Notify,
     selector: RuntimeUpstreamSelector,
     hash_key: Option<UpstreamHashKey>,
     health_check: Option<RuntimeHealthCheckSchedule>,
@@ -105,6 +107,8 @@ struct RuntimeDiscoverySource {
 }
 
 struct RuntimeNrfDiscovery {
+    refresh_lock: tokio::sync::Mutex<()>,
+    permits: Option<Arc<tokio::sync::Semaphore>>,
     group_name: String,
     client: NrfClient,
     source: RuntimeDiscoverySource,
@@ -116,6 +120,9 @@ struct RuntimeNrfDiscovery {
 }
 
 struct NrfRefreshSchedule {
+    invalid_api: bool,
+    candidate_count: usize,
+    candidates: Vec<CompiledUpstreamServer>,
     next_run_at: Instant,
     expires_at: Option<Instant>,
     failures: u32,
@@ -520,6 +527,9 @@ impl ServiceDiscovery for RuntimeDiscoverySource {
 
 impl RuntimeNrfDiscovery {
     fn record_metrics(&self, now: Instant) {
+        if self.client.query.is_some() {
+            return;
+        }
         let schedule = self.schedule.lock().unwrap();
         let age = schedule
             .last_success_at
@@ -578,7 +588,11 @@ impl RuntimeNrfDiscovery {
     }
 
     async fn record_failure(&self, now: Instant, selector: &RuntimeUpstreamSelector) -> Instant {
-        crate::metrics::record_nrf_discovery_request(&self.group_name, "error");
+        if self.client.query.is_some() {
+            crate::metrics::record_scp_event(&self.group_name, "discovery_error");
+        } else {
+            crate::metrics::record_nrf_discovery_request(&self.group_name, "error");
+        }
         let (next_run_at, expired) = {
             let mut schedule = self.schedule.lock().unwrap();
             schedule.failures = schedule.failures.saturating_add(1);
@@ -656,6 +670,14 @@ impl RuntimeUpstreamSelector {
 
 impl RuntimeUpstreamGroup {
     pub(crate) fn from_compiled(group: &CompiledUpstreamGroup) -> Result<Self, String> {
+        Self::from_compiled_query(group, None, None)
+    }
+
+    pub(super) fn from_compiled_query(
+        group: &CompiledUpstreamGroup,
+        query: Option<super::nrf::NrfQuery>,
+        permits: Option<Arc<tokio::sync::Semaphore>>,
+    ) -> Result<Self, String> {
         if group.servers.is_empty() && group.nrf_discovery.is_none() {
             return Err(format!(
                 "upstream `{}` must define at least one server or nrf_discovery",
@@ -677,14 +699,23 @@ impl RuntimeUpstreamGroup {
 
         let nrf_discovery = match (&group.nrf_discovery, nrf_source, &group.health_check) {
             (Some(config), Some(source), Some(health_check)) => Some(RuntimeNrfDiscovery {
+                refresh_lock: tokio::sync::Mutex::new(()),
+                permits,
                 group_name: group.name.clone(),
-                client: NrfClient::new(config)?,
+                client: {
+                    let mut client = NrfClient::new(config)?;
+                    client.query = query;
+                    client
+                },
                 source,
                 health_check: health_check.clone(),
                 stale_if_error: config.stale_if_error,
                 policy: group.policy,
                 selection: ArcSwapOption::empty(),
                 schedule: Mutex::new(NrfRefreshSchedule {
+                    invalid_api: false,
+                    candidate_count: 0,
+                    candidates: Vec::new(),
                     next_run_at: Instant::now(),
                     expires_at: None,
                     failures: 0,
@@ -702,6 +733,8 @@ impl RuntimeUpstreamGroup {
         };
 
         Ok(Self {
+            scp_refreshing: std::sync::atomic::AtomicBool::new(false),
+            scp_refreshed: tokio::sync::Notify::new(),
             selector,
             hash_key: group.hash_key.clone(),
             health_check: group.health_check.as_ref().map(|health_check| {
@@ -732,6 +765,8 @@ impl RuntimeUpstreamGroup {
 
     pub(crate) async fn run_due_nrf_discovery(&self, now: Instant) -> Option<Instant> {
         let discovery = self.nrf_discovery.as_ref()?;
+        let _refresh_guard = discovery.refresh_lock.lock().await;
+        let now = now.max(Instant::now());
         discovery.record_metrics(now);
         let (next_run, expired) = {
             let schedule = discovery.schedule.lock().unwrap();
@@ -749,10 +784,20 @@ impl RuntimeUpstreamGroup {
             return Some(next_run);
         }
 
+        let _permit = match &discovery.permits {
+            Some(permits) => Some(permits.acquire().await.ok()?),
+            None => None,
+        };
+
         discovery.schedule.lock().unwrap().next_run_at =
             now.checked_add(Duration::from_secs(1)).unwrap_or(now);
         match discovery.discover(now, &self.selector).await {
             Ok(result) => {
+                let candidate_count = result.endpoints.len();
+                if discovery.client.query.is_some() && candidate_count > 256 {
+                    log::warn!("SCP NRF result exceeds 256 endpoints");
+                    return Some(discovery.record_failure(now, &self.selector).await);
+                }
                 let expires_at =
                     nrf_snapshot_expiry(now, result.validity, discovery.stale_if_error);
                 let Some(expires_at) = expires_at else {
@@ -812,11 +857,20 @@ impl RuntimeUpstreamGroup {
                     return Some(discovery.record_failure(now, &self.selector).await);
                 }
                 discovery.publish_selection(selection);
-                crate::metrics::record_nrf_discovery_request(&discovery.group_name, "success");
+                if discovery.client.query.is_some() {
+                    crate::metrics::record_scp_event(&discovery.group_name, "discovery_success");
+                } else {
+                    crate::metrics::record_nrf_discovery_request(&discovery.group_name, "success");
+                }
 
                 let delay = nrf_refresh_delay(result.validity, &discovery.group_name);
                 let next_run_at = now.checked_add(delay).unwrap_or(expires_at).min(expires_at);
                 let mut schedule = discovery.schedule.lock().unwrap();
+                schedule.invalid_api = result.invalid_api;
+                schedule.candidate_count = candidate_count;
+                if discovery.client.query.is_some() {
+                    schedule.candidates = result.endpoints;
+                }
                 schedule.next_run_at = next_run_at;
                 schedule.expires_at = Some(expires_at);
                 schedule.failures = 0;
@@ -834,8 +888,82 @@ impl RuntimeUpstreamGroup {
         }
     }
 
-    fn hash_key(&self) -> Option<&UpstreamHashKey> {
+    pub(super) fn hash_key(&self) -> Option<&UpstreamHashKey> {
         self.hash_key.as_ref()
+    }
+
+    pub(super) fn scp_candidates(&self) -> Vec<CompiledUpstreamServer> {
+        self.nrf_discovery
+            .as_ref()
+            .map(|d| d.schedule.lock().unwrap().candidates.clone())
+            .unwrap_or_default()
+    }
+
+    pub(super) async fn refresh_scp(self: &Arc<Self>) {
+        let notified = self.scp_refreshed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        self.start_scp_refresh();
+        notified.await;
+    }
+
+    pub(super) fn start_scp_refresh(self: &Arc<Self>) {
+        if self
+            .scp_refreshing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let group = self.clone();
+            tokio::spawn(async move {
+                group.run_due_health_check(Instant::now()).await;
+                group.run_due_nrf_discovery(Instant::now()).await;
+                group.scp_refreshing.store(false, Ordering::Release);
+                group.scp_refreshed.notify_waiters();
+            });
+        }
+    }
+
+    pub(super) fn scp_status(&self) -> Result<(), super::scp::ScpError> {
+        let Some(discovery) = &self.nrf_discovery else {
+            return Ok(());
+        };
+        let schedule = discovery.schedule.lock().unwrap();
+        if schedule.last_success_at.is_none()
+            || schedule.expires_at.is_none_or(|at| at <= Instant::now())
+        {
+            return Err(super::scp::ScpError::nrf_unreachable());
+        }
+        if schedule.invalid_api {
+            return Err(super::scp::ScpError::new(
+                400,
+                "INVALID_API",
+                "No NF supports the requested API major version",
+            ));
+        }
+        if schedule.candidate_count == 0 {
+            return Err(super::scp::ScpError::new(
+                400,
+                "NF_DISCOVERY_FAILURE",
+                "No NF matches the discovery factors",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn scp_select(
+        &self,
+        key: &[u8],
+        accept: impl Fn(&CompiledUpstreamServer) -> bool,
+    ) -> Option<CompiledUpstreamServer> {
+        self.scp_status().ok()?;
+        let selection = self.nrf_discovery.as_ref()?.selection.load_full()?;
+        selection.select(key, |backend| {
+            self.selector.backends().ready(backend)
+                && backend
+                    .ext
+                    .get::<CompiledUpstreamServer>()
+                    .is_some_and(&accept)
+        })
     }
 
     fn uses_consistent_hash(&self) -> bool {
@@ -887,6 +1015,7 @@ struct SelectedPeer {
 
 #[derive(Debug, Clone)]
 enum SelectedTarget {
+    Scp(String),
     Upstream(SelectedPeer),
     Return { status: u16, location: String },
 }
@@ -916,6 +1045,9 @@ fn cache_store_allowed(cfg: &CacheConfig, threshold_reached: bool) -> bool {
 }
 
 pub struct ProxyContext {
+    pub(crate) snapshot_generation: u64,
+    pub(crate) scp: Option<super::scp::ScpExchange>,
+    pub(crate) scp_profile: Option<Arc<super::scp::RuntimeScp>>,
     pub(crate) selected: Option<SelectedRoute>,
     pub(crate) plugin_state: PluginState,
     pub(crate) client_max_body_size: Option<u64>,
@@ -943,6 +1075,9 @@ pub struct ProxyContext {
 impl Default for ProxyContext {
     fn default() -> Self {
         Self {
+            snapshot_generation: 0,
+            scp: None,
+            scp_profile: None,
             selected: None,
             plugin_state: PluginState::default(),
             client_max_body_size: None,
@@ -1058,6 +1193,7 @@ impl SelectedRoute {
         session: &Session,
     ) -> PingoraResult<Self> {
         let target = match &resolved.location.target {
+            RouteTarget::Scp { profile } => SelectedTarget::Scp(profile.clone()),
             RouteTarget::Return { status, location } => {
                 return Ok(Self {
                     route_id: resolved.location.route_id,
@@ -1661,6 +1797,7 @@ impl ProxyHttp for DynamicProxy {
 
         let snapshot = self.state.snapshot();
         session.set_keepalive(snapshot.router.http_options.downstream_keepalive_timeout);
+        ctx.snapshot_generation = snapshot.generation;
         ctx.client_max_body_size = snapshot.router.http_options.client_max_body_size;
         ctx.received_body_bytes = 0;
 
@@ -1737,6 +1874,64 @@ impl ProxyHttp for DynamicProxy {
         }
 
         ctx.selected = Some(selected.clone());
+
+        if let SelectedTarget::Scp(name) = &selected.target {
+            let profile = snapshot.scp_profiles.get(name).cloned().ok_or_else(|| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    "SCP profile missing in snapshot",
+                )
+            })?;
+            ctx.scp_profile = Some(profile.clone());
+            if session.req_header().version != http::Version::HTTP_2 {
+                let error = super::scp::ScpError::new(
+                    505,
+                    "UNSPECIFIED_MSG_FAILURE",
+                    "SCP requires HTTP/2",
+                );
+                write_local_response(session, error.response(&profile.root.host)).await?;
+                return Ok(true);
+            }
+            let request = super::scp::ScpRequest::parse(
+                &session.req_header().headers,
+                &session.req_header().method,
+                &session.req_header().uri,
+                &profile.root,
+            );
+            let result = match request {
+                Ok(request) => {
+                    profile
+                        .route(
+                            request,
+                            &session.req_header().headers,
+                            client_ip
+                                .map(|ip| ip.to_string())
+                                .unwrap_or_default()
+                                .as_bytes(),
+                        )
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(exchange) => {
+                    crate::metrics::record_scp_event(
+                        name,
+                        if exchange.request.bound {
+                            "binding"
+                        } else {
+                            "route"
+                        },
+                    );
+                    ctx.scp = Some(exchange);
+                }
+                Err(error) => {
+                    crate::metrics::record_scp_event(name, error.cause);
+                    write_local_response(session, error.response(&profile.root.host)).await?;
+                    return Ok(true);
+                }
+            }
+        }
 
         // Authentication, rate limiting, and other request plugins must run
         // before a cache hit can terminate the request.
@@ -1847,6 +2042,12 @@ impl ProxyHttp for DynamicProxy {
 
         // ── Inject W3C TraceContext into upstream headers ──
         crate::tracing::inject_context(&ctx.upstream_trace_ctx, &mut upstream_request.headers);
+        if let Some(exchange) = &ctx.scp {
+            upstream_request.set_uri(exchange.upstream_uri().map_err(|e| {
+                pingora::Error::explain(pingora::ErrorType::HTTPStatus(e.status), e.detail)
+            })?);
+            exchange.request_headers(&mut upstream_request.headers);
+        }
 
         Ok(())
     }
@@ -1858,12 +2059,51 @@ impl ProxyHttp for DynamicProxy {
     async fn fail_to_proxy(
         &self,
         session: &mut Session,
-        _error: &pingora::Error,
+        proxy_error: &pingora::Error,
         ctx: &mut Self::CTX,
     ) -> pingora_proxy::FailToProxy
     where
         Self::CTX: Send + Sync,
     {
+        if let Some(profile) = &ctx.scp_profile {
+            use pingora::{ErrorSource, ErrorType};
+            let error = match proxy_error.etype() {
+                ErrorType::HTTPStatus(504) => super::scp::ScpError::target_unreachable(),
+                ErrorType::HTTPStatus(status) => super::scp::ScpError::new(
+                    *status,
+                    "UNSPECIFIED_MSG_FAILURE",
+                    "HTTP request failed",
+                ),
+                _ if proxy_error.esource() == &ErrorSource::Upstream => {
+                    super::scp::ScpError::target_unreachable()
+                }
+                _ if proxy_error.esource() == &ErrorSource::Downstream => {
+                    super::scp::ScpError::new(
+                        400,
+                        "UNSPECIFIED_MSG_FAILURE",
+                        "Downstream request failed",
+                    )
+                }
+                _ => super::scp::ScpError::new(500, "SYSTEM_FAILURE", "Internal proxy failure"),
+            };
+            crate::metrics::record_scp_event(&profile.config.name, error.cause);
+            // Never append a ProblemDetails document to an already streaming response.
+            if let Some(response) = session.response_written() {
+                return pingora_proxy::FailToProxy {
+                    can_reuse_downstream: false,
+                    error_code: response.status.as_u16(),
+                };
+            }
+            if let Err(write_error) =
+                write_local_response(session, error.response(&profile.root.host)).await
+            {
+                log::debug!("SCP error response could not be delivered: {write_error}");
+            }
+            return pingora_proxy::FailToProxy {
+                can_reuse_downstream: false,
+                error_code: error.status,
+            };
+        }
         let Some(selected) = ctx.selected.as_ref() else {
             return pingora_proxy::FailToProxy {
                 can_reuse_downstream: false,
@@ -1953,6 +2193,9 @@ impl ProxyHttp for DynamicProxy {
                 format!("failed to update response status from plugin chain: {err}"),
             )
         })?;
+        if let Some(exchange) = &ctx.scp {
+            exchange.response_headers(&mut upstream_response.headers);
+        }
 
         // Cacheability must be evaluated against the final response that the
         // client will actually receive after plugins mutate headers/status.
@@ -2036,10 +2279,12 @@ impl ProxyHttp for DynamicProxy {
             .unwrap_or(0);
         let latency = ctx.start_time.elapsed();
         let upstream = ctx.selected.as_ref().and_then(|s| match &s.target {
+            SelectedTarget::Scp(_) => ctx.scp.as_ref().map(|e| e.root.value()),
             SelectedTarget::Upstream(peer) => Some(format!("{}:{}", peer.host, peer.port)),
             SelectedTarget::Return { .. } => None,
         });
         let upstream_group = ctx.selected.as_ref().and_then(|s| match &s.target {
+            SelectedTarget::Scp(name) => Some(name.as_str()),
             SelectedTarget::Upstream(peer) => peer.upstream_group.as_deref(),
             SelectedTarget::Return { .. } => None,
         });
@@ -2094,6 +2339,9 @@ impl ProxyHttp for DynamicProxy {
                 upstream_group,
                 Some(cache_status),
                 route_id,
+                ctx.scp
+                    .as_ref()
+                    .and_then(|e| e.backend.nrf_service.as_ref()),
             );
         }
 
@@ -2116,6 +2364,7 @@ impl ProxyHttp for DynamicProxy {
             ctx.response_body_buf.len() as u64,
         );
         if ctx.upstream_attempted
+            && ctx.scp_profile.is_none()
             && let (Some(group), Some(backend)) = (upstream_group, upstream.as_deref())
         {
             crate::metrics::record_upstream_backend_metrics(
@@ -2187,6 +2436,76 @@ impl ProxyHttp for DynamicProxy {
         };
 
         let peer = match &selected.target {
+            SelectedTarget::Scp(_) => {
+                let exchange = ctx.scp.as_ref().ok_or_else(|| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::InternalError,
+                        "SCP request was not authorized",
+                    )
+                })?;
+                ctx.upstream_attempted = true;
+                let tls = exchange.root.scheme == "https";
+                // HttpPeer::new unwraps DNS failures. Resolve asynchronously and
+                // bound the lookup before handing Pingora a concrete address.
+                let address = tokio::time::timeout(
+                    selected
+                        .upstream_timeouts
+                        .connect
+                        .unwrap_or(Duration::from_secs(5)),
+                    tokio::net::lookup_host((
+                        exchange.backend.host.as_str(),
+                        exchange.backend.port,
+                    )),
+                )
+                .await
+                .map_err(|_| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::HTTPStatus(504),
+                        "SCP target DNS timeout",
+                    )
+                })?
+                .map_err(|e| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::HTTPStatus(504),
+                        format!("SCP target DNS failure: {e}"),
+                    )
+                })?
+                .next()
+                .ok_or_else(|| {
+                    pingora::Error::explain(
+                        pingora::ErrorType::HTTPStatus(504),
+                        "SCP target DNS returned no addresses",
+                    )
+                })?;
+                let mut peer = HttpPeer::new(address, tls, exchange.root.host.clone());
+                // Pingora's pool key omits the trusted CA. Isolate routes and
+                // snapshot generations so CA changes require a new handshake.
+                let mut pool_key = std::collections::hash_map::DefaultHasher::new();
+                (
+                    "scp",
+                    ctx.snapshot_generation,
+                    selected.route_id,
+                    &exchange.profile.config.name,
+                )
+                    .hash(&mut pool_key);
+                peer.group_key = pool_key.finish();
+                apply_upstream_timeouts(&mut peer, selected.upstream_timeouts);
+                apply_upstream_http_protocol(
+                    &mut peer,
+                    Some(if tls {
+                        UpstreamHttpProtocol::H2
+                    } else {
+                        UpstreamHttpProtocol::H2c
+                    }),
+                );
+                apply_upstream_ssl_options(
+                    &mut peer,
+                    &selected.upstream_ssl_options,
+                    selected.upstream_trusted_ca.as_ref(),
+                    selected.upstream_client_identity.as_ref(),
+                );
+                return Ok(Box::new(peer));
+            }
             SelectedTarget::Upstream(peer) => peer,
             SelectedTarget::Return { .. } => {
                 return Err(pingora::Error::explain(
@@ -2209,6 +2528,38 @@ impl ProxyHttp for DynamicProxy {
         );
 
         Ok(Box::new(http_peer))
+    }
+
+    fn fail_to_connect(
+        &self,
+        _session: &mut Session,
+        _peer: &HttpPeer,
+        ctx: &mut Self::CTX,
+        mut error: Box<pingora::Error>,
+    ) -> Box<pingora::Error> {
+        if let Some(exchange) = &mut ctx.scp {
+            error.retry = exchange.retry_connect().into();
+        }
+        error
+    }
+
+    fn error_while_proxy(
+        &self,
+        peer: &HttpPeer,
+        session: &mut Session,
+        mut error: Box<pingora::Error>,
+        ctx: &mut Self::CTX,
+        reused: bool,
+    ) -> Box<pingora::Error> {
+        if ctx.scp_profile.is_some() {
+            error.retry = false.into();
+        } else {
+            error = error.more_context(format!("Peer: {peer}"));
+            error
+                .retry
+                .decide_reuse(reused && !session.as_ref().retry_buffer_truncated());
+        }
+        error
     }
 }
 
@@ -2295,6 +2646,7 @@ mod tests {
             weight: 1,
             api_prefix: None,
             nrf_service: Some(NrfServiceMetadata {
+                authority: None,
                 nf_instance_id: nf_instance_id.into(),
                 service_instance_id: service_instance_id.into(),
                 priority,

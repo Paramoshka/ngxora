@@ -35,6 +35,31 @@ macro_rules! metric {
     }};
 }
 
+pub(crate) fn record_scp_event(profile: &str, event: &str) {
+    metric!(
+        IntCounterVec,
+        IntCounterVec::new,
+        Opts::new(
+            "ngxora_scp_events_total",
+            "SCP routing and discovery events."
+        ),
+        &["profile", "event"]
+    )
+    .with_label_values(&[profile, event])
+    .inc();
+}
+
+pub(crate) fn set_scp_cache_entries(profile: &str, count: usize) {
+    metric!(
+        IntGaugeVec,
+        IntGaugeVec::new,
+        Opts::new("ngxora_scp_cache_entries", "SCP discovery cache entries."),
+        &["profile"]
+    )
+    .with_label_values(&[profile])
+    .set(count as i64);
+}
+
 /// Total number of proxied HTTP requests.
 fn requests_total() -> &'static IntCounterVec {
     metric!(
@@ -330,6 +355,10 @@ struct AccessLogEntry {
     route_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nf_instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nf_service_instance_id: Option<String>,
 }
 
 /// Write a structured JSON access log line.
@@ -343,6 +372,7 @@ pub(crate) fn write_access_log(
     upstream_group: Option<&str>,
     cache_status: Option<&str>,
     route_id: Option<u64>,
+    nf: Option<&crate::upstreams::NrfServiceMetadata>,
 ) {
     let latency_secs = latency.map(|d| d.as_secs_f64());
 
@@ -367,6 +397,8 @@ pub(crate) fn write_access_log(
         client_ip,
         route_id,
         request_id,
+        nf_instance_id: nf.map(|m| m.nf_instance_id.clone()),
+        nf_service_instance_id: nf.map(|m| m.service_instance_id.clone()),
     };
 
     // Write to stdout (explicit flush — Docker buffers non-tty stdout).
