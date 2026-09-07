@@ -1,5 +1,6 @@
 use super::*;
 use crate::upstreams::CompiledRouter;
+use http::Method;
 
 fn compile(config: &str) -> Result<CompiledRouter, String> {
     let ast = ngxora_config::Ast::parse_config(config).map_err(|e| format!("{e:?}"))?;

@@ -1,17 +1,20 @@
-use super::types::{
-    CompiledHealthCheck, CompiledLocation, CompiledMatcher, CompiledNrfDiscovery, CompiledRouter,
-    CompiledUpstreamGroup, CompiledUpstreamServer, HealthCheckType, HttpRuntimeOptions, ListenKey,
-    ListenerProtocolConfig, ListenerTlsConfig, ListenerTlsSettings, RouteTarget, ServerRoutes,
+//! Compile and validate listener topology into the runtime router.
+
+use crate::upstreams::types::{
+    CompiledRouter, HttpRuntimeOptions, ListenKey, ListenerProtocolConfig, ListenerTlsConfig,
+    ListenerTlsSettings, RouteTarget, ServerRoutes,
 };
 use ngxora_compile::ir::{
-    DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, Location, LocationDirective,
-    NrfDiscovery, PemSource, ProxyPassTarget, Server, SslProvider, Switch, TlsIdentity,
-    UpstreamBlock, UpstreamHealthCheck, UpstreamHealthCheckType, UpstreamHttpProtocol,
-    UpstreamSelectionPolicy, UpstreamServer, UpstreamSslOptions, UpstreamTimeouts,
+    DownstreamTlsOptions, Http, KeepaliveTimeout, Listen, PemSource, Server, SslProvider, Switch,
+    TlsIdentity,
 };
-use std::collections::HashMap;
+use routes::compile_locations;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use upstream_groups::compile_upstreams;
+
+mod routes;
+mod upstream_groups;
 
 impl CompiledRouter {
     pub fn from_http(http: &Http) -> Result<Self, String> {
@@ -44,7 +47,7 @@ impl CompiledRouter {
         let mut next_route_id = 1;
 
         for profile in &http.scp_profiles {
-            super::scp::validate_profile(profile, &router.upstreams)?;
+            crate::upstreams::scp::validate_profile(profile, &router.upstreams)?;
             if router
                 .scp_profiles
                 .insert(profile.name.clone(), profile.clone())
@@ -74,7 +77,7 @@ impl CompiledRouter {
                 let suffix = name
                     .strip_prefix("*.")
                     .ok_or("only leading *. hostnames are supported")?;
-                super::http_routes::validate_hostname(suffix.trim_end_matches('.'))?;
+                crate::upstreams::http_routes::validate_hostname(suffix.trim_end_matches('.'))?;
             }
         }
         let routes = ServerRoutes {
@@ -103,9 +106,10 @@ impl CompiledRouter {
             let listener = self.listeners.entry(listen_key.clone()).or_default();
 
             for name in &server.server_names {
-                listener
-                    .named
-                    .insert(super::http_routes::normalize_hostname(name), routes.clone());
+                listener.named.insert(
+                    crate::upstreams::http_routes::normalize_hostname(name),
+                    routes.clone(),
+                );
             }
 
             if listen.default_server
@@ -146,7 +150,7 @@ impl CompiledRouter {
 
                     for name in &server.server_names {
                         listener_tls.named.insert(
-                            super::http_routes::normalize_hostname(name),
+                            crate::upstreams::http_routes::normalize_hostname(name),
                             tls_identity.clone(),
                         );
                     }
@@ -210,215 +214,6 @@ impl CompiledRouter {
     }
 }
 
-fn normalize_upstream_name(name: &str) -> String {
-    name.trim_end_matches('.').to_ascii_lowercase()
-}
-
-fn compile_upstream_server(server: &UpstreamServer) -> Result<CompiledUpstreamServer, String> {
-    if server.host.trim().is_empty() {
-        return Err("upstream server host cannot be empty".into());
-    }
-    if server.port == 0 {
-        return Err(format!(
-            "upstream server `{}` port must be greater than zero",
-            server.host
-        ));
-    }
-
-    Ok(CompiledUpstreamServer {
-        host: server.host.clone(),
-        port: server.port,
-        weight: server.weight,
-        api_prefix: None,
-        nrf_service: None,
-    })
-}
-
-fn compile_upstream_health_check(
-    health_check: &UpstreamHealthCheck,
-) -> Result<CompiledHealthCheck, String> {
-    if health_check.timeout.is_zero() {
-        return Err("health_check timeout must be greater than zero".into());
-    }
-    if health_check.interval.is_zero() {
-        return Err("health_check interval must be greater than zero".into());
-    }
-    if health_check.consecutive_success == 0 {
-        return Err("health_check consecutive_success must be greater than zero".into());
-    }
-    if health_check.consecutive_failure == 0 {
-        return Err("health_check consecutive_failure must be greater than zero".into());
-    }
-
-    let check_type = match &health_check.check_type {
-        UpstreamHealthCheckType::Tcp => HealthCheckType::Tcp,
-        UpstreamHealthCheckType::Http {
-            host,
-            path,
-            use_tls,
-        } => {
-            if host.trim().is_empty() {
-                return Err("health_check http host cannot be empty".into());
-            }
-            let uri = path
-                .parse::<http::Uri>()
-                .map_err(|err| format!("invalid health_check path `{path}`: {err}"))?;
-            if uri.scheme().is_some() || uri.authority().is_some() || !path.starts_with('/') {
-                return Err(format!(
-                    "health_check path `{path}` must be an origin-form path starting with `/`"
-                ));
-            }
-            HealthCheckType::Http {
-                host: host.clone(),
-                path: path.clone(),
-                use_tls: *use_tls,
-            }
-        }
-    };
-
-    Ok(CompiledHealthCheck {
-        check_type,
-        timeout: health_check.timeout,
-        interval: health_check.interval,
-        consecutive_success: health_check.consecutive_success,
-        consecutive_failure: health_check.consecutive_failure,
-    })
-}
-
-fn compile_nrf_discovery(discovery: &NrfDiscovery) -> Result<CompiledNrfDiscovery, String> {
-    let api_root = url::Url::parse(&discovery.api_root)
-        .map_err(|err| format!("nrf_discovery api_root is invalid: {err}"))?;
-    if !matches!(api_root.scheme(), "http" | "https") {
-        return Err("nrf_discovery api_root must use http or https".into());
-    }
-    if api_root.host_str().is_none() || api_root.cannot_be_a_base() {
-        return Err("nrf_discovery api_root must be an absolute HTTP URL".into());
-    }
-    if api_root.query().is_some() || api_root.fragment().is_some() {
-        return Err("nrf_discovery api_root must not contain a query or fragment".into());
-    }
-    if discovery.timeout.is_zero() {
-        return Err("nrf_discovery timeout must be greater than zero".into());
-    }
-    if discovery.stale_if_error.is_zero() {
-        return Err("nrf_discovery stale_if_error must be greater than zero".into());
-    }
-    match (
-        &discovery.tls_options.client_certificate,
-        &discovery.tls_options.client_certificate_key,
-    ) {
-        (Some(_), Some(_)) | (None, None) => {}
-        _ => {
-            return Err(
-                "nrf_discovery ssl_certificate and ssl_certificate_key must be configured together"
-                    .into(),
-            );
-        }
-    }
-
-    Ok(CompiledNrfDiscovery {
-        api_root,
-        target_nf_type: discovery.target_nf_type.trim().to_ascii_uppercase(),
-        requester_nf_type: discovery.requester_nf_type.trim().to_ascii_uppercase(),
-        service_name: discovery.service_name.trim().to_string(),
-        endpoint_scheme: discovery.endpoint_scheme,
-        timeout: discovery.timeout,
-        stale_if_error: discovery.stale_if_error,
-        tls_options: discovery.tls_options.clone(),
-    })
-}
-
-fn compile_upstreams(
-    upstreams: &[UpstreamBlock],
-) -> Result<HashMap<String, CompiledUpstreamGroup>, String> {
-    let mut compiled = HashMap::with_capacity(upstreams.len());
-
-    for upstream in upstreams {
-        let name = normalize_upstream_name(&upstream.name);
-        if name.is_empty() {
-            return Err("upstream name cannot be empty".into());
-        }
-        if upstream.servers.is_empty() && upstream.nrf_discovery.is_none() && !upstream.allow_empty
-        {
-            return Err(format!(
-                "upstream `{}` must define at least one server or nrf_discovery",
-                upstream.name
-            ));
-        }
-        if !upstream.servers.is_empty() && upstream.nrf_discovery.is_some() {
-            return Err(format!(
-                "upstream `{}` cannot combine server directives with nrf_discovery",
-                upstream.name
-            ));
-        }
-        if upstream.nrf_discovery.is_some() && upstream.health_check.is_none() {
-            return Err(format!(
-                "upstream `{}` with nrf_discovery must define health_check",
-                upstream.name
-            ));
-        }
-        let total_weight = upstream.servers.iter().try_fold(0u32, |total, server| {
-            if server.weight == 0 {
-                return Err(format!(
-                    "upstream `{}` backend `{}:{}` weight must be greater than zero",
-                    upstream.name, server.host, server.port
-                ));
-            }
-            Ok(total + u32::from(server.weight))
-        })?;
-        if total_weight > u32::from(u16::MAX) {
-            return Err(format!(
-                "upstream `{}` total backend weight must not exceed {}",
-                upstream.name,
-                u16::MAX
-            ));
-        }
-        if upstream.hash_key.is_some() && upstream.policy != UpstreamSelectionPolicy::ConsistentHash
-        {
-            return Err(format!(
-                "upstream `{}` hash_key requires policy consistent_hash",
-                upstream.name
-            ));
-        }
-        if let Some(ngxora_compile::ir::UpstreamHashKey::Header(name)) = &upstream.hash_key {
-            http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                format!(
-                    "upstream `{}` hash_key has invalid HTTP header name `{name}`",
-                    upstream.name
-                )
-            })?;
-        }
-
-        let group = CompiledUpstreamGroup {
-            allow_empty: upstream.allow_empty,
-            name: upstream.name.clone(),
-            policy: upstream.policy,
-            hash_key: upstream.hash_key.clone(),
-            servers: upstream
-                .servers
-                .iter()
-                .map(compile_upstream_server)
-                .collect::<Result<Vec<_>, _>>()?,
-            nrf_discovery: upstream
-                .nrf_discovery
-                .as_ref()
-                .map(compile_nrf_discovery)
-                .transpose()?,
-            health_check: upstream
-                .health_check
-                .as_ref()
-                .map(compile_upstream_health_check)
-                .transpose()?,
-        };
-
-        if compiled.insert(name.clone(), group).is_some() {
-            return Err(format!("upstream `{}` is duplicated", upstream.name));
-        }
-    }
-
-    Ok(compiled)
-}
-
 fn listen_key_addr(key: &ListenKey) -> String {
     std::net::SocketAddr::new(key.addr, key.port).to_string()
 }
@@ -429,418 +224,6 @@ pub(super) fn proxy_pass_sni(host: &str, tls: bool) -> String {
     } else {
         String::new()
     }
-}
-
-fn proxy_pass_tls(scheme: &str) -> Option<bool> {
-    match scheme {
-        "http" => Some(false),
-        "https" => Some(true),
-        _ => None,
-    }
-}
-
-fn upstream_group_from_url<'a>(
-    url: &url::Url,
-    upstreams: &'a HashMap<String, CompiledUpstreamGroup>,
-) -> Option<&'a CompiledUpstreamGroup> {
-    if url.port().is_some() {
-        return None;
-    }
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.path() != "/"
-    {
-        return None;
-    }
-
-    let host = normalize_upstream_name(url.host_str()?);
-    upstreams.get(&host)
-}
-
-fn set_timeout_once(
-    slot: &mut Option<std::time::Duration>,
-    value: std::time::Duration,
-    directive: &str,
-) -> Result<(), String> {
-    if slot.replace(value).is_some() {
-        return Err(format!("{directive} is duplicated in the same location"));
-    }
-
-    Ok(())
-}
-
-fn route_target_from_directive(
-    directive: &LocationDirective,
-    upstreams: &HashMap<String, CompiledUpstreamGroup>,
-) -> Result<Option<RouteTarget>, String> {
-    match directive {
-        LocationDirective::DirectResponse(status) => {
-            validate_direct_status(*status)?;
-            Ok(Some(RouteTarget::DirectResponse(*status)))
-        }
-        LocationDirective::HttpRedirect(config) => {
-            Ok(Some(RouteTarget::HttpRedirect(config.clone())))
-        }
-        LocationDirective::WeightedBackends(backends) => {
-            if backends.is_empty() {
-                return Err("weighted_backends must not be empty".into());
-            }
-            let backends = backends
-                .iter()
-                .map(|backend| {
-                    if backend.weight > 1_000_000 {
-                        return Err("backend weight exceeds 1000000".into());
-                    }
-                    let directive = match &backend.target {
-                        ngxora_compile::ir::BackendTarget::Upstream(target) => {
-                            LocationDirective::ProxyPass(target.clone())
-                        }
-                        ngxora_compile::ir::BackendTarget::Response(status) => {
-                            LocationDirective::DirectResponse(*status)
-                        }
-                    };
-                    let target = route_target_from_directive(&directive, upstreams)?
-                        .ok_or("invalid weighted backend target")?;
-                    Ok(super::types::CompiledWeightedBackend {
-                        weight: backend.weight,
-                        target,
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok(Some(RouteTarget::WeightedBackends(backends)))
-        }
-        LocationDirective::ScpPass(profile) => Ok(Some(RouteTarget::Scp {
-            profile: profile.clone(),
-        })),
-        LocationDirective::ProxyPass(ProxyPassTarget::Url(url)) => {
-            if let Some(group) = upstream_group_from_url(url, upstreams) {
-                let tls = proxy_pass_tls(url.scheme())
-                    .ok_or_else(|| format!("unsupported proxy_pass scheme `{}`", url.scheme()))?;
-                validate_nrf_route_scheme(group, tls)?;
-                return Ok(Some(RouteTarget::UpstreamGroup {
-                    name: group.name.clone(),
-                    tls,
-                }));
-            }
-
-            let Some(host) = url.host_str().map(ToString::to_string) else {
-                return Ok(None);
-            };
-            let Some(port) = url.port_or_known_default() else {
-                return Ok(None);
-            };
-            let tls = match proxy_pass_tls(url.scheme()) {
-                Some(value) => value,
-                None => return Ok(None),
-            };
-
-            Ok(Some(RouteTarget::ProxyPass {
-                sni: proxy_pass_sni(&host, tls),
-                host,
-                port,
-                tls,
-            }))
-        }
-
-        LocationDirective::ProxyPass(ProxyPassTarget::UpstreamGroup { name, tls }) => {
-            let normalized = normalize_upstream_name(name);
-            let group = upstreams
-                .get(&normalized)
-                .ok_or_else(|| format!("proxy_pass references unknown upstream `{name}`"))?;
-            validate_nrf_route_scheme(group, *tls)?;
-            Ok(Some(RouteTarget::UpstreamGroup {
-                name: group.name.clone(),
-                tls: *tls,
-            }))
-        }
-
-        LocationDirective::Return { status, location } => Ok(Some(RouteTarget::Return {
-            status: *status,
-            location: location.clone(),
-        })),
-
-        _ => Ok(None),
-    }
-}
-
-fn validate_nrf_route_scheme(group: &CompiledUpstreamGroup, tls: bool) -> Result<(), String> {
-    let Some(discovery) = group.nrf_discovery.as_ref() else {
-        return Ok(());
-    };
-    let expects_tls = matches!(
-        discovery.endpoint_scheme,
-        ngxora_compile::ir::NrfEndpointScheme::Https
-    );
-    if tls != expects_tls {
-        return Err(format!(
-            "proxy_pass scheme for NRF upstream `{}` must match endpoint_scheme {}",
-            group.name,
-            if expects_tls { "https" } else { "http" }
-        ));
-    }
-    Ok(())
-}
-
-fn route_target(
-    location: &Location,
-    upstreams: &HashMap<String, CompiledUpstreamGroup>,
-) -> Result<Option<RouteTarget>, String> {
-    location
-        .directives
-        .iter()
-        .find_map(
-            |directive| match route_target_from_directive(directive, upstreams) {
-                Ok(Some(target)) => Some(Ok(target)),
-                Ok(None) => None,
-                Err(err) => Some(Err(err)),
-            },
-        )
-        .transpose()
-}
-
-fn compile_upstream_timeouts(location: &Location) -> Result<UpstreamTimeouts, String> {
-    let mut timeouts = UpstreamTimeouts::default();
-
-    for directive in &location.directives {
-        match directive {
-            LocationDirective::ProxyConnectTimeout(value) => {
-                set_timeout_once(&mut timeouts.connect, *value, "proxy_connect_timeout")?;
-            }
-            LocationDirective::ProxyReadTimeout(value) => {
-                set_timeout_once(&mut timeouts.read, *value, "proxy_read_timeout")?;
-            }
-            LocationDirective::ProxyWriteTimeout(value) => {
-                set_timeout_once(&mut timeouts.write, *value, "proxy_write_timeout")?;
-            }
-            _ => {}
-        }
-    }
-
-    Ok(timeouts)
-}
-
-fn compile_upstream_protocol(
-    location: &Location,
-    target: &RouteTarget,
-) -> Result<Option<UpstreamHttpProtocol>, String> {
-    let mut protocol = None;
-
-    for directive in &location.directives {
-        if let LocationDirective::ProxyUpstreamProtocol(value) = directive {
-            if protocol.replace(*value).is_some() {
-                return Err("proxy_upstream_protocol is duplicated in the same location".into());
-            }
-        }
-    }
-
-    if let Some(protocol) = protocol {
-        let target_uses_tls = match target {
-            RouteTarget::Scp { .. } => return Err("scp_pass chooses HTTP/2 transport from the target scheme; omit proxy_upstream_protocol".into()),
-            RouteTarget::ProxyPass { tls, .. } | RouteTarget::UpstreamGroup { tls, .. } => *tls,
-            RouteTarget::Return { .. } | RouteTarget::DirectResponse(_) | RouteTarget::HttpRedirect(_) => return Ok(None),
-            RouteTarget::WeightedBackends(backends) => {
-                for backend in backends { compile_upstream_protocol(location, &backend.target)?; }
-                return Ok(Some(protocol));
-            }
-        };
-
-        match protocol {
-            UpstreamHttpProtocol::H1 => {}
-            UpstreamHttpProtocol::H2 if !target_uses_tls => {
-                return Err(
-                    "proxy_upstream_protocol h2 requires TLS upstream; use https proxy_pass or h2c"
-                        .into(),
-                );
-            }
-            UpstreamHttpProtocol::H2c if target_uses_tls => {
-                return Err(
-                    "proxy_upstream_protocol h2c requires plaintext upstream; use http proxy_pass"
-                        .into(),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    Ok(protocol)
-}
-
-fn compile_upstream_ssl_options(location: &Location) -> Result<UpstreamSslOptions, String> {
-    let mut options = UpstreamSslOptions::default();
-    let mut seen_cert = false;
-    let mut seen_key = false;
-
-    for directive in &location.directives {
-        match directive {
-            LocationDirective::ProxySslVerify(switch) => {
-                options.verify_cert = *switch;
-            }
-            LocationDirective::ProxySslTrustedCertificate(pem_source) => {
-                options.trusted_certificate = Some(pem_source.clone());
-            }
-            LocationDirective::ProxySslCertificate(pem_source) => {
-                if seen_cert {
-                    return Err("proxy_ssl_certificate is duplicated in the same location".into());
-                }
-                seen_cert = true;
-                options.client_certificate = Some(pem_source.clone());
-            }
-            LocationDirective::ProxySslCertificateKey(pem_source) => {
-                if seen_key {
-                    return Err(
-                        "proxy_ssl_certificate_key is duplicated in the same location".into(),
-                    );
-                }
-                seen_key = true;
-                options.client_certificate_key = Some(pem_source.clone());
-            }
-            _ => {}
-        }
-    }
-
-    // mTLS to upstream requires both the client certificate and its private key.
-    match (
-        options.client_certificate.is_some(),
-        options.client_certificate_key.is_some(),
-    ) {
-        (true, false) => {
-            return Err("proxy_ssl_certificate requires proxy_ssl_certificate_key".into());
-        }
-        (false, true) => {
-            return Err("proxy_ssl_certificate_key requires proxy_ssl_certificate".into());
-        }
-        _ => {}
-    }
-
-    Ok(options)
-}
-
-fn compile_location(
-    location: &Location,
-    upstreams: &HashMap<String, CompiledUpstreamGroup>,
-    next_route_id: &mut u64,
-) -> Result<Option<CompiledLocation>, String> {
-    let mut action_count = 0;
-    for directive in &location.directives {
-        match directive {
-            LocationDirective::ProxyPass(_)
-            | LocationDirective::ScpPass(_)
-            | LocationDirective::Return { .. }
-            | LocationDirective::WeightedBackends(_)
-            | LocationDirective::DirectResponse(_)
-            | LocationDirective::HttpRedirect(_) => {
-                action_count += 1;
-            }
-            LocationDirective::Root(_) => return Err("root is not supported at runtime".into()),
-            LocationDirective::TryFiles(_) => {
-                return Err("try_files is not supported at runtime".into());
-            }
-            _ => {}
-        }
-    }
-    if action_count != 1 {
-        return Err("location must contain exactly one proxy_pass or return directive".into());
-    }
-
-    let Some(target) = route_target(location, upstreams)? else {
-        return Ok(None);
-    };
-    let upstream_protocol = compile_upstream_protocol(location, &target)?;
-    if matches!(target, RouteTarget::Scp { .. }) && location.cache.is_some() {
-        return Err("scp_pass cannot be combined with proxy_cache".into());
-    }
-
-    let matcher = CompiledMatcher::try_from(&location.matcher)?;
-    let mut url_rewrite = None;
-    for directive in &location.directives {
-        if let LocationDirective::UrlRewrite(rewrite) = directive {
-            if url_rewrite.replace(rewrite.clone()).is_some() {
-                return Err("duplicate URL rewrite".into());
-            }
-            if !matches!(
-                target,
-                RouteTarget::ProxyPass { .. }
-                    | RouteTarget::UpstreamGroup { .. }
-                    | RouteTarget::WeightedBackends(_)
-            ) {
-                return Err("URL rewrite requires an upstream action".into());
-            }
-            if let Some(host) = &rewrite.hostname {
-                super::http_routes::validate_hostname(host)?;
-            }
-            super::http_routes::validate_modifier(rewrite.path.as_ref(), &matcher)?;
-        }
-    }
-    match &target {
-        RouteTarget::HttpRedirect(config) => {
-            if ![301, 302, 303, 307, 308].contains(&config.status) {
-                return Err("invalid HTTP redirect status".into());
-            }
-            if config
-                .scheme
-                .as_deref()
-                .is_some_and(|s| !matches!(s, "http" | "https"))
-            {
-                return Err("redirect scheme must be http or https".into());
-            }
-            if config.port == Some(0) {
-                return Err("redirect port must be positive".into());
-            }
-            if let Some(host) = &config.hostname {
-                super::http_routes::validate_hostname(host)?;
-            }
-            super::http_routes::validate_modifier(config.path.as_ref(), &matcher)?;
-        }
-        RouteTarget::Return { status, location } => {
-            if !(300..400).contains(status) {
-                return Err("return requires a 3xx status".into());
-            }
-            super::http_routes::expand_return(location, "example.com", "/", "http")?;
-            http::HeaderValue::from_str(location).map_err(|_| "invalid redirect location")?;
-        }
-        _ => {}
-    }
-    let compiled = CompiledLocation {
-        url_rewrite,
-        route_id: *next_route_id,
-        matcher,
-        access_rules: location.access_rules.clone(),
-        target,
-        upstream_timeouts: compile_upstream_timeouts(location)?,
-        upstream_protocol,
-        upstream_ssl_options: compile_upstream_ssl_options(location)?,
-        plugins: location.plugins.clone(),
-        cache: location.cache.clone(),
-    };
-    *next_route_id += 1;
-    Ok(Some(compiled))
-}
-
-// Only locations with an actionable upstream target are kept. Regex validation
-// also happens here, so broken snapshots fail before they are applied.
-fn compile_locations(
-    locations: &[Location],
-    upstreams: &HashMap<String, CompiledUpstreamGroup>,
-    next_route_id: &mut u64,
-) -> Result<Vec<CompiledLocation>, String> {
-    let http_count = locations
-        .iter()
-        .filter(|l| matches!(l.matcher, ngxora_compile::ir::LocationMatcher::Http(_)))
-        .count();
-    if http_count != 0 && http_count != locations.len() {
-        return Err("cannot mix HTTP and nginx matchers in one virtual host".into());
-    }
-    locations
-        .iter()
-        .map(|location| compile_location(location, upstreams, next_route_id))
-        .filter_map(|result| match result {
-            Ok(Some(location)) => Some(Ok(location)),
-            Ok(None) => None,
-            Err(err) => Some(Err(err)),
-        })
-        .collect()
 }
 
 pub(crate) fn downstream_keepalive_timeout_secs(timeout: &KeepaliveTimeout) -> Option<u64> {
@@ -856,11 +239,4 @@ pub(crate) fn downstream_keepalive_timeout_secs(timeout: &KeepaliveTimeout) -> O
             }
         }
     }
-}
-
-fn validate_direct_status(status: u16) -> Result<(), String> {
-    if !(200..=599).contains(&status) {
-        return Err("direct response status must be 200..599".into());
-    }
-    Ok(())
 }

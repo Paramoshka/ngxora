@@ -10,6 +10,8 @@ For implementation discipline on new options and plugins, see [Feature Checklist
 
 For durable architecture choices, see [ADRs](./adr/README.md).
 
+For module responsibilities and security boundaries, see [Code Architecture](./architecture.md).
+
 For the runtime payload boundary, see [Snapshot Schema](./snapshot-schema.md).
 
 ## Downstream Config

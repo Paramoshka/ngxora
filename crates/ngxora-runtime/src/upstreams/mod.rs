@@ -3,7 +3,12 @@
 //! The module boundary is:
 //! - `compile`: IR -> `CompiledRouter`
 //! - `routing`: request-time listener/vhost/location selection
-//! - `runtime`: Pingora-facing proxy execution and upstream groups
+//! - `runtime`: request state and public proxy API
+//! - `runtime::proxy`: Pingora request/response lifecycle
+//! - `runtime::selection`, `groups`: route targets and live upstream selection
+//! - `runtime::tls`, `limits`, `response`, `completion`: transport and policy boundaries
+//! - `scp`: bounded SBI discovery/routing; `scp::request` validates destinations and headers
+//! - `nrf`: NRF HTTP client and discovery response validation
 //! - `health`: active upstream health checks
 //! - `types`: shared compiled routing model
 
