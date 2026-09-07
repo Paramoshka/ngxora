@@ -17,7 +17,10 @@ impl Ir {
         }
 
         for upstream in &http.upstreams {
-            if upstream.servers.is_empty() && upstream.nrf_discovery.is_none() {
+            if upstream.servers.is_empty()
+                && upstream.nrf_discovery.is_none()
+                && !upstream.allow_empty
+            {
                 return Err(ValidateErr {
                     message: format!(
                         "upstream `{}` must define at least one server or nrf_discovery",
@@ -92,7 +95,10 @@ impl Ir {
                     match directive {
                         LocationDirective::ProxyPass(_)
                         | LocationDirective::ScpPass(_)
-                        | LocationDirective::Return { .. } => {
+                        | LocationDirective::Return { .. }
+                        | LocationDirective::WeightedBackends(_)
+                        | LocationDirective::DirectResponse(_)
+                        | LocationDirective::HttpRedirect(_) => {
                             action_count += 1;
                         }
                         LocationDirective::Root(_) => {

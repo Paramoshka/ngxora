@@ -110,6 +110,7 @@ pub struct Server {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct UpstreamBlock {
+    pub allow_empty: bool,
     pub name: String,
     pub policy: UpstreamSelectionPolicy,
     pub hash_key: Option<UpstreamHashKey>,
@@ -339,6 +340,7 @@ pub struct UpstreamSslOptions {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum LocationMatcher {
+    Http(HttpMatch),
     Prefix(String), // `location /api/ {}`
     Exact(String),  // `location = / {}`
     Regex {
@@ -351,6 +353,10 @@ pub enum LocationMatcher {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum LocationDirective {
+    WeightedBackends(Vec<WeightedBackend>),
+    DirectResponse(u16),
+    HttpRedirect(HttpRedirect),
+    UrlRewrite(UrlRewrite),
     ScpPass(String),
     ProxyPass(ProxyPassTarget),
     ProxyConnectTimeout(Duration),
@@ -364,6 +370,53 @@ pub enum LocationDirective {
     Root(String),
     TryFiles(String),
     Return { status: u16, location: String },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct HttpMatch {
+    pub path: HttpPathMatch,
+    pub method: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub query_params: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum HttpPathMatch {
+    Exact(String),
+    PathPrefix(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct WeightedBackend {
+    pub weight: u32,
+    pub target: BackendTarget,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum BackendTarget {
+    Upstream(ProxyPassTarget),
+    Response(u16),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum PathModifier {
+    ReplaceFullPath(String),
+    ReplacePrefixMatch(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct HttpRedirect {
+    pub status: u16,
+    pub scheme: Option<String>,
+    pub hostname: Option<String>,
+    pub port: Option<u16>,
+    pub path: Option<PathModifier>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UrlRewrite {
+    pub hostname: Option<String>,
+    pub path: Option<PathModifier>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

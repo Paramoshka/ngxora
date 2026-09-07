@@ -78,6 +78,7 @@ test-unit: ## Run unit tests
 
 test-e2e: ## Run hermetic process-level tests
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --test nrf_e2e
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --test http_routes_e2e
 
 test-open5gs: ## Run the Open5GS NRF interoperability test
 	bash tests/e2e/open5gs/run.sh

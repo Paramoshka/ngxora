@@ -69,6 +69,14 @@ impl CompiledRouter {
             );
         }
 
+        for name in &server.server_names {
+            if name.contains('*') {
+                let suffix = name
+                    .strip_prefix("*.")
+                    .ok_or("only leading *. hostnames are supported")?;
+                super::http_routes::validate_hostname(suffix.trim_end_matches('.'))?;
+            }
+        }
         let routes = ServerRoutes {
             locations: compile_locations(&server.locations, &self.upstreams, next_route_id)?,
         };
@@ -97,7 +105,7 @@ impl CompiledRouter {
             for name in &server.server_names {
                 listener
                     .named
-                    .insert(name.to_ascii_lowercase(), routes.clone());
+                    .insert(super::http_routes::normalize_hostname(name), routes.clone());
             }
 
             if listen.default_server
@@ -137,9 +145,10 @@ impl CompiledRouter {
                     };
 
                     for name in &server.server_names {
-                        listener_tls
-                            .named
-                            .insert(name.to_ascii_lowercase(), tls_identity.clone());
+                        listener_tls.named.insert(
+                            super::http_routes::normalize_hostname(name),
+                            tls_identity.clone(),
+                        );
                     }
 
                     if listen.default_server
@@ -329,7 +338,8 @@ fn compile_upstreams(
         if name.is_empty() {
             return Err("upstream name cannot be empty".into());
         }
-        if upstream.servers.is_empty() && upstream.nrf_discovery.is_none() {
+        if upstream.servers.is_empty() && upstream.nrf_discovery.is_none() && !upstream.allow_empty
+        {
             return Err(format!(
                 "upstream `{}` must define at least one server or nrf_discovery",
                 upstream.name
@@ -380,6 +390,7 @@ fn compile_upstreams(
         }
 
         let group = CompiledUpstreamGroup {
+            allow_empty: upstream.allow_empty,
             name: upstream.name.clone(),
             policy: upstream.policy,
             hash_key: upstream.hash_key.clone(),
@@ -465,6 +476,41 @@ fn route_target_from_directive(
     upstreams: &HashMap<String, CompiledUpstreamGroup>,
 ) -> Result<Option<RouteTarget>, String> {
     match directive {
+        LocationDirective::DirectResponse(status) => {
+            validate_direct_status(*status)?;
+            Ok(Some(RouteTarget::DirectResponse(*status)))
+        }
+        LocationDirective::HttpRedirect(config) => {
+            Ok(Some(RouteTarget::HttpRedirect(config.clone())))
+        }
+        LocationDirective::WeightedBackends(backends) => {
+            if backends.is_empty() {
+                return Err("weighted_backends must not be empty".into());
+            }
+            let backends = backends
+                .iter()
+                .map(|backend| {
+                    if backend.weight > 1_000_000 {
+                        return Err("backend weight exceeds 1000000".into());
+                    }
+                    let directive = match &backend.target {
+                        ngxora_compile::ir::BackendTarget::Upstream(target) => {
+                            LocationDirective::ProxyPass(target.clone())
+                        }
+                        ngxora_compile::ir::BackendTarget::Response(status) => {
+                            LocationDirective::DirectResponse(*status)
+                        }
+                    };
+                    let target = route_target_from_directive(&directive, upstreams)?
+                        .ok_or("invalid weighted backend target")?;
+                    Ok(super::types::CompiledWeightedBackend {
+                        weight: backend.weight,
+                        target,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(Some(RouteTarget::WeightedBackends(backends)))
+        }
         LocationDirective::ScpPass(profile) => Ok(Some(RouteTarget::Scp {
             profile: profile.clone(),
         })),
@@ -593,7 +639,11 @@ fn compile_upstream_protocol(
         let target_uses_tls = match target {
             RouteTarget::Scp { .. } => return Err("scp_pass chooses HTTP/2 transport from the target scheme; omit proxy_upstream_protocol".into()),
             RouteTarget::ProxyPass { tls, .. } | RouteTarget::UpstreamGroup { tls, .. } => *tls,
-            RouteTarget::Return { .. } => return Ok(None),
+            RouteTarget::Return { .. } | RouteTarget::DirectResponse(_) | RouteTarget::HttpRedirect(_) => return Ok(None),
+            RouteTarget::WeightedBackends(backends) => {
+                for backend in backends { compile_upstream_protocol(location, &backend.target)?; }
+                return Ok(Some(protocol));
+            }
         };
 
         match protocol {
@@ -677,7 +727,10 @@ fn compile_location(
         match directive {
             LocationDirective::ProxyPass(_)
             | LocationDirective::ScpPass(_)
-            | LocationDirective::Return { .. } => {
+            | LocationDirective::Return { .. }
+            | LocationDirective::WeightedBackends(_)
+            | LocationDirective::DirectResponse(_)
+            | LocationDirective::HttpRedirect(_) => {
                 action_count += 1;
             }
             LocationDirective::Root(_) => return Err("root is not supported at runtime".into()),
@@ -699,9 +752,60 @@ fn compile_location(
         return Err("scp_pass cannot be combined with proxy_cache".into());
     }
 
+    let matcher = CompiledMatcher::try_from(&location.matcher)?;
+    let mut url_rewrite = None;
+    for directive in &location.directives {
+        if let LocationDirective::UrlRewrite(rewrite) = directive {
+            if url_rewrite.replace(rewrite.clone()).is_some() {
+                return Err("duplicate URL rewrite".into());
+            }
+            if !matches!(
+                target,
+                RouteTarget::ProxyPass { .. }
+                    | RouteTarget::UpstreamGroup { .. }
+                    | RouteTarget::WeightedBackends(_)
+            ) {
+                return Err("URL rewrite requires an upstream action".into());
+            }
+            if let Some(host) = &rewrite.hostname {
+                super::http_routes::validate_hostname(host)?;
+            }
+            super::http_routes::validate_modifier(rewrite.path.as_ref(), &matcher)?;
+        }
+    }
+    match &target {
+        RouteTarget::HttpRedirect(config) => {
+            if ![301, 302, 303, 307, 308].contains(&config.status) {
+                return Err("invalid HTTP redirect status".into());
+            }
+            if config
+                .scheme
+                .as_deref()
+                .is_some_and(|s| !matches!(s, "http" | "https"))
+            {
+                return Err("redirect scheme must be http or https".into());
+            }
+            if config.port == Some(0) {
+                return Err("redirect port must be positive".into());
+            }
+            if let Some(host) = &config.hostname {
+                super::http_routes::validate_hostname(host)?;
+            }
+            super::http_routes::validate_modifier(config.path.as_ref(), &matcher)?;
+        }
+        RouteTarget::Return { status, location } => {
+            if !(300..400).contains(status) {
+                return Err("return requires a 3xx status".into());
+            }
+            super::http_routes::expand_return(location, "example.com", "/", "http")?;
+            http::HeaderValue::from_str(location).map_err(|_| "invalid redirect location")?;
+        }
+        _ => {}
+    }
     let compiled = CompiledLocation {
+        url_rewrite,
         route_id: *next_route_id,
-        matcher: CompiledMatcher::try_from(&location.matcher)?,
+        matcher,
         access_rules: location.access_rules.clone(),
         target,
         upstream_timeouts: compile_upstream_timeouts(location)?,
@@ -721,6 +825,13 @@ fn compile_locations(
     upstreams: &HashMap<String, CompiledUpstreamGroup>,
     next_route_id: &mut u64,
 ) -> Result<Vec<CompiledLocation>, String> {
+    let http_count = locations
+        .iter()
+        .filter(|l| matches!(l.matcher, ngxora_compile::ir::LocationMatcher::Http(_)))
+        .count();
+    if http_count != 0 && http_count != locations.len() {
+        return Err("cannot mix HTTP and nginx matchers in one virtual host".into());
+    }
     locations
         .iter()
         .map(|location| compile_location(location, upstreams, next_route_id))
@@ -745,4 +856,11 @@ pub(crate) fn downstream_keepalive_timeout_secs(timeout: &KeepaliveTimeout) -> O
             }
         }
     }
+}
+
+fn validate_direct_status(status: u16) -> Result<(), String> {
+    if !(200..=599).contains(&status) {
+        return Err("direct response status must be 200..599".into());
+    }
+    Ok(())
 }

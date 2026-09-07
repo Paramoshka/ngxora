@@ -140,6 +140,9 @@ pub trait HttpPlugin: Send + Sync {
         Ok(PluginFlow::Continue)
     }
 
+    /// Runs once in reverse route order, including on local responses. A prior
+    /// plugin may have responded before this plugin's `on_request` was called.
+    /// Cached responses already include these mutations and skip this hook.
     async fn on_response(&self, _ctx: &mut ResponseCtx<'_>) -> Result<PluginFlow, PluginError> {
         Ok(PluginFlow::Continue)
     }

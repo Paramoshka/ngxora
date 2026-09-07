@@ -36,6 +36,7 @@ fn router_with_route_plugin(port: u16, plugin_name: &str) -> CompiledRouter {
         ssl: false,
     };
     let location = CompiledLocation {
+        url_rewrite: None,
         route_id: 1,
         matcher: CompiledMatcher::Prefix("/".into()),
         access_rules: Vec::new(),
@@ -106,6 +107,7 @@ fn compatible_snapshot_reuses_unchanged_runtime_upstream_group() {
     router.upstreams.insert(
         "backend".into(),
         CompiledUpstreamGroup {
+            allow_empty: false,
             name: "backend".into(),
             policy: UpstreamSelectionPolicy::RoundRobin,
             hash_key: None,

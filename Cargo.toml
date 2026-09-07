@@ -41,6 +41,8 @@ bench = false
 path = "crates/ngxora-cli/src/main.rs"
 
 [dev-dependencies]
+tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+tower = "0.5"
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1", "http2"] }

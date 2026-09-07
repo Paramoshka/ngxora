@@ -383,6 +383,7 @@ fn lower_upstream(block: &Block) -> Result<UpstreamBlock, LowerErr> {
     };
 
     let mut upstream = UpstreamBlock {
+        allow_empty: false,
         name,
         policy: UpstreamSelectionPolicy::RoundRobin,
         hash_key: None,

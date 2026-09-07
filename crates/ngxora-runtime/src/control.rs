@@ -52,6 +52,7 @@ pub struct ApplyResult {
 /// chains, upstream groups, and trusted CA material prebuilt.
 #[derive(Clone)]
 pub struct RuntimeSnapshot {
+    pub(crate) backend_counters: HashMap<u64, Arc<AtomicU64>>,
     pub(crate) scp_profiles: HashMap<String, Arc<crate::upstreams::scp::RuntimeScp>>,
     pub generation: u64,
     pub version: String,
@@ -245,7 +246,21 @@ impl RuntimeState {
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
 
+        let backend_counters = router
+            .listeners
+            .values()
+            .flat_map(|v| v.named.values().chain(v.default.iter()))
+            .flat_map(|routes| &routes.locations)
+            .filter(|route| {
+                matches!(
+                    route.target,
+                    crate::upstreams::RouteTarget::WeightedBackends(_)
+                )
+            })
+            .map(|route| (route.route_id, Arc::new(AtomicU64::new(0))))
+            .collect();
         Ok(RuntimeSnapshot {
+            backend_counters,
             scp_profiles,
             generation,
             version,

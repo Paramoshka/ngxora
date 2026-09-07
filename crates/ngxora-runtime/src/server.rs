@@ -450,7 +450,16 @@ fn select_listener_tls<'a>(
     server_name: Option<&str>,
 ) -> Result<ListenerTlsConfigIdentity<'a>> {
     if let Some(server_name) = server_name {
-        if let Some(identity) = tls.named.get(&server_name.to_ascii_lowercase()) {
+        let server_name = crate::upstreams::http_routes::normalize_hostname(server_name);
+        if let Some((_, identity)) = tls
+            .named
+            .iter()
+            .filter_map(|(name, identity)| {
+                crate::upstreams::http_routes::hostname_score(name, &server_name)
+                    .map(|score| (score, identity))
+            })
+            .max_by_key(|(score, _)| *score)
+        {
             return Ok(identity);
         }
     }

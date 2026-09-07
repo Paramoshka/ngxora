@@ -6,6 +6,7 @@ use crate::upstreams::{
     CompiledLocation, CompiledMatcher, CompiledRouter, HttpRuntimeOptions, ListenKey, RouteTarget,
     ServerRoutes, VirtualHostRoutes,
 };
+use ngxora_compile::ir as http_ir;
 use ngxora_compile::ir::{
     CacheConfig, CacheKeyMode, DownstreamTlsOptions, Http, KeepaliveTimeout, LetsEncryptConfig,
     Listen, Location, LocationDirective, LocationMatcher, NrfDiscovery, NrfEndpointScheme,
@@ -343,7 +344,7 @@ fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<Upstream
                 .iter()
                 .map(upstream_backend_from_proto)
                 .collect::<Result<Vec<_>, _>>()?;
-            if servers.is_empty() && upstream.nrf_discovery.is_none() {
+            if servers.is_empty() && upstream.nrf_discovery.is_none() && !upstream.allow_empty {
                 return Err(format!(
                     "upstream group `{name}` must define at least one backend or nrf_discovery"
                 ));
@@ -355,6 +356,7 @@ fn upstreams_from_proto(upstreams: &[ProtoUpstreamGroup]) -> Result<Vec<Upstream
             }
 
             Ok(UpstreamBlock {
+                allow_empty: upstream.allow_empty,
                 name: name.to_string(),
                 policy: upstream_selection_policy_from_proto(upstream.policy)?,
                 hash_key: upstream
@@ -521,6 +523,39 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
         .as_ref()
         .ok_or_else(|| "route action is required".to_string())?;
     match action {
+        proto::route::Action::WeightedBackends(backends) => {
+            let backends = backends
+                .backends
+                .iter()
+                .map(|b| {
+                    let target = match b
+                        .target
+                        .as_ref()
+                        .ok_or("weighted backend target is required")?
+                    {
+                        proto::weighted_backend::Target::Upstream(upstream) => {
+                            http_ir::BackendTarget::Upstream(proxy_pass_target_from_proto(
+                                upstream,
+                            )?)
+                        }
+                        proto::weighted_backend::Target::DirectResponse(response) => {
+                            http_ir::BackendTarget::Response(direct_status(response.status)?)
+                        }
+                    };
+                    Ok(http_ir::WeightedBackend {
+                        weight: b.weight.unwrap_or(1),
+                        target,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            directives.push(LocationDirective::WeightedBackends(backends));
+        }
+        proto::route::Action::DirectResponse(response) => directives.push(
+            LocationDirective::DirectResponse(direct_status(response.status)?),
+        ),
+        proto::route::Action::HttpRedirect(config) => directives.push(
+            LocationDirective::HttpRedirect(http_redirect_from_proto(config)?),
+        ),
         proto::route::Action::ScpProfile(name) => {
             directives.push(LocationDirective::ScpPass(name.clone()))
         }
@@ -534,6 +569,12 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
         }
     }
 
+    if let Some(rewrite) = &route.url_rewrite {
+        directives.push(LocationDirective::UrlRewrite(http_ir::UrlRewrite {
+            hostname: rewrite.hostname.clone(),
+            path: rewrite.path.as_ref().map(modifier_from_proto).transpose()?,
+        }));
+    }
     Ok(Location {
         matcher,
         directives,
@@ -643,6 +684,9 @@ fn matcher_from_proto(value: Option<&ProtoMatch>) -> Result<LocationMatcher, Str
         .ok_or_else(|| "route match kind is required".to_string())?;
 
     match kind {
+        proto::r#match::Kind::Http(matcher) => {
+            Ok(LocationMatcher::Http(http_match_from_proto(matcher)))
+        }
         proto::r#match::Kind::Prefix(path) => Ok(LocationMatcher::Prefix(path.clone())),
         proto::r#match::Kind::Exact(path) => Ok(LocationMatcher::Exact(path.clone())),
         proto::r#match::Kind::PreferPrefix(path) => Ok(LocationMatcher::PreferPrefix(path.clone())),
@@ -979,6 +1023,7 @@ fn proto_upstreams_from_runtime(
     groups
         .into_iter()
         .map(|group| ProtoUpstreamGroup {
+            allow_empty: group.allow_empty,
             name: group.name,
             backends: group
                 .servers
@@ -1196,8 +1241,12 @@ fn proto_routes_from_runtime(routes: &ServerRoutes) -> Result<Vec<ProtoRoute>, S
 
 fn proto_route_from_runtime(route: &CompiledLocation) -> Result<ProtoRoute, String> {
     Ok(ProtoRoute {
+        url_rewrite: route.url_rewrite.as_ref().map(|rewrite| proto::UrlRewrite {
+            hostname: rewrite.hostname.clone(),
+            path: rewrite.path.as_ref().map(modifier_to_proto),
+        }),
         r#match: Some(proto_match_from_runtime(&route.matcher)),
-        action: Some(proto_route_action_from_runtime(&route.target)),
+        action: Some(proto_route_action_from_runtime(&route.target)?),
         timeouts: Some(proto_timeouts_from_runtime(&route.upstream_timeouts)),
         plugins: route
             .plugins
@@ -1215,6 +1264,7 @@ fn proto_route_from_runtime(route: &CompiledLocation) -> Result<ProtoRoute, Stri
 
 fn proto_match_from_runtime(matcher: &CompiledMatcher) -> ProtoMatch {
     let kind = match matcher {
+        CompiledMatcher::Http(matcher) => proto::r#match::Kind::Http(http_match_to_proto(matcher)),
         CompiledMatcher::Prefix(path) => proto::r#match::Kind::Prefix(path.clone()),
         CompiledMatcher::Exact(path) => proto::r#match::Kind::Exact(path.clone()),
         CompiledMatcher::PreferPrefix(path) => proto::r#match::Kind::PreferPrefix(path.clone()),
@@ -1228,8 +1278,58 @@ fn proto_match_from_runtime(matcher: &CompiledMatcher) -> ProtoMatch {
     ProtoMatch { kind: Some(kind) }
 }
 
-fn proto_route_action_from_runtime(target: &RouteTarget) -> proto::route::Action {
-    match target {
+fn proto_route_action_from_runtime(target: &RouteTarget) -> Result<proto::route::Action, String> {
+    Ok(match target {
+        RouteTarget::DirectResponse(status) => {
+            proto::route::Action::DirectResponse(proto::DirectResponse {
+                status: u32::from(*status),
+            })
+        }
+        RouteTarget::HttpRedirect(config) => {
+            proto::route::Action::HttpRedirect(proto::HttpRedirect {
+                status: u32::from(config.status),
+                scheme: config.scheme.clone(),
+                hostname: config.hostname.clone(),
+                port: config.port.map(u32::from),
+                path: config.path.as_ref().map(modifier_to_proto),
+            })
+        }
+        RouteTarget::WeightedBackends(backends) => {
+            proto::route::Action::WeightedBackends(proto::WeightedBackends {
+                backends: backends
+                    .iter()
+                    .map(|b| {
+                        let target = match &b.target {
+                            RouteTarget::DirectResponse(status) => {
+                                proto::weighted_backend::Target::DirectResponse(
+                                    proto::DirectResponse {
+                                        status: u32::from(*status),
+                                    },
+                                )
+                            }
+                            RouteTarget::ProxyPass { .. } | RouteTarget::UpstreamGroup { .. } => {
+                                let proto::route::Action::Upstream(upstream) =
+                                    proto_route_action_from_runtime(&b.target)?
+                                else {
+                                    return Err("invalid compiled upstream target".into());
+                                };
+                                proto::weighted_backend::Target::Upstream(upstream)
+                            }
+                            _ => {
+                                return Err(
+                                    "weighted backend must be an upstream or direct response"
+                                        .into(),
+                                );
+                            }
+                        };
+                        Ok(proto::WeightedBackend {
+                            weight: Some(b.weight),
+                            target: Some(target),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            })
+        }
         RouteTarget::Scp { profile } => proto::route::Action::ScpProfile(profile.clone()),
         RouteTarget::ProxyPass {
             host, port, tls, ..
@@ -1249,7 +1349,7 @@ fn proto_route_action_from_runtime(target: &RouteTarget) -> proto::route::Action
             status: u32::from(*status),
             location: location.clone(),
         }),
-    }
+    })
 }
 
 fn proto_route_cache_from_runtime(value: &CacheConfig) -> ProtoRouteCache {
@@ -1537,5 +1637,105 @@ impl TryFrom<&ProtoListener> for ListenerDef {
             },
             tls_options,
         })
+    }
+}
+
+fn direct_status(status: u32) -> Result<u16, String> {
+    u16::try_from(status).map_err(|_| "direct response status out of range".into())
+}
+
+fn modifier_from_proto(value: &proto::PathModifier) -> Result<http_ir::PathModifier, String> {
+    Ok(
+        match value
+            .kind
+            .as_ref()
+            .ok_or("path modifier kind is required")?
+        {
+            proto::path_modifier::Kind::ReplaceFullPath(path) => {
+                http_ir::PathModifier::ReplaceFullPath(path.clone())
+            }
+            proto::path_modifier::Kind::ReplacePrefixMatch(path) => {
+                http_ir::PathModifier::ReplacePrefixMatch(path.clone())
+            }
+        },
+    )
+}
+
+fn modifier_to_proto(value: &http_ir::PathModifier) -> proto::PathModifier {
+    proto::PathModifier {
+        kind: Some(match value {
+            http_ir::PathModifier::ReplaceFullPath(path) => {
+                proto::path_modifier::Kind::ReplaceFullPath(path.clone())
+            }
+            http_ir::PathModifier::ReplacePrefixMatch(path) => {
+                proto::path_modifier::Kind::ReplacePrefixMatch(path.clone())
+            }
+        }),
+    }
+}
+
+fn http_redirect_from_proto(value: &proto::HttpRedirect) -> Result<http_ir::HttpRedirect, String> {
+    Ok(http_ir::HttpRedirect {
+        status: direct_status(if value.status == 0 { 302 } else { value.status })?,
+        scheme: value.scheme.clone(),
+        hostname: value.hostname.clone(),
+        port: value
+            .port
+            .map(|p| u16::try_from(p).map_err(|_| "redirect port out of range"))
+            .transpose()?,
+        path: value.path.as_ref().map(modifier_from_proto).transpose()?,
+    })
+}
+
+fn http_match_from_proto(value: &proto::HttpMatch) -> http_ir::HttpMatch {
+    http_ir::HttpMatch {
+        path: match &value.path {
+            Some(proto::http_match::Path::Exact(path)) => {
+                http_ir::HttpPathMatch::Exact(path.clone())
+            }
+            Some(proto::http_match::Path::PathPrefix(path)) => {
+                http_ir::HttpPathMatch::PathPrefix(path.clone())
+            }
+            None => http_ir::HttpPathMatch::PathPrefix("/".into()),
+        },
+        method: value.method.clone(),
+        headers: value
+            .headers
+            .iter()
+            .map(|c| (c.name.clone(), c.value.clone()))
+            .collect(),
+        query_params: value
+            .query_params
+            .iter()
+            .map(|c| (c.name.clone(), c.value.clone()))
+            .collect(),
+    }
+}
+
+fn http_match_to_proto(value: &http_ir::HttpMatch) -> proto::HttpMatch {
+    proto::HttpMatch {
+        path: Some(match &value.path {
+            http_ir::HttpPathMatch::Exact(path) => proto::http_match::Path::Exact(path.clone()),
+            http_ir::HttpPathMatch::PathPrefix(path) => {
+                proto::http_match::Path::PathPrefix(path.clone())
+            }
+        }),
+        method: value.method.clone(),
+        headers: value
+            .headers
+            .iter()
+            .map(|(name, value)| proto::ExactCondition {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
+        query_params: value
+            .query_params
+            .iter()
+            .map(|(name, value)| proto::ExactCondition {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect(),
     }
 }

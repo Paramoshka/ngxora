@@ -9,6 +9,7 @@
 
 mod compile;
 mod health;
+pub(crate) mod http_routes;
 mod nrf;
 mod routing;
 mod runtime;

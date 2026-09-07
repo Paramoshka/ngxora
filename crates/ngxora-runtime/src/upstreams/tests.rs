@@ -66,6 +66,7 @@ fn target(id: &str) -> RouteTarget {
 
 fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
     CompiledLocation {
+        url_rewrite: None,
         route_id: 1,
         matcher,
         access_rules: Vec::new(),
@@ -87,6 +88,7 @@ fn regex(pattern: &str, case_insensitive: bool) -> CompiledMatcher {
 fn selected_host<'a>(routes: &'a ServerRoutes, path: &str) -> Option<&'a str> {
     match select_route_target(routes, path) {
         Some(CompiledLocation {
+            url_rewrite: None,
             target: RouteTarget::ProxyPass { host, .. },
             ..
         }) => Some(host.as_str()),
@@ -826,6 +828,7 @@ fn compiled_router_rejects_tcp_nodelay_off() {
 fn compiled_router_maps_named_upstream_groups() {
     let http = Http {
         upstreams: vec![UpstreamBlock {
+            allow_empty: false,
             nrf_discovery: None,
             name: "backend".into(),
             policy: UpstreamSelectionPolicy::RoundRobin,
@@ -890,6 +893,7 @@ fn http_with_nrf_upstream(
 ) -> Http {
     Http {
         upstreams: vec![UpstreamBlock {
+            allow_empty: false,
             name: "smf_pool".into(),
             policy: UpstreamSelectionPolicy::RoundRobin,
             hash_key: None,
@@ -977,6 +981,7 @@ fn compiled_router_rejects_incomplete_nrf_client_identity() {
 #[test]
 fn runtime_upstream_group_round_robins_backends() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        allow_empty: false,
         nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
@@ -1013,6 +1018,7 @@ fn runtime_upstream_group_round_robins_backends() {
 #[test]
 fn runtime_upstream_group_honors_round_robin_weights() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        allow_empty: false,
         nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
@@ -1047,6 +1053,7 @@ fn runtime_upstream_group_honors_round_robin_weights() {
 #[test]
 fn runtime_upstream_group_consistent_hash_is_stable_and_distributes_keys() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        allow_empty: false,
         nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::ConsistentHash,
@@ -1132,6 +1139,7 @@ async fn consistent_hash_header_requires_one_nonempty_value() {
 #[test]
 fn runtime_upstream_group_random_selects_configured_backend() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        allow_empty: false,
         nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::Random,
@@ -1164,6 +1172,7 @@ fn runtime_upstream_group_random_selects_configured_backend() {
 fn compiled_router_maps_upstream_health_check() {
     let http = Http {
         upstreams: vec![UpstreamBlock {
+            allow_empty: false,
             nrf_discovery: None,
             name: "backend".into(),
             policy: UpstreamSelectionPolicy::RoundRobin,
@@ -1208,6 +1217,7 @@ fn compiled_router_maps_upstream_health_check() {
 #[tokio::test]
 async fn runtime_upstream_group_tcp_health_check_marks_unreachable_backends_unhealthy() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        allow_empty: false,
         nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
@@ -1248,6 +1258,7 @@ async fn runtime_upstream_group_tcp_health_check_marks_unreachable_backends_unhe
 #[tokio::test]
 async fn runtime_upstream_group_http_health_check_marks_unreachable_backends_unhealthy() {
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        allow_empty: false,
         nrf_discovery: None,
         name: "backend".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
@@ -1539,6 +1550,7 @@ async fn nrf_discovery_preflights_and_publishes_reachable_backend() {
     });
 
     let group = super::RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        allow_empty: false,
         name: "smf_pool".into(),
         policy: UpstreamSelectionPolicy::RoundRobin,
         hash_key: None,

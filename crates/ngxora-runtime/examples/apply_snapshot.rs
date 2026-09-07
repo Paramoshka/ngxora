@@ -132,6 +132,7 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
             default_server: true,
             tls: None,
             routes: vec![Route {
+                url_rewrite: None,
                 r#match: Some(Match {
                     kind: Some(ngxora_runtime::grpc::proto::r#match::Kind::Prefix(
                         cli.path_prefix.clone(),

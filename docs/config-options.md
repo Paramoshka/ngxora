@@ -299,6 +299,10 @@ Supported location directives:
   Returns an HTTP redirect response (301, 302, 303, 307, or 308) with
   a `Location` header set to `<location>`. The request is not proxied
   to an upstream when this directive is present on a matched location.
+  Supports `$host` (normalized hostname without port), `$request_uri` (original
+  path and query), `$scheme`, and `$$` (literal dollar). Unknown variables fail
+  config validation. Location access rules and response plugins also apply to
+  this local response.
 
 Rules are evaluated in declaration order. The first matching rule wins.
 If no rule matches the client IP, access is denied.

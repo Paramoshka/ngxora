@@ -88,12 +88,16 @@ message Route {
     Upstream upstream = 2;
     Redirect redirect = 7;
     string scp_profile = 9;
+    WeightedBackends weighted_backends = 10;
+    DirectResponse direct_response = 11;
+    HttpRedirect http_redirect = 12;
   }
   RouteTimeouts timeouts = 3;
   repeated Plugin plugins = 4;
   UpstreamTlsOptions tls_options = 5;
   UpstreamHttpProtocol upstream_protocol = 6;
   RouteCache cache = 8;
+  UrlRewrite url_rewrite = 13;
 }
 
 message Redirect {
@@ -136,6 +140,7 @@ message Match {
     string prefer_prefix = 3;
     Regex regex = 4;
     string named = 5;
+    HttpMatch http = 6;
   }
 }
 
@@ -158,6 +163,53 @@ message UpstreamGroup {
   UpstreamHealthCheck health_check = 4;
   UpstreamHashKey hash_key = 5;
   NrfDiscovery nrf_discovery = 6;
+  bool allow_empty = 7;
+}
+
+// HTTP match conditions are ANDed. Route list order breaks specificity ties.
+message HttpMatch {
+  oneof path {
+    string exact = 1;
+    string path_prefix = 2;
+  }
+  optional string method = 3;
+  repeated ExactCondition headers = 4;
+  repeated ExactCondition query_params = 5;
+}
+
+message ExactCondition {
+  string name = 1;
+  string value = 2;
+}
+
+message WeightedBackends { repeated WeightedBackend backends = 1; }
+message WeightedBackend {
+  optional uint32 weight = 1; // absent = 1; zero disables this choice
+  oneof target {
+    Upstream upstream = 2;
+    DirectResponse direct_response = 3;
+  }
+}
+message DirectResponse { uint32 status = 1; }
+
+message PathModifier {
+  oneof kind {
+    string replace_full_path = 1;
+    string replace_prefix_match = 2;
+  }
+}
+
+message HttpRedirect {
+  uint32 status = 1; // zero = 302
+  optional string scheme = 2;
+  optional string hostname = 3;
+  optional uint32 port = 4;
+  PathModifier path = 5;
+}
+
+message UrlRewrite {
+  optional string hostname = 1;
+  PathModifier path = 2;
 }
 
 message NrfDiscovery {

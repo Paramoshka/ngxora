@@ -31,6 +31,9 @@ impl From<&Listen> for ListenKey {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RouteTarget {
+    WeightedBackends(Vec<CompiledWeightedBackend>),
+    DirectResponse(u16),
+    HttpRedirect(ngxora_compile::ir::HttpRedirect),
     Scp {
         profile: String,
     },
@@ -48,6 +51,12 @@ pub enum RouteTarget {
         status: u16,
         location: String,
     },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct CompiledWeightedBackend {
+    pub weight: u32,
+    pub target: RouteTarget,
 }
 
 // CompiledUpstreamServer is a backend endpoint already validated during
@@ -113,6 +122,7 @@ pub struct CompiledNrfDiscovery {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CompiledUpstreamGroup {
+    pub allow_empty: bool,
     pub name: String,
     pub policy: UpstreamSelectionPolicy,
     pub hash_key: Option<UpstreamHashKey>,
@@ -123,6 +133,7 @@ pub struct CompiledUpstreamGroup {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum CompiledMatcher {
+    Http(ngxora_compile::ir::HttpMatch),
     Prefix(String),
     Exact(String),
     Regex(CompiledRegex),
@@ -171,6 +182,9 @@ impl TryFrom<&LocationMatcher> for CompiledMatcher {
 
     fn try_from(value: &LocationMatcher) -> Result<Self, Self::Error> {
         match value {
+            LocationMatcher::Http(matcher) => {
+                Ok(Self::Http(super::http_routes::compile_match(matcher)?))
+            }
             LocationMatcher::Prefix(path) => Ok(Self::Prefix(path.clone())),
             LocationMatcher::Exact(path) => Ok(Self::Exact(path.clone())),
             LocationMatcher::Regex {
@@ -190,6 +204,7 @@ use ngxora_compile::ir::CacheConfig;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CompiledLocation {
+    pub url_rewrite: Option<ngxora_compile::ir::UrlRewrite>,
     pub route_id: u64,
     pub matcher: CompiledMatcher,
     pub access_rules: Vec<LocationIpRule>,

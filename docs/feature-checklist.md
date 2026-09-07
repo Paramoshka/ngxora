@@ -36,6 +36,21 @@ The rule is simple:
 | `try_files` | 💤 | Rejected | ❌ | — | Not implemented; never silently ignored |
 | `root` | 💤 | Rejected | ❌ | — | Not implemented; never silently ignored |
 
+## HTTPRoute building blocks
+
+These additions are available through gRPC/IR; they do not include a Kubernetes
+controller. See [snapshot semantics](snapshot-schema.md#httproute-dataplane-primitives).
+
+| Feature | Text config | gRPC/IR | Reload |
+|---|---|---|---|
+| Segment PathPrefix, exact path, method/header/query matches | Existing nginx matchers | Supported | Live |
+| Exact/wildcard hostname routing and SNI selection | `server_name *.example.com` | Supported | Live on existing listeners |
+| Weighted backend groups, disabled/error choices | — | Supported | Live |
+| Explicit empty static groups | — | `allow_empty` | Live |
+| Structured redirects and URLRewrite | — | Supported | Live |
+| Redirect variables | `return` | Legacy Redirect | Live |
+| Response plugins on local responses | Supported | Supported | Live |
+
 ## TLS
 
 | Feature | Status | Text Config | gRPC | Reload | Notes |

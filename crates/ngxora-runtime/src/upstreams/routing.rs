@@ -154,8 +154,17 @@ fn select_server_routes<'a>(
     vhosts: &'a VirtualHostRoutes,
     host: Option<&str>,
 ) -> Option<&'a ServerRoutes> {
-    host.and_then(|value| vhosts.named.get(value))
-        .or(vhosts.default.as_ref())
+    host.and_then(|value| {
+        vhosts
+            .named
+            .iter()
+            .filter_map(|(name, routes)| {
+                super::http_routes::hostname_score(name, value).map(|score| (score, routes))
+            })
+            .max_by_key(|(score, _)| *score)
+            .map(|(_, routes)| routes)
+    })
+    .or(vhosts.default.as_ref())
 }
 
 fn wildcard_listen_key(key: &ListenKey) -> ListenKey {
@@ -204,6 +213,46 @@ pub(super) fn resolve_route<'a>(
     validate_sni_host_consistency(host.as_deref(), sni.as_deref())?;
 
     let routing_host = host.clone().or(sni);
+
+    // HTTP rules are ranked across matching hostnames; a more specific host
+    // without a matching rule must not hide a matching wildcard rule.
+    let mut candidates = Vec::new();
+    if let Some(host) = routing_host.as_deref() {
+        for (name, routes) in &vhosts.named {
+            if let Some(score) = super::http_routes::hostname_score(name, host) {
+                candidates.push((score, routes));
+            }
+        }
+    }
+    if let Some(default) = &vhosts.default {
+        candidates.push(((false, 0), default));
+    }
+    candidates.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    for (_, routes) in &candidates {
+        if routes
+            .locations
+            .iter()
+            .any(|l| matches!(l.matcher, CompiledMatcher::Http(_)))
+        {
+            let mut best = None;
+            for location in &routes.locations {
+                if let CompiledMatcher::Http(matcher) = &location.matcher {
+                    if super::http_routes::matches(matcher, session.req_header()) {
+                        let score = super::http_routes::match_score(matcher);
+                        if best.is_none_or(|(previous, _)| score > previous) {
+                            best = Some((score, location));
+                        }
+                    }
+                }
+            }
+            if let Some((_, location)) = best {
+                return Ok(Some(ResolvedLocation { location, host }));
+            }
+        } else {
+            // Preserve exclusive virtual-server selection for nginx locations.
+            break;
+        }
+    }
 
     let Some(server_routes) = select_server_routes(vhosts, routing_host.as_deref()) else {
         return Ok(None);

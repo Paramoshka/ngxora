@@ -456,6 +456,7 @@ fn proto_snapshot_converts_into_runtime_router() {
             tls_options: None,
         }],
         upstreams: vec![proto::UpstreamGroup {
+            allow_empty: false,
             nrf_discovery: None,
             name: "backend-pool".into(),
             backends: vec![
@@ -496,6 +497,7 @@ fn proto_snapshot_converts_into_runtime_router() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                url_rewrite: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/api".into())),
                 }),
@@ -674,6 +676,7 @@ fn scp_profiles_round_trip_and_reload_keeps_only_compatible_caches() {
 #[test]
 fn proto_nrf_discovery_converts_to_ir() {
     let upstreams = upstreams_from_proto(&[proto::UpstreamGroup {
+        allow_empty: false,
         name: "smf_pool".into(),
         backends: Vec::new(),
         policy: proto::UpstreamSelectionPolicy::RoundRobin as i32,
@@ -719,6 +722,7 @@ fn proto_nrf_discovery_converts_to_ir() {
 #[test]
 fn proto_nrf_discovery_rejects_unknown_endpoint_scheme() {
     let error = upstreams_from_proto(&[proto::UpstreamGroup {
+        allow_empty: false,
         name: "smf_pool".into(),
         nrf_discovery: Some(proto::NrfDiscovery {
             api_root: "https://nrf.internal/nnrf-disc/v1".into(),
@@ -757,6 +761,7 @@ fn proto_snapshot_defaults_tcp_nodelay_to_on() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                url_rewrite: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),
@@ -802,6 +807,7 @@ fn proto_redirect_route_converts_into_runtime_return_target() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                url_rewrite: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/old".into())),
                 }),
@@ -1042,6 +1048,7 @@ fn proto_snapshot_roundtrips_upstream_client_certificate() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                url_rewrite: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),
@@ -1118,6 +1125,7 @@ fn proto_snapshot_rejects_client_cert_without_key() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                url_rewrite: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),
@@ -1153,6 +1161,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
     let http = Http {
         scp_profiles: Vec::new(),
         upstreams: vec![UpstreamBlock {
+            allow_empty: false,
             nrf_discovery: None,
             name: "backend-pool".into(),
             policy: UpstreamSelectionPolicy::ConsistentHash,
@@ -1264,6 +1273,7 @@ fn proto_upstream_tls_options_roundtrips_client_certificate() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                url_rewrite: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),
@@ -1366,6 +1376,7 @@ fn proto_rejects_client_certificate_without_key() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                url_rewrite: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),

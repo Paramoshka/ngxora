@@ -445,6 +445,69 @@ fn select_listener_tls_falls_back_to_default() {
     );
 }
 
+#[cfg(feature = "openssl")]
+#[test]
+fn sni_resolver_installs_most_specific_wildcard_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut identities = Vec::new();
+    for index in 0..4 {
+        let cert = temp.path().join(format!("{index}.pem"));
+        let key = temp.path().join(format!("{index}.key"));
+        write_self_signed_certificate(&cert, &key, index + 1);
+        identities.push(TlsIdentity {
+            cert: PemSource::Path(cert),
+            key: PemSource::Path(key),
+        });
+    }
+    let listen_key = ListenKey {
+        addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port: 443,
+        ssl: true,
+    };
+    let router = CompiledRouter {
+        listener_tls: HashMap::from([(
+            listen_key.clone(),
+            ListenerTlsConfig {
+                named: HashMap::from([
+                    ("*.example.com".into(), identities[1].clone()),
+                    ("*.b.example.com".into(), identities[2].clone()),
+                    ("a.b.example.com".into(), identities[3].clone()),
+                ]),
+                default: Some(identities[0].clone()),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+    let resolver = SniCertResolver::new(Arc::new(RuntimeState::bootstrap(router)), listen_key);
+    for (host, serial) in [
+        ("example.com", 1),
+        ("x.example.com", 2),
+        ("x.y.example.com", 2),
+        ("x.b.example.com", 3),
+        ("A.B.EXAMPLE.COM.", 4),
+    ] {
+        let context = SslContextBuilder::new(SslMethod::tls_server())
+            .unwrap()
+            .build();
+        let mut ssl = Ssl::new(&context).unwrap();
+        resolver
+            .install_selected_identity_for_test(&mut ssl, Some(host))
+            .unwrap();
+        assert_eq!(
+            ssl.certificate()
+                .unwrap()
+                .serial_number()
+                .to_bn()
+                .unwrap()
+                .to_dec_str()
+                .unwrap()
+                .to_string(),
+            serial.to_string()
+        );
+    }
+}
+
 #[test]
 fn default_listener_tls_uses_first_named_when_default_missing() {
     let key = ListenKey {
