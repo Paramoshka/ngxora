@@ -20,8 +20,10 @@ fn build_cache_key_uri_mode() {
 
 #[test]
 fn build_cache_key_uri_and_method_mode() {
-    let mut cfg = CacheConfig::default();
-    cfg.cache_key = ngxora_compile::ir::CacheKeyMode::UriAndMethod;
+    let cfg = CacheConfig {
+        cache_key: ngxora_compile::ir::CacheKeyMode::UriAndMethod,
+        ..CacheConfig::default()
+    };
     let key = build_cache_key(&http::Method::GET, "/api/users", 1, 99, "example.com", &cfg);
     assert_eq!(key.uri, "GET /api/users");
 }
@@ -384,4 +386,104 @@ async fn cache_backend_rejects_entries_larger_than_max_size() {
 
     assert!(backend.get(&key, &cfg).await.is_none());
     assert_eq!(backend.total_entries(), 0);
+}
+#[test]
+fn unique_misses_and_long_keys_share_the_location_budget() {
+    let cfg = CacheConfig {
+        min_uses: Some(2),
+        ..CacheConfig::default()
+    };
+    let mut store = LocationCache::new(&cfg, 1024);
+    for i in 0..10_000 {
+        let key = build_cache_key(
+            &http::Method::GET,
+            &format!("/?id={i}"),
+            1,
+            1,
+            "example.com",
+            &cfg,
+        );
+        assert!(!store.record_miss(&key, 2));
+        assert!(store.current_size <= 1024);
+    }
+    assert!(store.request_counts.len() < 10);
+    let key = build_cache_key(
+        &http::Method::GET,
+        &"x".repeat(8000),
+        1,
+        1,
+        "example.com",
+        &cfg,
+    );
+    store.put(
+        key,
+        CachedResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::new(),
+            created_at: Instant::now(),
+        },
+    );
+    assert!(store.entries.is_empty());
+    let accounted: u64 = store
+        .request_counts
+        .keys()
+        .map(|k| k.estimated_size() + 64)
+        .sum();
+    assert_eq!(accounted, store.current_size);
+}
+
+#[test]
+fn cleanup_expires_counts_but_preserves_stale_responses() {
+    let cfg = CacheConfig {
+        ttl: Some(Duration::from_secs(60)),
+        stale_if_error: Some(Duration::from_secs(30)),
+        min_uses: Some(2),
+        ..CacheConfig::default()
+    };
+    let mut store = LocationCache::new(&cfg, 4096);
+    let key = build_cache_key(&http::Method::GET, "/", 1, 1, "example.com", &cfg);
+    store.put(
+        key.clone(),
+        CachedResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: Bytes::new(),
+            created_at: Instant::now() - Duration::from_secs(70),
+        },
+    );
+    assert!(!store.record_miss(&key, 2));
+    store.request_counts.get_mut(&key).unwrap().last_seen =
+        Instant::now() - Duration::from_secs(61);
+    store.evict_stale();
+    assert!(store.request_counts.is_empty());
+    assert!(store.entries.contains_key(&key));
+    assert!(!store.record_miss(&key, 2));
+    assert!(store.record_miss(&key, 2));
+    store.entries.get_mut(&key).unwrap().created_at = Instant::now() - Duration::from_secs(91);
+    store.evict_stale();
+    assert!(store.entries.is_empty());
+    store.sync_limits(&cfg, 1);
+    assert_eq!(store.current_size, 0);
+}
+
+#[tokio::test]
+async fn retired_generation_cannot_repopulate_deleted_routes() {
+    let backend = CacheBackend::new(4096);
+    let cfg = CacheConfig::default();
+    let old = build_cache_key(&http::Method::GET, "/", 1, 1, "example.com", &cfg);
+    let response = CachedResponse {
+        status: StatusCode::OK,
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+        created_at: Instant::now(),
+    };
+    backend.advance_generation(1);
+    backend.put(old.clone(), response.clone(), &cfg).await;
+    backend.advance_generation(2);
+    backend.advance_generation(1);
+    backend.put(old.clone(), response, &cfg).await;
+    assert!(!backend.record_miss(&old, &cfg));
+    assert!(backend.get(&old, &cfg).await.is_none());
+    assert!(backend.stores.read().unwrap().locations.is_empty());
 }

@@ -12,7 +12,7 @@ use pingora::tls::x509::X509;
 use pingora::upstreams::peer::HttpPeer;
 use pingora::utils::tls::CertKey;
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -222,4 +222,42 @@ fn load_runtime_client_identity(
     _key_source: &PemSource,
 ) -> Result<RuntimeClientIdentity, String> {
     Err("proxy_ssl_certificate requires build with feature `openssl`".into())
+}
+
+pub(super) fn isolate_pool(peer: &mut HttpPeer, generation: u64, route_id: u64) {
+    // Pingora does not hash the trusted CA into its connection-pool key.
+    let mut key = std::collections::hash_map::DefaultHasher::new();
+    (generation, route_id).hash(&mut key);
+    peer.group_key = key.finish();
+}
+
+impl super::SelectedRoute {
+    pub(super) fn configure_peer(
+        &self,
+        peer: &mut HttpPeer,
+        generation: u64,
+        protocol: Option<UpstreamHttpProtocol>,
+    ) -> pingora::Result<()> {
+        if peer.scheme == pingora::upstreams::peer::Scheme::HTTPS
+            && self.upstream_ssl_options.verify_cert == ngxora_compile::ir::Switch::On
+            && (peer.sni.is_empty() || peer.sni.parse::<std::net::IpAddr>().is_ok())
+        {
+            // Pingora/OpenSSL disables verification with empty SNI and its
+            // hostname verifier does not support IP SANs. Never silently bypass it.
+            return Err(pingora::Error::explain(
+                pingora::ErrorType::HTTPStatus(502),
+                "verified HTTPS upstream requires a DNS hostname; IP certificate verification is unsupported",
+            ));
+        }
+        isolate_pool(peer, generation, self.route_id);
+        apply_upstream_timeouts(peer, self.upstream_timeouts);
+        apply_upstream_http_protocol(peer, protocol);
+        apply_upstream_ssl_options(
+            peer,
+            &self.upstream_ssl_options,
+            self.upstream_trusted_ca.as_ref(),
+            self.upstream_client_identity.as_ref(),
+        );
+        Ok(())
+    }
 }

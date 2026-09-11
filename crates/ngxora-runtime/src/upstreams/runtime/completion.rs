@@ -96,17 +96,20 @@ impl DynamicProxy {
         if method != "GET" || path != "/metrics" {
             crate::metrics::write_access_log(
                 session,
-                &method,
-                &path,
-                status,
-                Some(latency),
-                upstream.as_deref(),
-                upstream_group,
-                Some(cache_status),
-                route_id,
-                ctx.scp
-                    .as_ref()
-                    .and_then(|e| e.backend.nrf_service.as_ref()),
+                crate::metrics::AccessLogContext {
+                    method: &method,
+                    path: &path,
+                    status,
+                    latency: Some(latency),
+                    upstream: upstream.as_deref(),
+                    upstream_group,
+                    cache_status: Some(cache_status),
+                    route_id,
+                    nf: ctx
+                        .scp
+                        .as_ref()
+                        .and_then(|e| e.backend.nrf_service.as_ref()),
+                },
             );
         }
 
@@ -140,6 +143,8 @@ impl DynamicProxy {
             );
         }
 
+        self.cache_backend
+            .advance_generation(self.state.generation());
         // ── Original cache-store logic ──
         if e.is_some() {
             ctx.cache_headers = None;

@@ -556,3 +556,135 @@ fn listener_addr_formats_ipv6() {
 
     assert_eq!(listener_addr(&key), "[::1]:8443");
 }
+
+#[cfg(feature = "openssl")]
+#[test]
+fn snapshot_rejects_invalid_tls_and_preserves_active_identity() {
+    use crate::control::ConfigSnapshot;
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("cert.pem");
+    let key = dir.path().join("key.pem");
+    let next_cert = dir.path().join("next.pem");
+    let next_key = dir.path().join("next.key");
+    write_self_signed_certificate(&cert, &key, 1);
+    write_self_signed_certificate(&next_cert, &next_key, 2);
+    let original = TlsIdentity {
+        cert: PemSource::Path(cert.clone()),
+        key: PemSource::Path(key.clone()),
+    };
+    let router = CompiledRouter::from_http(&Http {
+        servers: vec![Server {
+            listens: vec![tls_listener(8443, true)],
+            server_names: vec!["example.com".into()],
+            tls: Some(SslProvider::Custom(original.clone())),
+            ..Server::default()
+        }],
+        ..Http::default()
+    })
+    .unwrap();
+    let state = RuntimeState::bootstrap(router.clone());
+    let expired_cert = dir.path().join("expired.pem");
+    let expired_key = dir.path().join("expired.key");
+    write_self_signed_certificate_with_validity(
+        &expired_cert,
+        &expired_key,
+        3,
+        &Asn1Time::from_unix(1).unwrap(),
+        &Asn1Time::from_unix(2).unwrap(),
+    );
+    let invalid = [
+        TlsIdentity {
+            cert: PemSource::InlinePem("not PEM".into()),
+            key: original.key.clone(),
+        },
+        TlsIdentity {
+            cert: PemSource::Path(dir.path().join("missing.pem")),
+            key: original.key.clone(),
+        },
+        TlsIdentity {
+            cert: original.cert.clone(),
+            key: PemSource::Path(next_key.clone()),
+        },
+        TlsIdentity {
+            cert: PemSource::Path(expired_cert),
+            key: PemSource::Path(expired_key),
+        },
+    ];
+    for identity in invalid {
+        let mut next = router.clone();
+        for tls in next.listener_tls.values_mut() {
+            tls.default = Some(identity.clone());
+            tls.named.insert("example.com".into(), identity.clone());
+        }
+        let result = state.apply_snapshot(ConfigSnapshot::new("invalid", next));
+        assert!(!result.applied, "{}", result.message);
+        assert_eq!(state.snapshot().generation, 1);
+        assert_eq!(state.snapshot().version, "bootstrap");
+        assert!(router_ready(&state.snapshot().router).is_ok());
+    }
+    let mut next = router;
+    let renewed = TlsIdentity {
+        cert: PemSource::Path(next_cert),
+        key: PemSource::Path(next_key),
+    };
+    for tls in next.listener_tls.values_mut() {
+        tls.default = Some(renewed.clone());
+        tls.named.insert("example.com".into(), renewed.clone());
+    }
+    assert!(
+        state
+            .apply_snapshot(ConfigSnapshot::new("renewed", next))
+            .applied
+    );
+    assert_eq!(state.snapshot().generation, 2);
+}
+
+#[cfg(feature = "openssl")]
+#[test]
+fn le_pending_identity_is_allowed_but_custom_paths_are_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let router = CompiledRouter::from_http(&Http {
+        ssl_provider: Some(ngxora_compile::ir::LetsEncryptConfig {
+            cache_dir: Some(dir.path().into()),
+            email: None,
+            acme_directory: None,
+        }),
+        servers: vec![Server {
+            listens: vec![tls_listener(8443, true)],
+            server_names: vec!["example.com".into()],
+            tls: Some(SslProvider::LetsEncrypt),
+            ..Server::default()
+        }],
+        ..Http::default()
+    })
+    .unwrap();
+    assert!(super::validate_snapshot_tls(&router).is_ok());
+    assert!(router_ready(&router).is_err());
+    let state = RuntimeState::bootstrap(router.clone());
+    assert!(
+        state
+            .apply_snapshot(crate::control::ConfigSnapshot::new(
+                "le-pending",
+                router.clone()
+            ))
+            .applied
+    );
+    let mut custom = router;
+    for tls in custom.listener_tls.values_mut() {
+        let identity = TlsIdentity {
+            cert: PemSource::Path(dir.path().join("custom.pem")),
+            key: PemSource::Path(dir.path().join("custom.key")),
+        };
+        tls.default = Some(identity.clone());
+        tls.named.insert("example.com".into(), identity);
+    }
+    assert!(
+        !state
+            .apply_snapshot(crate::control::ConfigSnapshot::new(
+                "invalid-custom",
+                custom
+            ))
+            .applied
+    );
+    assert_eq!(state.snapshot().version, "le-pending");
+}

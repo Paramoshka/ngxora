@@ -190,13 +190,11 @@ pub(crate) fn redirect_location(
     prefix: Option<&str>,
 ) -> Result<String, String> {
     let scheme = config.scheme.as_deref().unwrap_or(scheme);
-    let port = config
-        .port
-        .unwrap_or_else(|| match config.scheme.as_deref() {
-            Some("https") => 443,
-            Some("http") => 80,
-            _ => listener_port,
-        });
+    let port = config.port.unwrap_or(match config.scheme.as_deref() {
+        Some("https") => 443,
+        Some("http") => 80,
+        _ => listener_port,
+    });
     let host = config.hostname.as_deref().unwrap_or(host);
     let host = if host.contains(':') {
         format!("[{host}]")

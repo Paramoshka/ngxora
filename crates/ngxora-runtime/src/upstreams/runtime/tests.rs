@@ -15,6 +15,7 @@ use bytes::{Bytes, BytesMut};
 use ngxora_compile::ir::{CacheConfig, UpstreamSslOptions, UpstreamTimeouts};
 use ngxora_plugin_api::{LocalResponse, PluginError, ResponseCtx};
 use pingora::http::ResponseHeader;
+use pingora::upstreams::peer::HttpPeer;
 use pingora_proxy::{ProxyHttp, Session};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -387,4 +388,28 @@ fn span_status_marks_http_5xx_responses_as_errors() {
 fn span_status_marks_non_http_errors_as_failures() {
     let err = pingora::Error::explain(pingora::ErrorType::InternalError, "boom");
     assert!(should_mark_span_as_error(Some(err.as_ref()), 0));
+}
+
+#[test]
+fn peer_preparation_isolates_pools_and_rejects_unsupported_ip_verification() {
+    use pingora::upstreams::peer::Peer;
+    let mut route = cached_route(
+        CacheConfig::default(),
+        ngxora_plugin_api::empty_plugin_chain(),
+    );
+    let mut a = HttpPeer::new(("127.0.0.1", 443), true, "backend.example".into());
+    route.configure_peer(&mut a, 1, None).unwrap();
+    let mut b = a.clone();
+    route.configure_peer(&mut b, 2, None).unwrap();
+    assert_ne!(a.reuse_hash(), b.reuse_hash());
+    route.route_id += 1;
+    route.configure_peer(&mut b, 1, None).unwrap();
+    assert_ne!(a.reuse_hash(), b.reuse_hash());
+    for name in ["", "127.0.0.1", "::1"] {
+        let mut peer = HttpPeer::new(("127.0.0.1", 443), true, name.into());
+        assert!(route.configure_peer(&mut peer, 1, None).is_err());
+        route.upstream_ssl_options.verify_cert = ngxora_compile::ir::Switch::Off;
+        assert!(route.configure_peer(&mut peer, 1, None).is_ok());
+        route.upstream_ssl_options.verify_cert = ngxora_compile::ir::Switch::On;
+    }
 }

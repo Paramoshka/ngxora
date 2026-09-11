@@ -35,13 +35,17 @@ pub struct CorsPlugin {
 }
 
 impl CorsPlugin {
-    fn apply_headers(&self, headers: &mut dyn ngxora_plugin_api::HeaderMapMut) {
+    fn apply_headers(
+        &self,
+        headers: &mut dyn ngxora_plugin_api::HeaderMapMut,
+    ) -> Result<(), ngxora_plugin_api::PluginError> {
         if let Some(val) = &self.allow_origin {
-            let _ = headers.set(&header::ACCESS_CONTROL_ALLOW_ORIGIN, val.clone());
+            headers.set(&header::ACCESS_CONTROL_ALLOW_ORIGIN, val.clone())?;
         }
         if let Some(val) = &self.allow_credentials {
-            let _ = headers.set(&header::ACCESS_CONTROL_ALLOW_CREDENTIALS, val.clone());
+            headers.set(&header::ACCESS_CONTROL_ALLOW_CREDENTIALS, val.clone())?;
         }
+        Ok(())
     }
 }
 
@@ -100,11 +104,10 @@ impl HttpPlugin for CorsPlugin {
         &self,
         ctx: &mut ResponseCtx<'_>,
     ) -> Result<PluginFlow, ngxora_plugin_api::PluginError> {
-        self.apply_headers(ctx.headers);
+        self.apply_headers(ctx.headers)?;
         if let Some(val) = &self.expose_headers {
-            let _ = ctx
-                .headers
-                .set(&header::ACCESS_CONTROL_EXPOSE_HEADERS, val.clone());
+            ctx.headers
+                .set(&header::ACCESS_CONTROL_EXPOSE_HEADERS, val.clone())?;
         }
         Ok(PluginFlow::Continue)
     }
@@ -268,18 +271,62 @@ mod tests {
             let origin = res
                 .headers
                 .iter()
-                .find(|(k, _)| k == &header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .find(|(k, _)| k == header::ACCESS_CONTROL_ALLOW_ORIGIN)
                 .unwrap();
             assert_eq!(origin.1.to_str().unwrap(), "*");
 
             let max_age = res
                 .headers
                 .iter()
-                .find(|(k, _)| k == &header::ACCESS_CONTROL_MAX_AGE)
+                .find(|(k, _)| k == header::ACCESS_CONTROL_MAX_AGE)
                 .unwrap();
             assert_eq!(max_age.1.to_str().unwrap(), "3600");
         } else {
             panic!("Expected preflight interception");
+        }
+    }
+    #[test]
+    fn response_header_failures_are_propagated() {
+        struct RejectHeaders;
+        impl HeaderMapMut for RejectHeaders {
+            fn add(
+                &mut self,
+                name: &HeaderName,
+                value: HeaderValue,
+            ) -> Result<(), ngxora_plugin_api::PluginError> {
+                self.set(name, value)
+            }
+            fn set(
+                &mut self,
+                _: &HeaderName,
+                _: HeaderValue,
+            ) -> Result<(), ngxora_plugin_api::PluginError> {
+                Err(ngxora_plugin_api::PluginError::new(
+                    "test",
+                    "header rejected",
+                ))
+            }
+            fn remove(&mut self, _: &HeaderName) {}
+        }
+        for config in [
+            json!({"allow_origin":"*"}),
+            json!({"allow_credentials":true}),
+            json!({"expose_headers":"X-Test"}),
+        ] {
+            let plugin = CorsPluginFactory
+                .build(&PluginSpec {
+                    name: "cors".into(),
+                    config,
+                })
+                .unwrap();
+            let mut status = StatusCode::OK;
+            let error = block_on(plugin.on_response(&mut ResponseCtx {
+                state: &mut PluginState::default(),
+                status: &mut status,
+                headers: &mut RejectHeaders,
+            }))
+            .unwrap_err();
+            assert_eq!(error.message, "header rejected");
         }
     }
 }

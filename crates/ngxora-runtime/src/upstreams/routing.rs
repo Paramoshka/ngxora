@@ -18,15 +18,16 @@ pub(crate) fn select_route_target<'a>(
     for location in &routes.locations {
         match &location.matcher {
             CompiledMatcher::Exact(p) if path == p => return Some(location),
-            CompiledMatcher::Prefix(p) if path.starts_with(p) => {
-                if best_prefix.is_none_or(|(_, len)| p.len() > len) {
-                    best_prefix = Some((location, p.len()));
-                }
+            CompiledMatcher::Prefix(p)
+                if path.starts_with(p) && best_prefix.is_none_or(|(_, len)| p.len() > len) =>
+            {
+                best_prefix = Some((location, p.len()));
             }
-            CompiledMatcher::PreferPrefix(p) if path.starts_with(p) => {
-                if best_prefer_prefix.is_none_or(|(_, len)| p.len() > len) {
-                    best_prefer_prefix = Some((location, p.len()));
-                }
+            CompiledMatcher::PreferPrefix(p)
+                if path.starts_with(p)
+                    && best_prefer_prefix.is_none_or(|(_, len)| p.len() > len) =>
+            {
+                best_prefer_prefix = Some((location, p.len()));
             }
             _ => {}
         }
@@ -37,10 +38,10 @@ pub(crate) fn select_route_target<'a>(
     }
 
     for location in &routes.locations {
-        if let CompiledMatcher::Regex(regex) = &location.matcher {
-            if regex.is_match(path) {
-                return Some(location);
-            }
+        if let CompiledMatcher::Regex(regex) = &location.matcher
+            && regex.is_match(path)
+        {
+            return Some(location);
         }
     }
 
@@ -107,13 +108,13 @@ pub(crate) fn validate_sni_host_consistency(
     host: Option<&str>,
     sni: Option<&str>,
 ) -> PingoraResult<()> {
-    if let (Some(host), Some(sni)) = (host, sni) {
-        if host != sni {
-            return Err(pingora::Error::explain(
-                pingora::ErrorType::HTTPStatus(421),
-                format!("tls sni `{sni}` does not match http host `{host}`"),
-            ));
-        }
+    if let (Some(host), Some(sni)) = (host, sni)
+        && host != sni
+    {
+        return Err(pingora::Error::explain(
+            pingora::ErrorType::HTTPStatus(421),
+            format!("tls sni `{sni}` does not match http host `{host}`"),
+        ));
     }
 
     Ok(())
@@ -236,12 +237,12 @@ pub(super) fn resolve_route<'a>(
         {
             let mut best = None;
             for location in &routes.locations {
-                if let CompiledMatcher::Http(matcher) = &location.matcher {
-                    if super::http_routes::matches(matcher, session.req_header()) {
-                        let score = super::http_routes::match_score(matcher);
-                        if best.is_none_or(|(previous, _)| score > previous) {
-                            best = Some((score, location));
-                        }
+                if let CompiledMatcher::Http(matcher) = &location.matcher
+                    && super::http_routes::matches(matcher, session.req_header())
+                {
+                    let score = super::http_routes::match_score(matcher);
+                    if best.is_none_or(|(previous, _)| score > previous) {
+                        best = Some((score, location));
                     }
                 }
             }

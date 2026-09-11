@@ -138,7 +138,12 @@ impl SelectedRoute {
                 .transpose()?,
             upstream_client_identity,
             plugins: snapshot.plugin_chain(resolved.location.route_id),
-            cache: resolved.location.cache.clone(),
+            cache: resolved.location.cache.clone().map(|mut cache| {
+                cache.max_size = cache
+                    .max_size
+                    .or(snapshot.router.http_options.proxy_cache_max_size);
+                cache
+            }),
         })
     }
 }

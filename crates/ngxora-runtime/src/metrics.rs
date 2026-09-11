@@ -362,18 +362,30 @@ struct AccessLogEntry {
 }
 
 /// Write a structured JSON access log line.
-pub(crate) fn write_access_log(
-    session: &Session,
-    method: &str,
-    path: &str,
-    status: u16,
-    latency: Option<std::time::Duration>,
-    upstream: Option<&str>,
-    upstream_group: Option<&str>,
-    cache_status: Option<&str>,
-    route_id: Option<u64>,
-    nf: Option<&crate::upstreams::NrfServiceMetadata>,
-) {
+pub(crate) struct AccessLogContext<'a> {
+    pub method: &'a str,
+    pub path: &'a str,
+    pub status: u16,
+    pub latency: Option<std::time::Duration>,
+    pub upstream: Option<&'a str>,
+    pub upstream_group: Option<&'a str>,
+    pub cache_status: Option<&'a str>,
+    pub route_id: Option<u64>,
+    pub nf: Option<&'a crate::upstreams::NrfServiceMetadata>,
+}
+
+pub(crate) fn write_access_log(session: &Session, context: AccessLogContext<'_>) {
+    let AccessLogContext {
+        method,
+        path,
+        status,
+        latency,
+        upstream,
+        upstream_group,
+        cache_status,
+        route_id,
+        nf,
+    } = context;
     let latency_secs = latency.map(|d| d.as_secs_f64());
 
     let client_ip = session.as_downstream().client_addr().map(|a| a.to_string());

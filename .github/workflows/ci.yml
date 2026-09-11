@@ -38,6 +38,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
+          components: rustfmt, clippy
 
       - name: Install Go
         uses: actions/setup-go@v7
@@ -46,6 +47,9 @@ jobs:
 
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
+
+      - name: Lint
+        run: make lint
 
       - name: Run tests
         run: make test

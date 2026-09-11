@@ -208,10 +208,10 @@ fn compile_upstream_protocol(
     let mut protocol = None;
 
     for directive in &location.directives {
-        if let LocationDirective::ProxyUpstreamProtocol(value) = directive {
-            if protocol.replace(*value).is_some() {
-                return Err("proxy_upstream_protocol is duplicated in the same location".into());
-            }
+        if let LocationDirective::ProxyUpstreamProtocol(value) = directive
+            && protocol.replace(*value).is_some()
+        {
+            return Err("proxy_upstream_protocol is duplicated in the same location".into());
         }
     }
 

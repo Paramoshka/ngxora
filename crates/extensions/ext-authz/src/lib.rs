@@ -53,6 +53,12 @@ impl HttpPlugin for ExtAuthzPlugin {
             }
         }
 
+        // These headers belong to the auth service, even when it omits them.
+        // Build the sub-request first because the two allowlists may overlap.
+        for header_name in &self.pass_response_headers {
+            ctx.headers.remove(header_name);
+        }
+
         let auth_resp = match req_builder.send().await {
             Ok(resp) => resp,
             Err(err) => {
@@ -74,9 +80,8 @@ impl HttpPlugin for ExtAuthzPlugin {
             // Extract explicitly defined response headers and append to the upstream request
             for header_name in &self.pass_response_headers {
                 if let Some(val) = auth_resp.headers().get(header_name) {
-                    ctx.headers.set(header_name, val.clone()).map_err(|err| {
+                    ctx.headers.set(header_name, val.clone()).inspect_err(|_| {
                         error!("ext_authz plugin could not apply auth response header");
-                        err
                     })?;
                 }
             }
@@ -432,5 +437,68 @@ mod tests {
 
         source_task.await.expect("source server task should finish");
         target_task.abort();
+    }
+    #[tokio::test]
+    async fn auth_response_headers_replace_client_identity_and_preserve_subrequest_inputs() {
+        for trusted in [None, Some("trusted-user")] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0; 1024];
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    request.extend_from_slice(&buffer[..n]);
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header = trusted
+                    .map(|v| format!("X-User: {v}\r\n"))
+                    .unwrap_or_default();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\n{header}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                String::from_utf8(request).unwrap()
+            });
+            let plugin = ExtAuthzPluginFactory.build(&PluginSpec {
+                name: "ext_authz".into(),
+                config: json!({ "uri": format!("http://{addr}/auth"), "allowed_hosts": ["127.0.0.1"], "pass_request_headers": ["X-User"], "pass_response_headers": ["X-User"] }),
+            }).unwrap();
+            let mut headers = TestHeaders(HeaderMap::new());
+            headers
+                .0
+                .append("x-user", HeaderValue::from_static("forged-admin"));
+            headers
+                .0
+                .append("x-user", HeaderValue::from_static("also-forged"));
+            let flow = plugin
+                .on_request(&mut RequestCtx {
+                    state: &mut PluginState::default(),
+                    path: "/",
+                    host: None,
+                    method: &Method::GET,
+                    client_ip: None,
+                    headers: &mut headers,
+                })
+                .await
+                .unwrap();
+            assert!(matches!(flow, PluginFlow::Continue));
+            assert_eq!(
+                headers.0.get("x-user").map(|v| v.to_str().unwrap()),
+                trusted
+            );
+            assert_eq!(
+                headers.0.get_all("x-user").iter().count(),
+                usize::from(trusted.is_some())
+            );
+            assert!(
+                server
+                    .await
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("x-user: forged-admin")
+            );
+        }
     }
 }

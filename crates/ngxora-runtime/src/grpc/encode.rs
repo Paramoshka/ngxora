@@ -510,6 +510,6 @@ fn proto_http_options_from_runtime(options: &HttpRuntimeOptions) -> ProtoHttpOpt
 
 fn sorted_named_routes(routes: &HashMap<String, ServerRoutes>) -> Vec<(&String, &ServerRoutes)> {
     let mut entries = routes.iter().collect::<Vec<_>>();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by_key(|(left, _)| *left);
     entries
 }

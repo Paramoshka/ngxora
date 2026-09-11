@@ -283,7 +283,7 @@ impl LeManager {
             Ok(t) => t,
             Err(_) => return CertStatus::ExpiringSoon,
         };
-        if not_after < &renew_before {
+        if not_after < renew_before {
             CertStatus::ExpiringSoon
         } else {
             CertStatus::Fresh
@@ -435,10 +435,9 @@ impl LeManager {
         req.sign(key, openssl::hash::MessageDigest::sha256())
             .map_err(|e| format!("failed to sign CSR: {e}"))?;
 
-        Ok(req
-            .build()
+        req.build()
             .to_der()
-            .map_err(|e| format!("failed to DER-encode CSR: {e}"))?)
+            .map_err(|e| format!("failed to DER-encode CSR: {e}"))
     }
 }
 

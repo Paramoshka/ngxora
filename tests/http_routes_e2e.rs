@@ -662,7 +662,7 @@ async fn upstream_failure_does_not_append_an_error_to_a_started_response() {
     let task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = [0; 4096];
-        stream.read(&mut request).await.unwrap();
+        assert!(stream.read(&mut request).await.unwrap() > 0);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
             .await
@@ -718,5 +718,132 @@ async fn text_config_preserves_nginx_prefix_and_applies_access_rules_to_returns(
                 .0,
             403
         );
+    }
+}
+
+async fn tls_backend(h2: bool) -> (u16, String, tokio::task::JoinHandle<()>) {
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::sync::Arc;
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let pem = identity.cert.pem();
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        identity.signing_key.serialize_der(),
+    ));
+    let mut config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![identity.cert.der().clone()], key)
+        .unwrap();
+    config.alpn_protocols = vec![if h2 {
+        b"h2".to_vec()
+    } else {
+        b"http/1.1".to_vec()
+    }];
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind(("localhost", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let acceptor = acceptor.clone();
+            connections.spawn(async move {
+                // Negative cases intentionally reject the certificate during handshake.
+                let Ok(stream) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let service = hyper::service::service_fn(|_: Request<Incoming>| async {
+                    Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from_static(
+                        b"trusted backend",
+                    ))))
+                });
+                let result = if h2 {
+                    hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await
+                } else {
+                    hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await
+                };
+                if let Err(error) = result {
+                    eprintln!("TLS test backend connection ended: {error}");
+                }
+            });
+        }
+    });
+    (port, pem, task)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tls_pool_isolates_route_trust_and_live_ca_rotation() {
+    for h2 in [false, true] {
+        let (port, trusted_ca, task) = tls_backend(h2).await;
+        let unrelated_ca = rcgen::generate_simple_self_signed(vec!["unrelated.example".into()])
+            .unwrap()
+            .cert
+            .pem();
+        let mut proxy = Proxy::start("").await;
+        let mut trusted = route("/trusted", 200);
+        trusted.action = Some(p::route::Action::Upstream(p::Upstream {
+            scheme: "https".into(),
+            host: "localhost".into(),
+            ..backend(port)
+        }));
+        trusted.upstream_protocol = if h2 {
+            p::UpstreamHttpProtocol::H2 as i32
+        } else {
+            p::UpstreamHttpProtocol::H1 as i32
+        };
+        trusted.tls_options = Some(p::UpstreamTlsOptions {
+            verify: p::Switch::On as i32,
+            trusted_certificate: Some(p::PemSource {
+                source: Some(p::pem_source::Source::InlinePem(trusted_ca.clone())),
+            }),
+            ..Default::default()
+        });
+        let mut untrusted = trusted.clone();
+        matcher(&mut untrusted).path = Some(p::http_match::Path::PathPrefix("/untrusted".into()));
+        untrusted.tls_options.as_mut().unwrap().trusted_certificate = Some(p::PemSource {
+            source: Some(p::pem_source::Source::InlinePem(unrelated_ca.clone())),
+        });
+        proxy.apply(vec![trusted.clone(), untrusted.clone()]).await;
+        for _ in 0..2 {
+            assert_eq!(
+                proxy
+                    .request("GET", "test.local", "/trusted", &[], false)
+                    .await
+                    .0,
+                200
+            );
+        }
+        assert_eq!(
+            proxy
+                .request("GET", "test.local", "/untrusted", &[], false)
+                .await
+                .0,
+            502
+        );
+        trusted.tls_options = untrusted.tls_options;
+        proxy.apply(vec![trusted.clone()]).await;
+        assert_eq!(
+            proxy
+                .request("GET", "test.local", "/trusted", &[], false)
+                .await
+                .0,
+            502
+        );
+        trusted.tls_options.as_mut().unwrap().trusted_certificate = Some(p::PemSource {
+            source: Some(p::pem_source::Source::InlinePem(trusted_ca)),
+        });
+        proxy.apply(vec![trusted]).await;
+        assert_eq!(
+            proxy
+                .request("GET", "test.local", "/trusted", &[], false)
+                .await
+                .0,
+            200
+        );
+        task.abort();
     }
 }

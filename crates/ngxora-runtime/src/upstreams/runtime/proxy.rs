@@ -11,16 +11,14 @@ use super::selection::{
     location_allows_client, prefixed_upstream_uri, request_client_ip, select_backend_target,
     select_runtime_route,
 };
-use super::tls::{
-    apply_upstream_http_protocol, apply_upstream_ssl_options, apply_upstream_timeouts,
-};
 use super::{
-    DynamicProxy, ProxyContext, SelectedTarget, cache_store_allowed, runtime_config_error,
+    DynamicProxy, ProxyContext, SelectedRoute, SelectedTarget, cache_store_allowed,
+    runtime_config_error,
 };
 use crate::cache::{
     CacheBackend, build_cache_key, estimated_headers_size, is_cacheable, is_cacheable_request,
 };
-use crate::control::{ApplyResult, ConfigSnapshot, RuntimeState};
+use crate::control::{ApplyResult, ConfigSnapshot, RuntimeSnapshot, RuntimeState};
 use crate::le::ChallengeTokens;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -31,11 +29,45 @@ use pingora::Result as PingoraResult;
 use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::upstreams::peer::HttpPeer;
 use pingora_proxy::{ProxyHttp, Session};
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
 impl DynamicProxy {
+    async fn try_cache(
+        &self,
+        session: &mut Session,
+        ctx: &mut ProxyContext,
+        host: Option<&str>,
+    ) -> PingoraResult<bool> {
+        let Some(selected) = ctx.selected.as_ref() else {
+            return Ok(false);
+        };
+        // Authentication, rate limiting, and other request plugins must run
+        // before a cache hit can terminate the request.
+        if is_cacheable_request(&session.req_header().method, &session.req_header().headers)
+            && let Some(cache_cfg) = &selected.cache
+        {
+            let full_uri = session.req_header().uri.to_string();
+            let cache_key = build_cache_key(
+                &session.req_header().method,
+                &full_uri,
+                ctx.snapshot_generation,
+                selected.route_id(),
+                host.unwrap_or(""),
+                cache_cfg,
+            );
+            if let Some(cached) = self.cache_backend.get(&cache_key, cache_cfg).await {
+                ctx.cache_hit = true;
+                write_cached_response(session, &cached).await?;
+                return Ok(true);
+            }
+            ctx.cache_store_allowed = self.cache_backend.record_miss(&cache_key, cache_cfg);
+            ctx.cache_key = Some(cache_key);
+        }
+
+        Ok(false)
+    }
+
     pub fn new(state: Arc<RuntimeState>) -> Self {
         Self {
             state,
@@ -111,11 +143,8 @@ impl ProxyHttp for DynamicProxy {
         ctx.client_max_body_size = snapshot.router.http_options.client_max_body_size;
         ctx.received_body_bytes = 0;
 
-        // Apply global proxy_cache_max_size from config (once per snapshot
-        // change — set_default_max_size is a relaxed atomic store).
-        if let Some(global_size) = snapshot.router.http_options.proxy_cache_max_size {
-            self.cache_backend.set_default_max_size(global_size);
-        }
+        self.cache_backend
+            .advance_generation(self.state.generation());
 
         if restrict_client_max_body_size(session, ctx).await? {
             return Ok(true);
@@ -127,20 +156,19 @@ impl ProxyHttp for DynamicProxy {
             .uri
             .path()
             .strip_prefix("/.well-known/acme-challenge/")
+            && !token.is_empty()
+            && !token.contains('/')
+            && let Some(key_auth) = self.challenge_tokens.get(token).map(|v| v.clone())
         {
-            if !token.is_empty() && !token.contains('/') {
-                if let Some(key_auth) = self.challenge_tokens.get(token).map(|v| v.clone()) {
-                    let mut response = LocalResponse::new(http::StatusCode::OK, "");
-                    response.headers.push((
-                        http::header::CONTENT_TYPE,
-                        http::HeaderValue::from_static("text/plain"),
-                    ));
-                    response.body = key_auth.into_bytes().into();
-                    session.set_keepalive(None);
-                    write_route_response(session, ctx, response).await?;
-                    return Ok(true);
-                }
-            }
+            let mut response = LocalResponse::new(http::StatusCode::OK, "");
+            response.headers.push((
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/plain"),
+            ));
+            response.body = key_auth.into_bytes().into();
+            session.set_keepalive(None);
+            write_route_response(session, ctx, response).await?;
+            return Ok(true);
         }
 
         let Some((mut selected, host)) = select_runtime_route(&snapshot, session)? else {
@@ -149,164 +177,25 @@ impl ProxyHttp for DynamicProxy {
         };
 
         ctx.selected = Some(selected.clone());
-        let path = session.req_header().uri.path().to_string();
         let method = session.req_header().method.clone();
         let request_was_cacheable = is_cacheable_request(&method, &session.req_header().headers);
-        let client_ip = request_client_ip(session);
-        if !location_allows_client(&selected.access_rules, client_ip) {
-            session.set_keepalive(None);
-            write_route_response(
-                session,
-                ctx,
-                LocalResponse::new(http::StatusCode::FORBIDDEN, ""),
-            )
-            .await?;
+        if authorize_request(session, ctx, &selected, host.as_deref()).await? {
             return Ok(true);
         }
 
-        let mut headers = RequestHeaderEditor {
-            inner: session.downstream_session.req_header_mut(),
-        };
-
-        for plugin in selected.plugins.iter() {
-            let flow = plugin
-                .on_request(&mut RequestCtx {
-                    state: &mut ctx.plugin_state,
-                    path: &path,
-                    host: host.as_deref(),
-                    method: &method,
-                    client_ip,
-                    headers: &mut headers,
-                })
-                .await
-                .map_err(|err| map_plugin_error("request_filter", err))?;
-            if let PluginFlow::Respond(response) = flow {
-                session.set_keepalive(None);
-                write_route_response(session, ctx, response).await?;
-                return Ok(true);
-            }
+        if prepare_scp_request(session, ctx, &snapshot, &selected).await? {
+            return Ok(true);
         }
 
-        ctx.selected = Some(selected.clone());
-
-        if let SelectedTarget::Scp(name) = &selected.target {
-            let profile = snapshot.scp_profiles.get(name).cloned().ok_or_else(|| {
-                pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    "SCP profile missing in snapshot",
-                )
-            })?;
-            ctx.scp_profile = Some(profile.clone());
-            if session.req_header().version != http::Version::HTTP_2 {
-                let error = super::super::scp::ScpError::new(
-                    505,
-                    "UNSPECIFIED_MSG_FAILURE",
-                    "SCP requires HTTP/2",
-                );
-                write_route_response(session, ctx, error.response(&profile.root.host)).await?;
-                return Ok(true);
-            }
-            let request = super::super::scp::ScpRequest::parse(
-                &session.req_header().headers,
-                &session.req_header().method,
-                &session.req_header().uri,
-                &profile.root,
-            );
-            let result = match request {
-                Ok(request) => {
-                    profile
-                        .route(
-                            request,
-                            &session.req_header().headers,
-                            client_ip
-                                .map(|ip| ip.to_string())
-                                .unwrap_or_default()
-                                .as_bytes(),
-                        )
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            match result {
-                Ok(exchange) => {
-                    crate::metrics::record_scp_event(
-                        name,
-                        if exchange.request.bound {
-                            "binding"
-                        } else {
-                            "route"
-                        },
-                    );
-                    ctx.scp = Some(exchange);
-                }
-                Err(error) => {
-                    crate::metrics::record_scp_event(name, error.cause);
-                    write_route_response(session, ctx, error.response(&profile.root.host)).await?;
-                    return Ok(true);
-                }
-            }
-        }
-
-        // Authentication, rate limiting, and other request plugins must run
-        // before a cache hit can terminate the request.
-        if request_was_cacheable
-            && is_cacheable_request(&session.req_header().method, &session.req_header().headers)
-        {
-            if let Some(cache_cfg) = &selected.cache {
-                let full_uri = session.req_header().uri.to_string();
-                let cache_key = build_cache_key(
-                    &session.req_header().method,
-                    &full_uri,
-                    snapshot.generation,
-                    selected.route_id(),
-                    host.as_deref().unwrap_or(""),
-                    cache_cfg,
-                );
-                if let Some(cached) = self.cache_backend.get(&cache_key, cache_cfg).await {
-                    ctx.cache_hit = true;
-                    write_cached_response(session, &cached).await?;
-                    return Ok(true);
-                }
-                ctx.cache_store_allowed = self.cache_backend.record_miss(&cache_key, cache_cfg);
-                ctx.cache_key = Some(cache_key);
-            }
+        if request_was_cacheable && self.try_cache(session, ctx, host.as_deref()).await? {
+            return Ok(true);
         }
 
         if let SelectedTarget::Pending(target) = &selected.target {
             selected.target = select_backend_target(&snapshot, selected.route_id, target, session)?;
             ctx.selected = Some(selected.clone());
         }
-        if let SelectedTarget::DirectResponse(status) = selected.target {
-            let status = http::StatusCode::from_u16(status).map_err(runtime_config_error)?;
-            write_route_response(session, ctx, LocalResponse::new(status, "")).await?;
-            return Ok(true);
-        }
-        // Handle return/redirect targets
-        if let SelectedTarget::Return { status, location } = &selected.target {
-            let status_code = http::StatusCode::from_u16(*status).map_err(|_| {
-                pingora::Error::explain(
-                    pingora::ErrorType::InternalError,
-                    format!("invalid redirect status code: {status}"),
-                )
-            })?;
-
-            let mut response = LocalResponse::new(status_code, "");
-            response.headers.push((
-                http::header::LOCATION,
-                http::HeaderValue::from_str(location).map_err(|_| {
-                    pingora::Error::explain(
-                        pingora::ErrorType::InternalError,
-                        format!("invalid redirect location: {location}"),
-                    )
-                })?,
-            ));
-
-            session.set_keepalive(None);
-            write_route_response(session, ctx, response).await?;
-            return Ok(true);
-        }
-
-        Ok(false)
+        respond_to_selected_target(session, ctx, &selected).await
     }
 
     async fn request_body_filter(
@@ -400,6 +289,8 @@ impl ProxyHttp for DynamicProxy {
     where
         Self::CTX: Send + Sync,
     {
+        self.cache_backend
+            .advance_generation(self.state.generation());
         if let Some(profile) = ctx.scp_profile.clone() {
             use pingora::{ErrorSource, ErrorType};
             let error = match proxy_error.etype() {
@@ -437,10 +328,10 @@ impl ProxyHttp for DynamicProxy {
                 write_route_response(session, ctx, error.response(&profile.root.host)).await
             {
                 log::debug!("SCP error response could not be delivered: {write_error}");
-                if session.response_written().is_none() {
-                    if let Err(error) = session.respond_error(500).await {
-                        log::debug!("failed to send fallback HTTP error: {error}");
-                    }
+                if session.response_written().is_none()
+                    && let Err(error) = session.respond_error(500).await
+                {
+                    log::debug!("failed to send fallback HTTP error: {error}");
                 }
             }
             return pingora_proxy::FailToProxy {
@@ -498,10 +389,10 @@ impl ProxyHttp for DynamicProxy {
         let response = LocalResponse::new(status, "");
         if let Err(error) = write_route_response(session, ctx, response).await {
             log::debug!("failed to send HTTP error response: {error}");
-            if session.response_written().is_none() {
-                if let Err(error) = session.respond_error(500).await {
-                    log::debug!("failed to send fallback HTTP error: {error}");
-                }
+            if session.response_written().is_none()
+                && let Err(error) = session.respond_error(500).await
+            {
+                log::debug!("failed to send fallback HTTP error: {error}");
             }
         }
         pingora_proxy::FailToProxy {
@@ -533,33 +424,33 @@ impl ProxyHttp for DynamicProxy {
 
         // Cacheability must be evaluated against the final response that the
         // client will actually receive after plugins mutate headers/status.
-        if let (Some(_cache_key), Some(cache_cfg)) = (&ctx.cache_key, selected.cache.as_ref()) {
-            if cache_store_allowed(cache_cfg, ctx.cache_store_allowed)
-                && is_cacheable(status, &upstream_response.headers, cache_cfg)
-            {
-                let entry_overhead =
-                    estimated_headers_size(&upstream_response.headers).saturating_add(128);
-                let body_limit = self
-                    .cache_backend
-                    .max_size(cache_cfg)
-                    .saturating_sub(entry_overhead);
-                let content_length_fits = upstream_response
-                    .headers
-                    .get(http::header::CONTENT_LENGTH)
-                    .map(|value| {
-                        value
-                            .to_str()
-                            .ok()
-                            .and_then(|value| value.parse::<u64>().ok())
-                            .is_some_and(|length| length <= body_limit)
-                    })
-                    .unwrap_or(true);
+        if let (Some(_cache_key), Some(cache_cfg)) = (&ctx.cache_key, selected.cache.as_ref())
+            && cache_store_allowed(cache_cfg, ctx.cache_store_allowed)
+            && is_cacheable(status, &upstream_response.headers, cache_cfg)
+        {
+            let entry_overhead = estimated_headers_size(&upstream_response.headers)
+                .saturating_add(128)
+                .saturating_add(_cache_key.estimated_size());
+            let body_limit = self
+                .cache_backend
+                .max_size(cache_cfg)
+                .saturating_sub(entry_overhead);
+            let content_length_fits = upstream_response
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .map(|value| {
+                    value
+                        .to_str()
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .is_some_and(|length| length <= body_limit)
+                })
+                .unwrap_or(true);
 
-                if content_length_fits {
-                    ctx.cache_status = Some(status);
-                    ctx.cache_headers = Some(upstream_response.headers.clone());
-                    ctx.cache_body_limit = Some(body_limit);
-                }
+            if content_length_fits {
+                ctx.cache_status = Some(status);
+                ctx.cache_headers = Some(upstream_response.headers.clone());
+                ctx.cache_body_limit = Some(body_limit);
             }
         }
 
@@ -617,6 +508,7 @@ impl ProxyHttp for DynamicProxy {
                 .clone()
                 .unwrap_or_else(|| self.state.snapshot());
             ctx.snapshot = Some(snapshot.clone());
+            ctx.snapshot_generation = snapshot.generation;
             let Some((selected, _host)) = select_runtime_route(&snapshot, session)? else {
                 return Err(pingora::Error::explain(
                     pingora::ErrorType::HTTPStatus(404),
@@ -678,32 +570,15 @@ impl ProxyHttp for DynamicProxy {
                     )
                 })?;
                 let mut peer = HttpPeer::new(address, tls, exchange.root.host.clone());
-                // Pingora's pool key omits the trusted CA. Isolate routes and
-                // snapshot generations so CA changes require a new handshake.
-                let mut pool_key = std::collections::hash_map::DefaultHasher::new();
-                (
-                    "scp",
-                    ctx.snapshot_generation,
-                    selected.route_id,
-                    &exchange.profile.config.name,
-                )
-                    .hash(&mut pool_key);
-                peer.group_key = pool_key.finish();
-                apply_upstream_timeouts(&mut peer, selected.upstream_timeouts);
-                apply_upstream_http_protocol(
+                selected.configure_peer(
                     &mut peer,
+                    ctx.snapshot_generation,
                     Some(if tls {
                         UpstreamHttpProtocol::H2
                     } else {
                         UpstreamHttpProtocol::H2c
                     }),
-                );
-                apply_upstream_ssl_options(
-                    &mut peer,
-                    &selected.upstream_ssl_options,
-                    selected.upstream_trusted_ca.as_ref(),
-                    selected.upstream_client_identity.as_ref(),
-                );
+                )?;
                 return Ok(Box::new(peer));
             }
             SelectedTarget::Upstream(peer) => peer,
@@ -720,14 +595,11 @@ impl ProxyHttp for DynamicProxy {
 
         let mut http_peer =
             HttpPeer::new((peer.host.as_str(), peer.port), peer.tls, peer.sni.clone());
-        apply_upstream_timeouts(&mut http_peer, selected.upstream_timeouts);
-        apply_upstream_http_protocol(&mut http_peer, selected.upstream_protocol);
-        apply_upstream_ssl_options(
+        selected.configure_peer(
             &mut http_peer,
-            &selected.upstream_ssl_options,
-            selected.upstream_trusted_ca.as_ref(),
-            selected.upstream_client_identity.as_ref(),
-        );
+            ctx.snapshot_generation,
+            selected.upstream_protocol,
+        )?;
 
         Ok(Box::new(http_peer))
     }
@@ -763,4 +635,156 @@ impl ProxyHttp for DynamicProxy {
         }
         error
     }
+}
+
+async fn authorize_request(
+    session: &mut Session,
+    ctx: &mut ProxyContext,
+    selected: &SelectedRoute,
+    host: Option<&str>,
+) -> PingoraResult<bool> {
+    let path = session.req_header().uri.path().to_string();
+    let method = session.req_header().method.clone();
+    let client_ip = request_client_ip(session);
+    if !location_allows_client(&selected.access_rules, client_ip) {
+        session.set_keepalive(None);
+        write_route_response(
+            session,
+            ctx,
+            LocalResponse::new(http::StatusCode::FORBIDDEN, ""),
+        )
+        .await?;
+        return Ok(true);
+    }
+
+    let mut headers = RequestHeaderEditor {
+        inner: session.downstream_session.req_header_mut(),
+    };
+
+    for plugin in selected.plugins.iter() {
+        let flow = plugin
+            .on_request(&mut RequestCtx {
+                state: &mut ctx.plugin_state,
+                path: &path,
+                host,
+                method: &method,
+                client_ip,
+                headers: &mut headers,
+            })
+            .await
+            .map_err(|err| map_plugin_error("request_filter", err))?;
+        if let PluginFlow::Respond(response) = flow {
+            session.set_keepalive(None);
+            write_route_response(session, ctx, response).await?;
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+async fn prepare_scp_request(
+    session: &mut Session,
+    ctx: &mut ProxyContext,
+    snapshot: &RuntimeSnapshot,
+    selected: &SelectedRoute,
+) -> PingoraResult<bool> {
+    let client_ip = request_client_ip(session);
+    if let SelectedTarget::Scp(name) = &selected.target {
+        let profile = snapshot.scp_profiles.get(name).cloned().ok_or_else(|| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                "SCP profile missing in snapshot",
+            )
+        })?;
+        ctx.scp_profile = Some(profile.clone());
+        if session.req_header().version != http::Version::HTTP_2 {
+            let error = super::super::scp::ScpError::new(
+                505,
+                "UNSPECIFIED_MSG_FAILURE",
+                "SCP requires HTTP/2",
+            );
+            write_route_response(session, ctx, error.response(&profile.root.host)).await?;
+            return Ok(true);
+        }
+        let request = super::super::scp::ScpRequest::parse(
+            &session.req_header().headers,
+            &session.req_header().method,
+            &session.req_header().uri,
+            &profile.root,
+        );
+        let result = match request {
+            Ok(request) => {
+                profile
+                    .route(
+                        request,
+                        &session.req_header().headers,
+                        client_ip
+                            .map(|ip| ip.to_string())
+                            .unwrap_or_default()
+                            .as_bytes(),
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(exchange) => {
+                crate::metrics::record_scp_event(
+                    name,
+                    if exchange.request.bound {
+                        "binding"
+                    } else {
+                        "route"
+                    },
+                );
+                ctx.scp = Some(exchange);
+            }
+            Err(error) => {
+                crate::metrics::record_scp_event(name, error.cause);
+                write_route_response(session, ctx, error.response(&profile.root.host)).await?;
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+async fn respond_to_selected_target(
+    session: &mut Session,
+    ctx: &mut ProxyContext,
+    selected: &SelectedRoute,
+) -> PingoraResult<bool> {
+    if let SelectedTarget::DirectResponse(status) = selected.target {
+        let status = http::StatusCode::from_u16(status).map_err(runtime_config_error)?;
+        write_route_response(session, ctx, LocalResponse::new(status, "")).await?;
+        return Ok(true);
+    }
+    // Handle return/redirect targets
+    if let SelectedTarget::Return { status, location } = &selected.target {
+        let status_code = http::StatusCode::from_u16(*status).map_err(|_| {
+            pingora::Error::explain(
+                pingora::ErrorType::InternalError,
+                format!("invalid redirect status code: {status}"),
+            )
+        })?;
+
+        let mut response = LocalResponse::new(status_code, "");
+        response.headers.push((
+            http::header::LOCATION,
+            http::HeaderValue::from_str(location).map_err(|_| {
+                pingora::Error::explain(
+                    pingora::ErrorType::InternalError,
+                    format!("invalid redirect location: {location}"),
+                )
+            })?,
+        ));
+
+        session.set_keepalive(None);
+        write_route_response(session, ctx, response).await?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }

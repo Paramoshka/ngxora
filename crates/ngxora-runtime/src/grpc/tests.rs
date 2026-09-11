@@ -95,10 +95,10 @@ URSca2xnSfE3tGjoFkbktp4=
 fn test_route_plugins() -> Vec<PluginSpec> {
     #[cfg(feature = "plugin-headers")]
     {
-        return vec![PluginSpec {
+        vec![PluginSpec {
             name: "headers".into(),
             config: serde_json::json!({"response":{"add":[["x-proxy","ngxora"]]}}),
-        }];
+        }]
     }
 
     #[cfg(not(feature = "plugin-headers"))]

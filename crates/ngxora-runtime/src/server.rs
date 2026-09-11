@@ -85,6 +85,51 @@ fn validate_tls_identity(identity: &TlsIdentity) -> std::result::Result<(), Stri
     Ok(())
 }
 
+/// Reject unusable custom certificates before committing a live snapshot.
+pub(crate) fn validate_snapshot_tls(router: &CompiledRouter) -> std::result::Result<(), String> {
+    for key in router.listeners.keys().filter(|key| key.ssl) {
+        let tls = router.listener_tls.get(key).ok_or_else(|| {
+            format!(
+                "TLS listener {} has no certificate configuration",
+                listener_addr(key)
+            )
+        })?;
+        if tls.default.is_none() && tls.named.is_empty() {
+            return Err(format!(
+                "TLS listener {} has no certificate identities",
+                listener_addr(key)
+            ));
+        }
+        for identity in tls.default.iter().chain(tls.named.values()) {
+            if !is_le_identity(router, tls, identity) {
+                validate_tls_identity(identity)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// The wire format represents LE identities as generated file paths. Match both
+// exact paths; arbitrary custom certificates below cache_dir are not LE-owned.
+fn is_le_identity(
+    router: &CompiledRouter,
+    tls: &ListenerTlsConfig,
+    identity: &TlsIdentity,
+) -> bool {
+    let Some(config) = &router.le_config else {
+        return false;
+    };
+    let dir = config
+        .cache_dir
+        .as_deref()
+        .unwrap_or(std::path::Path::new("/var/lib/ngxora/certs"));
+    tls.named.keys().any(|domain| {
+        crate::upstreams::http_routes::validate_hostname(domain).is_ok()
+            && identity.cert == PemSource::Path(dir.join(domain).join("fullchain.pem"))
+            && identity.key == PemSource::Path(dir.join(domain).join("privkey.pem"))
+    })
+}
+
 /// Check whether the active router has listeners and usable TLS material.
 pub(crate) fn router_ready(router: &CompiledRouter) -> std::result::Result<(), String> {
     if router.listeners.is_empty() {

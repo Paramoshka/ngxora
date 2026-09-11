@@ -19,7 +19,6 @@ BUILDER_IMAGE := ngxora-src
 PLATFORMS ?= linux/amd64,linux/arm64
 PLUGIN_FEATURES := $(shell if [ -f $(PLUGINS_CFG) ]; then awk 'NF && $$1 !~ /^#/ {print "plugin-" $$1}' $(PLUGINS_CFG) | paste -sd, -; fi)
 CARGO_PLUGIN_FLAGS := --no-default-features $(if $(PLUGIN_FEATURES),--features $(PLUGIN_FEATURES))
-RUNTIME_FEATURE_FLAGS := $(if $(PLUGIN_FEATURES),--features $(PLUGIN_FEATURES))
 
 # Tools
 CARGO      ?= cargo
@@ -60,16 +59,12 @@ image-builder:
 # =========================
 
 lint: ## Lint source code
-	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) fmt --check
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) fmt --all -- --check
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) clippy $(CARGO_LOCK_FLAGS) --workspace --all-targets --all-features -- -D warnings
 
 test: test-unit test-e2e ## Run default test suite
 test-unit: ## Run unit tests
-	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --bin $(APP)
-	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/ngxora-config/Cargo.toml
-	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/ngxora-compile/Cargo.toml
-	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/extensions/headers/Cargo.toml
-	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) -p ngxora-extension-basic-auth -p ngxora-extension-ext-authz -p ngxora-extension-jwt-auth
-	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --manifest-path crates/ngxora-runtime/Cargo.toml $(RUNTIME_FEATURE_FLAGS)
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --workspace --all-features --lib --bins
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/basic/ngxora.conf
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/tls/ngxora.conf
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/sbi-ready/ngxora.conf

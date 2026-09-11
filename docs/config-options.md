@@ -624,7 +624,7 @@ location /blog/ {
 | `proxy_cache_ttl` | `<duration>` | `60s` | How long a cached response stays fresh. |
 | `proxy_cache_stale_if_error` | `<duration>` | — | Serve a stale cached response if proxying to the upstream fails. Adds `X-Cache: STALE`. The cached entry is eligible only while its age is less than `proxy_cache_ttl + proxy_cache_stale_if_error`. |
 | `proxy_cache_key` | `uri`, `uri_and_method`, or `normalized_uri` | `uri` | Controls how the cache key is derived from the request. |
-| `proxy_cache_min_uses` | `<count>` | — | Store a response only after the same cache key misses this many times. |
+| `proxy_cache_min_uses` | `<count>` | — | Store a response only after the same cache key misses this many times. Counters expire after one cache TTL of inactivity and may be evicted under memory pressure. |
 | `proxy_cache_valid` | `<status>...` | `200 301 404` | HTTP status codes eligible for caching. |
 | `proxy_cache_max_size` | `<size>` | — | Per-location max cache size. Supports suffixes: `k`/`K`, `m`/`M`, `g`/`G`. |
 
@@ -640,7 +640,8 @@ location /blog/ {
 
 - Cache is per-location: two locations with the same upstream do not share cache unless configured identically.
 - Cache entries are isolated by active snapshot generation, route, and request host.
-- Cache storage is in-memory. `proxy_cache_max_size` caps memory per location.
+- Cache storage is in-memory. `proxy_cache_max_size` bounds accounted response data, keys, and admission counters per location; allocator overhead and in-flight response buffers are additional. Counters share the budget with responses. Oversized keys are not stored.
+- Cache state from earlier snapshots is retired on the next request or completion. Old in-flight requests cannot repopulate retired generations. Stale responses remain eligible until TTL plus `stale_if_error` expires.
 - Responses larger than the configured per-location max size stop being buffered and are not cached.
 - `proxy_cache off` explicitly disables caching for that location (useful to override a broader config).
 - Only `GET` requests are cached. Requests carrying credentials, cookies, range/conditional headers, or client cache-bypass directives always go upstream.
@@ -777,3 +778,11 @@ curl http://localhost:8080/
 # Open Jaeger:    http://localhost:16686
 # Open Prometheus: http://localhost:9091
 ```
+
+### Verified HTTPS upstream destinations
+
+With `proxy_ssl_verify on`, the upstream TLS identity must be a DNS hostname.
+IP-only targets are rejected with HTTP 502 because the current Pingora/OpenSSL
+connector cannot securely verify IP SANs through its hostname-verification API.
+NRF endpoints with an IP transport address and a DNS TLS identity remain supported.
+`proxy_ssl_verify off` explicitly disables certificate verification.

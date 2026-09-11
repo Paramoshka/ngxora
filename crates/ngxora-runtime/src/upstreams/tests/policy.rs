@@ -137,8 +137,10 @@ fn compiled_router_parses_proxy_upstream_protocol() {
 
 #[test]
 fn compiled_router_maps_client_max_body_size_into_runtime_options() {
-    let mut http = Http::default();
-    http.client_max_body_size = Some(10 * 1024 * 1024);
+    let mut http = Http {
+        client_max_body_size: Some(10 * 1024 * 1024),
+        ..Http::default()
+    };
     http.servers.push(Server {
         listens: vec![Listen {
             default_server: true,
@@ -157,8 +159,10 @@ fn compiled_router_maps_client_max_body_size_into_runtime_options() {
 
 #[test]
 fn compiled_router_rejects_tcp_nodelay_off() {
-    let mut http = Http::default();
-    http.tcp_nodelay = Switch::Off;
+    let mut http = Http {
+        tcp_nodelay: Switch::Off,
+        ..Http::default()
+    };
     http.servers.push(Server {
         listens: vec![Listen {
             default_server: true,

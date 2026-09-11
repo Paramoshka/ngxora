@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod config {
     use crate::{
         Ast, Node,
         include::IncludeResolver,

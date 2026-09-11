@@ -220,3 +220,37 @@ fn runtime_state_rejects_unknown_plugin() {
     );
     assert_eq!(snapshot.version, "v1");
 }
+
+#[test]
+fn concurrent_applies_publish_monotonic_generations() {
+    let state = Arc::new(RuntimeState::bootstrap(router_on_listener(8080)));
+    let barrier = Arc::new(std::sync::Barrier::new(9));
+    let mut workers = Vec::new();
+    for worker in 0..8 {
+        let state = state.clone();
+        let barrier = barrier.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            for i in 0..40 {
+                let result = state.apply_snapshot(ConfigSnapshot::new(
+                    format!("{worker}-{i}"),
+                    router_on_listener(8080),
+                ));
+                assert!(result.applied);
+            }
+        }));
+    }
+    barrier.wait();
+    let mut previous = 1;
+    while workers.iter().any(|worker| !worker.is_finished()) {
+        let generation = state.snapshot().generation;
+        assert!(generation >= previous);
+        previous = generation;
+        std::thread::yield_now();
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(state.generation(), 321);
+    assert_eq!(state.snapshot().generation, 321);
+}

@@ -65,7 +65,7 @@ impl RateLimitPlugin {
 
     fn maybe_sweep(&self, current_window: u64) {
         let requests = self.requests_since_sweep.fetch_add(1, Ordering::Relaxed) + 1;
-        if requests % SWEEP_INTERVAL_REQUESTS != 0 {
+        if !requests.is_multiple_of(SWEEP_INTERVAL_REQUESTS) {
             return;
         }
 
@@ -322,7 +322,7 @@ mod tests {
                     response
                         .headers
                         .iter()
-                        .find(|(name, _)| name == &header::RETRY_AFTER)
+                        .find(|(name, _)| name == header::RETRY_AFTER)
                         .map(|(_, value)| value),
                     Some(&HeaderValue::from_static("1"))
                 );
@@ -331,7 +331,7 @@ mod tests {
                         .headers
                         .iter()
                         .find(|(name, _)| name
-                            == &header::HeaderName::from_static("x-ratelimit-limit"))
+                            == header::HeaderName::from_static("x-ratelimit-limit"))
                         .map(|(_, value)| value),
                     Some(&HeaderValue::from_static("2"))
                 );

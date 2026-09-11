@@ -121,10 +121,10 @@ struct HeaderMapInjector<'a>(&'a mut http::HeaderMap);
 
 impl<'a> Injector for HeaderMapInjector<'a> {
     fn set(&mut self, key: &str, value: String) {
-        if let Ok(name) = http::HeaderName::from_bytes(key.as_bytes()) {
-            if let Ok(val) = http::HeaderValue::from_str(&value) {
-                self.0.insert(name, val);
-            }
+        if let Ok(name) = http::HeaderName::from_bytes(key.as_bytes())
+            && let Ok(val) = http::HeaderValue::from_str(&value)
+        {
+            self.0.insert(name, val);
         }
     }
 }

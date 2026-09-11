@@ -11,8 +11,8 @@ use ngxora_plugin_registry::PluginRegistry;
 use pingora::services::ServiceReadyNotifier;
 use pingora::services::background::BackgroundService;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -113,11 +113,11 @@ impl RuntimeSnapshot {
 /// boundary for transport-sensitive config.
 pub struct RuntimeState {
     current: ArcSwap<RuntimeSnapshot>,
+    apply_lock: Mutex<()>,
     // Transport/bootstrap settings cannot be changed live with Pingora listeners,
     // so we reject snapshots that modify this fingerprint.
     bootstrap_config: RestartConfigFingerprint,
     registry: Arc<PluginRegistry>,
-    generation: AtomicU64,
     tls_material_generation: AtomicU64,
 }
 
@@ -135,9 +135,9 @@ impl RuntimeState {
                 .expect("bootstrap snapshot plugin resolution failed");
         Self {
             current: ArcSwap::from_pointee(initial_snapshot),
+            apply_lock: Mutex::new(()),
             bootstrap_config,
             registry,
-            generation: AtomicU64::new(1),
             tls_material_generation: AtomicU64::new(1),
         }
     }
@@ -154,7 +154,7 @@ impl RuntimeState {
 
     /// Returns the current monotonic runtime generation.
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
+        self.current.load().generation
     }
 
     pub(crate) fn tls_material_generation(&self) -> u64 {
@@ -168,6 +168,19 @@ impl RuntimeState {
     /// Applies a new snapshot if only live-reloadable state changed.
     /// Listener topology and bootstrap transport settings still require restart.
     pub fn apply_snapshot(&self, next: ConfigSnapshot) -> ApplyResult {
+        let _apply = match self.apply_lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                let current = self.snapshot();
+                return ApplyResult {
+                    applied: false,
+                    restart_required: false,
+                    message: "snapshot apply lock is poisoned".into(),
+                    active_version: current.version.clone(),
+                    active_generation: current.generation,
+                };
+            }
+        };
         if restart_fingerprint(&next.router) != self.bootstrap_config {
             let current = self.snapshot();
             return ApplyResult {
@@ -203,12 +216,9 @@ impl RuntimeState {
         };
 
         // The generation is only committed after plugin resolution succeeds.
-        let active_generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let active_generation = runtime_snapshot.generation;
         let active_version = runtime_snapshot.version.clone();
-        self.current.store(Arc::new(RuntimeSnapshot {
-            generation: active_generation,
-            ..runtime_snapshot
-        }));
+        self.current.store(Arc::new(runtime_snapshot));
 
         ApplyResult {
             applied: true,
@@ -227,6 +237,9 @@ impl RuntimeState {
         generation: u64,
         previous: Option<&RuntimeSnapshot>,
     ) -> Result<RuntimeSnapshot, String> {
+        if previous.is_some() {
+            crate::server::validate_snapshot_tls(&router)?;
+        }
         let plugin_chains = build_plugin_chains(&router, registry)?;
         let upstream_groups = build_runtime_upstream_groups(&router, previous)?;
         let trusted_cas = build_runtime_trusted_cas(&router)?;

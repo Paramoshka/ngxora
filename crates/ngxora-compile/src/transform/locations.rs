@@ -58,17 +58,14 @@ fn parse_location_matcher(args: &[String]) -> Result<LocationMatcher, LowerErr> 
     }
 }
 
-fn parse_location_contents(
-    nodes: &[Node],
-) -> Result<
-    (
-        Vec<LocationDirective>,
-        Vec<PluginSpec>,
-        Option<CacheConfig>,
-        Vec<LocationIpRule>,
-    ),
-    LowerErr,
-> {
+type LocationContents = (
+    Vec<LocationDirective>,
+    Vec<PluginSpec>,
+    Option<CacheConfig>,
+    Vec<LocationIpRule>,
+);
+
+fn parse_location_contents(nodes: &[Node]) -> Result<LocationContents, LowerErr> {
     let mut directives: Vec<LocationDirective> = Vec::new();
     let mut plugins: Vec<PluginSpec> = Vec::new();
     let mut cache: Option<CacheConfig> = None;
