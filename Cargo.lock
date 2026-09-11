@@ -1937,7 +1937,7 @@ dependencies = [
  "pingora-prometheus",
  "pingora-proxy",
  "prometheus",
- "prost 0.13.5",
+ "prost 0.14.4",
  "protoc-bin-vendored",
  "rcgen",
  "regex",
