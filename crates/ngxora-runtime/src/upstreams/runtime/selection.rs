@@ -121,6 +121,7 @@ impl SelectedRoute {
             target,
             upstream_timeouts: resolved.location.upstream_timeouts,
             upstream_protocol: resolved.location.upstream_protocol,
+            upstream_http2: resolved.location.upstream_http2,
             upstream_ssl_options: resolved.location.upstream_ssl_options.clone(),
             upstream_trusted_ca: resolved
                 .location

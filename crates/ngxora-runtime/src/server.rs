@@ -419,6 +419,21 @@ where
     options.allow_connect_method_proxying = router.http_options.allow_connect_method_proxying;
     options.keepalive_request_limit = router.http_options.keepalive_requests;
     proxy.server_options = Some(options);
+    let http2 = &router.http_options.http2;
+    let mut h2 = pingora::protocols::http::v2::server::default_h2_options();
+    if let Some(value) = http2.max_concurrent_streams {
+        h2.max_concurrent_streams(value);
+    }
+    if let Some(value) = http2.max_header_list_size {
+        h2.max_header_list_size(value);
+    }
+    if let Some(value) = http2.stream_window_size {
+        h2.initial_window_size(value);
+    }
+    if let Some(value) = http2.connection_window_size {
+        h2.initial_connection_window_size(value);
+    }
+    proxy.h2_options = Some(h2);
     Ok(())
 }
 

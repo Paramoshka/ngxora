@@ -71,6 +71,7 @@ fn cached_route(cache: CacheConfig, plugins: ngxora_plugin_api::PluginChain) -> 
         }),
         upstream_timeouts: UpstreamTimeouts::default(),
         upstream_protocol: None,
+        upstream_http2: Default::default(),
         upstream_ssl_options: UpstreamSslOptions::default(),
         upstream_trusted_ca: None,
         upstream_client_identity: None,
@@ -412,4 +413,58 @@ fn peer_preparation_isolates_pools_and_rejects_unsupported_ip_verification() {
         assert!(route.configure_peer(&mut peer, 1, None).is_ok());
         route.upstream_ssl_options.verify_cert = ngxora_compile::ir::Switch::On;
     }
+}
+
+#[tokio::test]
+async fn proxy_retry_policy_preserves_idempotency() {
+    let proxy = DynamicProxy::from_router(CompiledRouter::default());
+    let peer = HttpPeer::new(("127.0.0.1", 8080), false, String::new());
+    for (method, reused, expected) in [
+        (http::Method::GET, true, true),
+        (http::Method::GET, false, false),
+        (http::Method::POST, true, false),
+        (http::Method::PATCH, true, false),
+    ] {
+        let mut session = test_session().await;
+        session.req_header_mut().set_method(method);
+        let mut ctx = ProxyContext::default();
+        let mut error = pingora::Error::new(pingora::ErrorType::ConnectionClosed);
+        error.retry = pingora::RetryType::ReusedOnly;
+        let error = proxy.error_while_proxy(&peer, &mut session, error, &mut ctx, reused);
+        assert_eq!(error.retry.retry(), expected);
+    }
+}
+
+#[tokio::test]
+async fn upstream_filter_injects_trace_context_through_pingora_header_api() {
+    use opentelemetry::trace::{
+        SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+    };
+    crate::tracing::configure("http://127.0.0.1:4317", "ngxora-test");
+    let span = SpanContext::new(
+        TraceId::from_hex("1234567890abcdef1234567890abcdef").unwrap(),
+        SpanId::from_hex("1234567890abcdef").unwrap(),
+        TraceFlags::SAMPLED,
+        false,
+        TraceState::default(),
+    );
+    let proxy = DynamicProxy::from_router(CompiledRouter::default());
+    let mut session = test_session().await;
+    let mut ctx = ProxyContext {
+        selected: Some(cached_route(CacheConfig::default(), empty_plugin_chain())),
+        upstream_trace_ctx: opentelemetry::Context::new().with_remote_span_context(span),
+        ..Default::default()
+    };
+    let mut request = pingora::http::RequestHeader::build("GET", b"/", None).unwrap();
+    request.insert_header("X-Custom", "preserved").unwrap();
+    request.insert_header("traceparent", "old").unwrap();
+    proxy
+        .upstream_request_filter(&mut session, &mut request, &mut ctx)
+        .await
+        .unwrap();
+    assert_eq!(
+        request.headers["traceparent"],
+        "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01"
+    );
+    assert_eq!(request.headers["x-custom"], "preserved");
 }

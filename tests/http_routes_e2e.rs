@@ -30,6 +30,10 @@ impl Drop for Proxy {
 
 impl Proxy {
     async fn start(extra_servers: &str) -> Self {
+        Self::start_with_http("", extra_servers).await
+    }
+
+    async fn start_with_http(http_options: &str, extra_servers: &str) -> Self {
         let listener = StdListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let temp = tempfile::tempdir().unwrap();
@@ -38,7 +42,7 @@ impl Proxy {
         std::fs::write(
             &config,
             format!(
-                r#"http {{ h2c on;
+                r#"http {{ h2c on; {http_options}
             server {{ listen 127.0.0.1:{port} default_server; server_name test.local;
                 location / {{ return 302 https://bootstrap.example/; }}
             }} {}
@@ -846,4 +850,63 @@ async fn tls_pool_isolates_route_trust_and_live_ca_rotation() {
         );
         task.abort();
     }
+}
+
+#[path = "http2/mod.rs"]
+mod http2;
+
+#[tokio::test]
+async fn pingora_upgrade_sanitizes_headers_and_preserves_websocket_tunnels() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream = tokio::spawn(async move {
+            // First request is a regular HTTP request; second upgrades to WebSocket.
+            for websocket in [false, true] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                }
+                let headers = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                assert!(!headers.contains("x-remove:"));
+                assert!(!headers.contains("proxy-connection:"));
+                assert!(headers.contains("x-keep: yes"));
+                if websocket {
+                    assert!(headers.contains("upgrade: websocket"));
+                    assert!(headers.contains("connection: upgrade"));
+                    stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n").await.unwrap();
+                    // Valid masked WebSocket text frame containing "hi".
+                    let mut frame = [0; 8];
+                    stream.read_exact(&mut frame).await.unwrap();
+                    assert_eq!(&frame, b"\x81\x82\x01\x02\x03\x04\x69\x6b");
+                    stream.write_all(b"\x81\x02hi").await.unwrap();
+                } else {
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK").await.unwrap();
+                }
+            }
+        });
+        let mut proxy = Proxy::start("").await;
+        let mut configured = route("/", 200);
+        configured.action = Some(p::route::Action::Upstream(backend(port)));
+        proxy.apply(vec![configured]).await;
+        let mut client = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+        client.write_all(b"GET / HTTP/1.1\r\nHost: test.local\r\nConnection: close, X-Remove\r\nX-Remove: secret\r\nProxy-Connection: keep-alive\r\nX-Keep: yes\r\n\r\n").await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(response.ends_with(b"OK"));
+        let mut client = TcpStream::connect(("127.0.0.1", proxy.port)).await.unwrap();
+        client.write_all(b"GET / HTTP/1.1\r\nHost: test.local\r\nConnection: Upgrade, X-Remove\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nX-Remove: secret\r\nX-Keep: yes\r\n\r\n").await.unwrap();
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            response.push(client.read_u8().await.unwrap());
+        }
+        assert!(response.starts_with(b"HTTP/1.1 101"));
+        client.write_all(b"\x81\x82\x01\x02\x03\x04\x69\x6b").await.unwrap();
+        let mut frame = [0; 4];
+        client.read_exact(&mut frame).await.unwrap();
+        assert_eq!(&frame, b"\x81\x02hi");
+        upstream.await.unwrap();
+    }).await.expect("HTTP/WebSocket proxy stalled");
 }

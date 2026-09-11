@@ -265,12 +265,16 @@ impl ProxyHttp for DynamicProxy {
         }
 
         // ── Inject W3C TraceContext into upstream headers ──
-        crate::tracing::inject_context(&ctx.upstream_trace_ctx, &mut upstream_request.headers);
+        let mut trace_headers = http::HeaderMap::new();
+        crate::tracing::inject_context(&ctx.upstream_trace_ctx, &mut trace_headers);
+        for (name, value) in &trace_headers {
+            upstream_request.insert_header(name, value)?;
+        }
         if let Some(exchange) = &ctx.scp {
             upstream_request.set_uri(exchange.upstream_uri().map_err(|e| {
                 pingora::Error::explain(pingora::ErrorType::HTTPStatus(e.status), e.detail)
             })?);
-            exchange.request_headers(&mut upstream_request.headers);
+            exchange.request_headers(upstream_request)?;
         }
 
         Ok(())
@@ -419,7 +423,7 @@ impl ProxyHttp for DynamicProxy {
         apply_response_plugins(upstream_response, ctx).await?;
         let status = upstream_response.status;
         if let Some(exchange) = &ctx.scp {
-            exchange.response_headers(&mut upstream_response.headers);
+            exchange.response_headers(upstream_response)?;
         }
 
         // Cacheability must be evaluated against the final response that the
@@ -625,7 +629,10 @@ impl ProxyHttp for DynamicProxy {
         ctx: &mut Self::CTX,
         reused: bool,
     ) -> Box<pingora::Error> {
-        if ctx.scp_profile.is_some() {
+        if ctx.scp_profile.is_some()
+            || !session.req_header().method.is_idempotent()
+            || session.as_ref().retry_buffer_truncated()
+        {
             error.retry = false.into();
         } else {
             error = error.more_context(format!("Peer: {peer}"));

@@ -390,6 +390,7 @@ fn compile_location(
         target,
         upstream_timeouts: compile_upstream_timeouts(location)?,
         upstream_protocol,
+        upstream_http2: compile_upstream_http2(location)?,
         upstream_ssl_options: compile_upstream_ssl_options(location)?,
         plugins: location.plugins.clone(),
         cache: location.cache.clone(),
@@ -428,4 +429,35 @@ fn validate_direct_status(status: u16) -> Result<(), String> {
         return Err("direct response status must be 200..599".into());
     }
     Ok(())
+}
+
+fn compile_upstream_http2(
+    location: &Location,
+) -> Result<ngxora_compile::ir::UpstreamHttp2Options, String> {
+    let mut options = ngxora_compile::ir::UpstreamHttp2Options::default();
+    for directive in &location.directives {
+        let (slot, value, name) = match directive {
+            LocationDirective::ProxyHttp2MaxConcurrentStreams(value) => (
+                &mut options.max_concurrent_streams,
+                *value,
+                "proxy_http2_max_concurrent_streams",
+            ),
+            LocationDirective::ProxyHttp2StreamWindowSize(value) => (
+                &mut options.stream_window_size,
+                *value,
+                "proxy_http2_stream_window_size",
+            ),
+            LocationDirective::ProxyHttp2ConnectionWindowSize(value) => (
+                &mut options.connection_window_size,
+                *value,
+                "proxy_http2_connection_window_size",
+            ),
+            _ => continue,
+        };
+        if slot.replace(value).is_some() {
+            return Err(format!("{name} is duplicated in the same location"));
+        }
+    }
+    options.validate()?;
+    Ok(options)
 }

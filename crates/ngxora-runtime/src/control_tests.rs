@@ -48,6 +48,7 @@ fn router_with_route_plugin(port: u16, plugin_name: &str) -> CompiledRouter {
         },
         upstream_timeouts: UpstreamTimeouts::default(),
         upstream_protocol: None,
+        upstream_http2: Default::default(),
         upstream_ssl_options: UpstreamSslOptions::default(),
         plugins: vec![PluginSpec {
             name: plugin_name.into(),

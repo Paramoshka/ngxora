@@ -48,6 +48,7 @@ pub struct Http {
     pub tcp_nodelay: Switch,
     pub allow_connect_method_proxying: Switch,
     pub h2c: Switch,
+    pub http2: Http2Options,
     pub ssl_provider: Option<LetsEncryptConfig>,
 }
 
@@ -64,6 +65,7 @@ impl Default for Http {
             tcp_nodelay: Switch::On,
             allow_connect_method_proxying: Switch::Off,
             h2c: Switch::Off,
+            http2: Http2Options::default(),
             ssl_provider: None,
         }
     }
@@ -363,6 +365,9 @@ pub enum LocationDirective {
     ProxyReadTimeout(Duration),
     ProxyWriteTimeout(Duration),
     ProxyUpstreamProtocol(UpstreamHttpProtocol),
+    ProxyHttp2MaxConcurrentStreams(u32),
+    ProxyHttp2StreamWindowSize(u32),
+    ProxyHttp2ConnectionWindowSize(u32),
     ProxySslVerify(Switch),
     ProxySslTrustedCertificate(PemSource),
     ProxySslCertificate(PemSource),
@@ -437,4 +442,72 @@ pub enum Switch {
     #[default]
     On,
     Off,
+}
+
+/// HTTP/2 receive settings. Unset fields retain Pingora's bounded defaults.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct Http2Options {
+    pub max_concurrent_streams: Option<u32>,
+    pub max_header_list_size: Option<u32>,
+    pub stream_window_size: Option<u32>,
+    pub connection_window_size: Option<u32>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct UpstreamHttp2Options {
+    pub max_concurrent_streams: Option<u32>,
+    pub stream_window_size: Option<u32>,
+    pub connection_window_size: Option<u32>,
+}
+
+impl Http2Options {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_http2_value(
+            self.max_concurrent_streams,
+            u32::MAX,
+            "http2_max_concurrent_streams",
+        )?;
+        validate_http2_value(
+            self.max_header_list_size,
+            u32::MAX,
+            "http2_max_header_list_size",
+        )?;
+        validate_http2_value(
+            self.stream_window_size,
+            i32::MAX as u32,
+            "http2_stream_window_size",
+        )?;
+        validate_http2_value(
+            self.connection_window_size,
+            i32::MAX as u32,
+            "http2_connection_window_size",
+        )
+    }
+}
+
+impl UpstreamHttp2Options {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_http2_value(
+            self.max_concurrent_streams,
+            u32::MAX,
+            "proxy_http2_max_concurrent_streams",
+        )?;
+        validate_http2_value(
+            self.stream_window_size,
+            i32::MAX as u32,
+            "proxy_http2_stream_window_size",
+        )?;
+        validate_http2_value(
+            self.connection_window_size,
+            i32::MAX as u32,
+            "proxy_http2_connection_window_size",
+        )
+    }
+}
+
+fn validate_http2_value(value: Option<u32>, max: u32, name: &str) -> Result<(), String> {
+    if value.is_some_and(|value| value == 0 || value > max) {
+        return Err(format!("{name}: expected a value between 1 and {max}"));
+    }
+    Ok(())
 }

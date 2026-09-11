@@ -320,6 +320,19 @@ fn parse_proxy_upstream_protocol(args: &[String]) -> Result<UpstreamHttpProtocol
 
 fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, LowerErr> {
     match directive.name.as_str() {
+        "proxy_http2_max_concurrent_streams" => {
+            Ok(LocationDirective::ProxyHttp2MaxConcurrentStreams(
+                super::values::parse_http2_value(directive)?,
+            ))
+        }
+        "proxy_http2_stream_window_size" => Ok(LocationDirective::ProxyHttp2StreamWindowSize(
+            super::values::parse_http2_value(directive)?,
+        )),
+        "proxy_http2_connection_window_size" => {
+            Ok(LocationDirective::ProxyHttp2ConnectionWindowSize(
+                super::values::parse_http2_value(directive)?,
+            ))
+        }
         "scp_pass" => Ok(LocationDirective::ScpPass(
             parse_exactly_one_argument(&directive.args, "scp_pass")?.to_string(),
         )),

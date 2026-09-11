@@ -293,3 +293,26 @@ pub(super) fn parse_size_literal(raw: &str, directive: &str) -> Result<u64, Lowe
         message: format!("{directive}: size value `{raw}` is too large"),
     })
 }
+
+pub(super) fn parse_http2_value(directive: &ngxora_config::Directive) -> Result<u32, LowerErr> {
+    let name = directive.name.as_str();
+    let raw = parse_exactly_one_argument(&directive.args, name)?;
+    let value = if name.ends_with("max_concurrent_streams") {
+        raw.parse::<u64>().map_err(|_| LowerErr {
+            message: format!("{name}: expected a positive integer"),
+        })?
+    } else {
+        parse_size_literal(&raw, name)?
+    };
+    let max = if name.ends_with("window_size") {
+        i32::MAX as u64
+    } else {
+        u32::MAX as u64
+    };
+    if value == 0 || value > max {
+        return Err(LowerErr {
+            message: format!("{name}: expected a value between 1 and {max}"),
+        });
+    }
+    Ok(value as u32)
+}

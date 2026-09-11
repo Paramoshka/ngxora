@@ -211,6 +211,7 @@ pub struct CompiledLocation {
     pub target: RouteTarget,
     pub upstream_timeouts: UpstreamTimeouts,
     pub upstream_protocol: Option<UpstreamHttpProtocol>,
+    pub upstream_http2: ngxora_compile::ir::UpstreamHttp2Options,
     pub upstream_ssl_options: UpstreamSslOptions,
     pub plugins: Vec<PluginSpec>,
     pub cache: Option<CacheConfig>,
@@ -275,6 +276,7 @@ pub struct HttpRuntimeOptions {
     pub tcp_nodelay: bool,
     pub allow_connect_method_proxying: bool,
     pub h2c: bool,
+    pub http2: ngxora_compile::ir::Http2Options,
 }
 
 // CompiledRouter is the immutable routing model consumed by the dataplane at

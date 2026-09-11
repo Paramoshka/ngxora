@@ -457,8 +457,12 @@ impl ScpExchange {
         .map_err(|_| ScpError::invalid("Invalid upstream URI"))
     }
 
-    pub(super) fn request_headers(&self, headers: &mut HeaderMap) {
-        let remove = headers
+    pub(super) fn request_headers(
+        &self,
+        header: &mut pingora::http::RequestHeader,
+    ) -> pingora::Result<()> {
+        let remove = header
+            .headers
             .keys()
             .filter(|n| {
                 n.as_str() == TARGET
@@ -468,40 +472,32 @@ impl ScpExchange {
             .cloned()
             .collect::<Vec<_>>();
         for name in remove {
-            headers.remove(name);
+            header.remove_header(&name);
         }
-        headers.insert(
-            http::header::HOST,
-            self.root.authority().parse().expect("validated authority"),
-        );
-        headers.insert(
-            "3gpp-sbi-max-forward-hops",
-            self.request
-                .hops
-                .to_string()
-                .parse()
-                .expect("integer header"),
-        );
+        header.insert_header(http::header::HOST, self.root.authority())?;
+        header.insert_header("3gpp-sbi-max-forward-hops", self.request.hops.to_string())?;
+        Ok(())
     }
 
-    pub(super) fn response_headers(&self, headers: &mut HeaderMap) {
-        if let Some(metadata) = &self.backend.nrf_service
-            && let Ok(value) = format!(
-                "nfinst={}; nfservinst={}",
-                metadata.nf_instance_id, metadata.service_instance_id
-            )
-            .parse()
-        {
-            headers.insert("3gpp-sbi-producer-id", value);
+    pub(super) fn response_headers(
+        &self,
+        header: &mut pingora::http::ResponseHeader,
+    ) -> pingora::Result<()> {
+        if let Some(metadata) = &self.backend.nrf_service {
+            header.insert_header(
+                "3gpp-sbi-producer-id",
+                format!(
+                    "nfinst={}; nfservinst={}",
+                    metadata.nf_instance_id, metadata.service_instance_id
+                ),
+            )?;
         }
-        if !headers.contains_key(http::header::LOCATION)
+        if !header.headers.contains_key(http::header::LOCATION)
             && (self.request.discovery || self.request.target.as_ref() != Some(&self.root))
         {
-            headers.insert(
-                TARGET,
-                self.root.value().parse().expect("validated apiRoot"),
-            );
+            header.insert_header(TARGET, self.root.value())?;
         }
+        Ok(())
     }
 }
 

@@ -40,3 +40,10 @@ lets a static group with zero ready endpoints be applied and return 503 until
 endpoints arrive. New dataplanes must be deployed before using these fields.
 See [snapshot semantics](../../docs/snapshot-schema.md#httproute-dataplane-primitives)
 for precedence, redirects, rewrites and weighted error responses.
+
+
+HTTP/2 tuning is available through `HttpOptions.Http2` and `Route.UpstreamHttp2`.
+Their optional numeric fields use pointers: `nil` retains Pingora defaults;
+explicit zero is rejected. Global HTTP/2 changes require restart, while route
+settings apply live to new upstream connections. See
+[HTTP/2 configuration](../../docs/config-options.md#http2-limits-and-flow-control).

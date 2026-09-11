@@ -471,3 +471,57 @@ http {
 }
 
 // --- ssl_provider letsencrypt tests ---
+
+#[test]
+fn http2_settings_parse_sizes_and_reject_invalid_values() {
+    let ast = Ast::parse_config("http { http2_max_concurrent_streams 32; http2_max_header_list_size 64k; http2_stream_window_size 1m; http2_connection_window_size 4m; }").unwrap();
+    let http = Ir::from_ast(&ast).unwrap().http.unwrap();
+    assert_eq!(
+        http.http2,
+        crate::ir::Http2Options {
+            max_concurrent_streams: Some(32),
+            max_header_list_size: Some(65536),
+            stream_window_size: Some(1048576),
+            connection_window_size: Some(4194304),
+        }
+    );
+    for directive in [
+        "http2_max_concurrent_streams",
+        "http2_max_header_list_size",
+        "http2_stream_window_size",
+        "http2_connection_window_size",
+    ] {
+        for value in ["0", "-1", "4294967296", "bad", "1 2", ""] {
+            let ast = Ast::parse_config(&format!("http {{ {directive} {value}; }}")).unwrap();
+            assert!(Ir::from_ast(&ast).is_err(), "{directive} {value}");
+        }
+        let ast = Ast::parse_config(&format!("http {{ {directive} 1; {directive} 2; }}")).unwrap();
+        assert!(Ir::from_ast(&ast).is_err(), "duplicate {directive}");
+    }
+    for directive in ["http2_stream_window_size", "http2_connection_window_size"] {
+        for (value, valid) in [("2147483647", true), ("2147483648", false)] {
+            let ast = Ast::parse_config(&format!("http {{ {directive} {value}; }}")).unwrap();
+            assert_eq!(Ir::from_ast(&ast).is_ok(), valid);
+        }
+    }
+}
+
+#[test]
+fn upstream_http2_directives_parse_and_validate_sizes() {
+    for directive in [
+        "proxy_http2_max_concurrent_streams",
+        "proxy_http2_stream_window_size",
+        "proxy_http2_connection_window_size",
+    ] {
+        for (value, valid) in [
+            ("1", true),
+            ("0", false),
+            ("4294967296", false),
+            ("1 2", false),
+            ("", false),
+        ] {
+            let ast = Ast::parse_config(&format!("http {{ server {{ listen 8080; location / {{ proxy_pass http://localhost; {directive} {value}; }} }} }}")).unwrap();
+            assert_eq!(Ir::from_ast(&ast).is_ok(), valid, "{directive} {value}");
+        }
+    }
+}

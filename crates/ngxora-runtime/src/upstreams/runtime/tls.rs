@@ -252,6 +252,11 @@ impl super::SelectedRoute {
         isolate_pool(peer, generation, self.route_id);
         apply_upstream_timeouts(peer, self.upstream_timeouts);
         apply_upstream_http_protocol(peer, protocol);
+        if let Some(max_streams) = self.upstream_http2.max_concurrent_streams {
+            peer.options.max_h2_streams = max_streams as usize;
+        }
+        peer.options.h2_stream_window_size = self.upstream_http2.stream_window_size;
+        peer.options.h2_connection_window_size = self.upstream_http2.connection_window_size;
         apply_upstream_ssl_options(
             peer,
             &self.upstream_ssl_options,

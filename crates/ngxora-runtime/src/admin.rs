@@ -9,8 +9,8 @@ use crate::upstreams::CompiledRouter;
 use async_trait::async_trait;
 use http::{Method, Response, StatusCode};
 use pingora::apps::http_app::{HttpServer, ServeHttp};
-use pingora::apps::prometheus_http_app::PrometheusHttpApp;
 use pingora::protocols::http::ServerSession;
+use pingora_prometheus::PrometheusHttpApp;
 use std::sync::Arc;
 
 const HEALTHZ_PATH: &str = "/healthz";
@@ -194,5 +194,53 @@ mod tests {
             route_admin(&Method::POST, "/metrics"),
             AdminRoute::MethodNotAllowed
         ));
+    }
+
+    #[tokio::test]
+    async fn admin_metrics_uses_the_application_registry() {
+        use super::AdminHttpApp;
+        use pingora::apps::http_app::ServeHttp;
+        use pingora::protocols::http::ServerSession;
+        use tokio::io::AsyncWriteExt;
+
+        let counter =
+            prometheus::IntCounter::new("ngxora_admin_registry_test_total", "Registry wiring test")
+                .unwrap();
+        prometheus::default_registry()
+            .register(Box::new(counter.clone()))
+            .unwrap();
+        counter.inc();
+        let app = AdminHttpApp::new();
+        for (method, path, status) in [
+            ("GET", "/metrics", 200),
+            ("HEAD", "/metrics", 200),
+            ("GET", "/healthz", 200),
+            ("GET", "/readyz", 503),
+        ] {
+            let (mut client, server) = tokio::io::duplex(1024);
+            client
+                .write_all(
+                    format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut session = ServerSession::new_http1(Box::new(server));
+            session.read_request().await.unwrap();
+            let response = app.response(&mut session).await;
+            assert_eq!(response.status().as_u16(), status);
+            if path == "/metrics" && method == "GET" {
+                let body = std::str::from_utf8(response.body()).unwrap();
+                assert!(body.contains("ngxora_admin_registry_test_total 1"));
+                assert!(
+                    response.headers()["content-type"]
+                        .to_str()
+                        .unwrap()
+                        .contains("text/plain")
+                );
+            }
+            if method == "HEAD" {
+                assert!(response.body().is_empty());
+            }
+        }
     }
 }

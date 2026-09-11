@@ -77,6 +77,8 @@ http {
 | `listen ... ssl` | listener | Restart required | Transport stack changes |
 | `listen ... http2` | TLS listener | Restart required | ALPN is configured when listener is built |
 | `listen ... http2_only` | TLS listener | Restart required | ALPN is configured when listener is built |
+| `http2_*` | service | Restart required | HTTP/2 stream/header limits and receive windows |
+| `proxy_http2_*` | location | Live | Applied to upstream connections in the new snapshot generation |
 | `h2c` | service/plain HTTP | Restart required | `HttpProxy.server_options` is bootstrap-only today |
 | `keepalive_requests` | service | Restart required | `HttpProxy.server_options` is bootstrap-only today |
 | `allow_connect_method_proxying` | service | Restart required | `HttpProxy.server_options` is bootstrap-only today |

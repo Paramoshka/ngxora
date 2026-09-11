@@ -30,6 +30,7 @@ pub(super) fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
         target: target(id),
         upstream_timeouts: UpstreamTimeouts::default(),
         upstream_protocol: None,
+        upstream_http2: Default::default(),
         upstream_ssl_options: UpstreamSslOptions::default(),
         plugins: Vec::<PluginSpec>::new(),
         cache: None,

@@ -30,9 +30,9 @@ env_logger = "0.11"
 ngxora-config = {path = "crates/ngxora-config"}
 ngxora-compile = {path = "crates/ngxora-compile"}
 ngxora-runtime = {path = "crates/ngxora-runtime"}
-pingora = { version = "0.8.1", default-features = false, features = ["lb", "openssl"] }
-pingora-proxy = { version = "0.8.1", default-features = false, features = ["openssl"] }
-pingora-cache = "0.8.1"
+pingora = { version = "0.9.0", default-features = false, features = ["lb", "openssl"] }
+pingora-proxy = { version = "0.9.0", default-features = false, features = ["openssl"] }
+pingora-cache = "0.9.0"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 
 [[bin]]
@@ -41,6 +41,7 @@ bench = false
 path = "crates/ngxora-cli/src/main.rs"
 
 [dev-dependencies]
+h2 = "0.4"
 tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
 tower = "0.5"
 bytes = "1"

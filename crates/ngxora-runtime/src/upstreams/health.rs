@@ -10,12 +10,14 @@ use std::net::SocketAddr;
 impl CompiledHealthCheck {
     pub fn build(&self) -> Result<Box<dyn HealthCheck + Send + Sync + 'static>, String> {
         match &self.check_type {
-            HealthCheckType::Tcp => Ok(Box::new(NgxoraHealthCheck::Tcp(NgxoraTcpHealthCheck {
-                consecutive_success: self.consecutive_success,
-                consecutive_failure: self.consecutive_failure,
-                timeout: self.timeout,
-                connector: TransportConnector::new(None),
-            }))),
+            HealthCheckType::Tcp => Ok(Box::new(NgxoraHealthCheck::Tcp(Box::new(
+                NgxoraTcpHealthCheck {
+                    consecutive_success: self.consecutive_success,
+                    consecutive_failure: self.consecutive_failure,
+                    timeout: self.timeout,
+                    connector: TransportConnector::new(None),
+                },
+            )))),
             HealthCheckType::Http {
                 host,
                 path,
@@ -67,7 +69,7 @@ struct NgxoraHttpHealthCheck {
 }
 
 enum NgxoraHealthCheck {
-    Tcp(NgxoraTcpHealthCheck),
+    Tcp(Box<NgxoraTcpHealthCheck>),
     Http(Box<NgxoraHttpHealthCheck>),
 }
 

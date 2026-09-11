@@ -25,6 +25,7 @@ impl CompiledRouter {
             );
         }
 
+        http.http2.validate()?;
         let mut router = Self {
             upstreams: compile_upstreams(&http.upstreams)?,
             http_options: HttpRuntimeOptions {
@@ -40,6 +41,7 @@ impl CompiledRouter {
                     Switch::On
                 ),
                 h2c: matches!(http.h2c, Switch::On),
+                http2: http.http2,
             },
             le_config: http.ssl_provider.clone(),
             ..Self::default()

@@ -108,6 +108,7 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
         scp_profiles: Vec::new(),
         version: cli.version.clone(),
         http: Some(HttpOptions {
+            http2: None,
             downstream_keepalive_timeout_seconds: 30,
             tcp_nodelay: true,
             keepalive_requests: 1000,
@@ -132,6 +133,7 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
             default_server: true,
             tls: None,
             routes: vec![Route {
+                upstream_http2: None,
                 url_rewrite: None,
                 r#match: Some(Match {
                     kind: Some(ngxora_runtime::grpc::proto::r#match::Kind::Prefix(

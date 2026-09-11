@@ -43,6 +43,7 @@ message HttpOptions {
   bool h2c = 5;
   uint64 client_max_body_size_bytes = 6;
   uint64 proxy_cache_max_size_bytes = 7;
+  Http2Options http2 = 8;
 }
 
 message Listener {
@@ -98,6 +99,7 @@ message Route {
   UpstreamHttpProtocol upstream_protocol = 6;
   RouteCache cache = 8;
   UrlRewrite url_rewrite = 13;
+  UpstreamHttp2Options upstream_http2 = 14;
 }
 
 message Redirect {
@@ -306,4 +308,18 @@ enum CacheKeyMode {
   CACHE_KEY_MODE_URI = 1;
   CACHE_KEY_MODE_URI_AND_METHOD = 2;
   CACHE_KEY_MODE_NORMALIZED_URI = 3;
+}
+
+// Receive settings; absent fields retain Pingora defaults. Explicit zero is invalid.
+message Http2Options {
+  optional uint32 max_concurrent_streams = 1;
+  optional uint32 max_header_list_size = 2;
+  optional uint32 stream_window_size = 3;
+  optional uint32 connection_window_size = 4;
+}
+
+message UpstreamHttp2Options {
+  optional uint32 max_concurrent_streams = 1;
+  optional uint32 stream_window_size = 2;
+  optional uint32 connection_window_size = 3;
 }

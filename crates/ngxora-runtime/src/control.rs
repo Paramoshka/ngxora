@@ -451,6 +451,7 @@ struct RestartConfigFingerprint {
     allow_connect_method_proxying: bool,
     h2c: bool,
     keepalive_requests: Option<u32>,
+    http2: ngxora_compile::ir::Http2Options,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -482,6 +483,7 @@ fn restart_fingerprint(router: &CompiledRouter) -> RestartConfigFingerprint {
         allow_connect_method_proxying: router.http_options.allow_connect_method_proxying,
         h2c: router.http_options.h2c,
         keepalive_requests: router.http_options.keepalive_requests,
+        http2: router.http_options.http2,
     }
 }
 

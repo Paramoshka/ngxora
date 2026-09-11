@@ -25,6 +25,7 @@ The rule is simple:
 | HTTP/1.1 reverse proxy | ✅ | `proxy_pass http://...` | ✅ | Live | Pingora dataplane |
 | HTTPS/TLS reverse proxy | ✅ | `proxy_pass https://...` | ✅ | Live | SNI + upstream TLS |
 | HTTP/2 downstream (TLS) | ✅ | `listen ... http2` | Bootstrap | Restart | ALPN negotiation |
+| HTTP/2 receive limits/windows | ✅ | `http2_*`, `proxy_http2_*` | ✅ | Downstream: restart; upstream: live | File config and gRPC/Go SDK |
 | HTTP/2 cleartext (h2c) | ✅ | `h2c on;` | Bootstrap | Restart | |
 | Upstream groups | ✅ | `upstream {}` | ✅ | Live | Weighted round-robin, random, consistent hash |
 | Upstream health checks | ✅ | `health_check {}` | ✅ | Live | TCP + HTTP |

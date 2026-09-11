@@ -24,6 +24,7 @@ fn proto_snapshot_converts_into_runtime_router() {
             h2c: false,
             client_max_body_size_bytes: 8 * 1024 * 1024,
             proxy_cache_max_size_bytes: 0,
+            http2: None,
         }),
         listeners: vec![proto::Listener {
             name: "edge".into(),
@@ -77,6 +78,7 @@ fn proto_snapshot_converts_into_runtime_router() {
             tls: None,
             routes: vec![proto::Route {
                 url_rewrite: None,
+                upstream_http2: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/api".into())),
                 }),
@@ -234,6 +236,7 @@ fn proto_snapshot_defaults_tcp_nodelay_to_on() {
             tls: None,
             routes: vec![proto::Route {
                 url_rewrite: None,
+                upstream_http2: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),
@@ -280,6 +283,7 @@ fn proto_redirect_route_converts_into_runtime_return_target() {
             tls: None,
             routes: vec![proto::Route {
                 url_rewrite: None,
+                upstream_http2: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/old".into())),
                 }),
@@ -478,4 +482,132 @@ fn runtime_return_route_converts_back_to_proto_redirect() {
             location: "https://example.com/new".into(),
         }))
     );
+}
+
+#[test]
+fn http2_config_round_trip_validation_and_restart_boundary() {
+    let ast = ngxora_config::Ast::parse_config("http { h2c on; http2_max_concurrent_streams 32; http2_stream_window_size 1m; server { listen 8080; location / { proxy_pass http://127.0.0.1:50051; proxy_upstream_protocol h2c; proxy_http2_max_concurrent_streams 16; proxy_http2_connection_window_size 4m; } } }").unwrap();
+    let http = ngxora_compile::ir::Ir::from_ast(&ast)
+        .unwrap()
+        .http
+        .unwrap();
+    let state = RuntimeState::bootstrap(CompiledRouter::from_http(&http).unwrap());
+    let proto = proto_snapshot_from_runtime(&state.snapshot()).unwrap();
+    let h2 = proto.http.as_ref().unwrap().http2.as_ref().unwrap();
+    assert_eq!(h2.max_concurrent_streams, Some(32));
+    assert_eq!(h2.max_header_list_size, None);
+    assert_eq!(h2.stream_window_size, Some(1048576));
+    let upstream = proto.virtual_hosts[0].routes[0]
+        .upstream_http2
+        .as_ref()
+        .unwrap();
+    assert_eq!(upstream.max_concurrent_streams, Some(16));
+    assert_eq!(upstream.stream_window_size, None);
+    assert_eq!(upstream.connection_window_size, Some(4194304));
+    let decoded = runtime_snapshot_from_proto(proto.clone()).unwrap();
+    let round_trip = RuntimeState::new(decoded);
+    assert_eq!(
+        proto_snapshot_from_runtime(&round_trip.snapshot())
+            .unwrap()
+            .http,
+        proto.http
+    );
+    assert_eq!(
+        proto_snapshot_from_runtime(&round_trip.snapshot())
+            .unwrap()
+            .virtual_hosts,
+        proto.virtual_hosts
+    );
+
+    for field in 0..4 {
+        let mut invalid = proto.clone();
+        let h2 = invalid.http.as_mut().unwrap().http2.as_mut().unwrap();
+        let slot = match field {
+            0 => &mut h2.max_concurrent_streams,
+            1 => &mut h2.max_header_list_size,
+            2 => &mut h2.stream_window_size,
+            _ => &mut h2.connection_window_size,
+        };
+        *slot = Some(0);
+        assert!(runtime_snapshot_from_proto(invalid).is_err());
+    }
+    for field in 0..3 {
+        for value in [0, 2147483648] {
+            if field == 0 && value != 0 {
+                continue;
+            }
+            let mut invalid = proto.clone();
+            let h2 = invalid.virtual_hosts[0].routes[0]
+                .upstream_http2
+                .as_mut()
+                .unwrap();
+            let slot = match field {
+                0 => &mut h2.max_concurrent_streams,
+                1 => &mut h2.stream_window_size,
+                _ => &mut h2.connection_window_size,
+            };
+            *slot = Some(value);
+            assert!(runtime_snapshot_from_proto(invalid).is_err());
+        }
+    }
+
+    let mut updated = proto.clone();
+    updated.version = "h2-change".into();
+    updated
+        .http
+        .as_mut()
+        .unwrap()
+        .http2
+        .as_mut()
+        .unwrap()
+        .max_concurrent_streams = Some(64);
+    let result = state.apply_snapshot(runtime_snapshot_from_proto(updated).unwrap());
+    assert!(!result.applied);
+    assert!(result.restart_required);
+    assert_eq!(
+        state
+            .snapshot()
+            .router
+            .http_options
+            .http2
+            .max_concurrent_streams,
+        Some(32)
+    );
+
+    let mut updated = proto.clone();
+    updated.version = "upstream-change".into();
+    updated.virtual_hosts[0].routes[0]
+        .upstream_http2
+        .as_mut()
+        .unwrap()
+        .max_concurrent_streams = Some(24);
+    let result = state.apply_snapshot(runtime_snapshot_from_proto(updated).unwrap());
+    assert!(result.applied);
+    assert!(!result.restart_required);
+
+    let mut legacy = proto;
+    legacy.http.as_mut().unwrap().http2 = None;
+    legacy.virtual_hosts[0].routes[0].upstream_http2 = None;
+    let decoded = runtime_snapshot_from_proto(legacy).unwrap();
+    assert_eq!(decoded.router.http_options.http2, Default::default());
+}
+
+#[test]
+fn duplicate_upstream_http2_directives_are_rejected() {
+    for name in [
+        "proxy_http2_max_concurrent_streams",
+        "proxy_http2_stream_window_size",
+        "proxy_http2_connection_window_size",
+    ] {
+        let ast = ngxora_config::Ast::parse_config(&format!("http {{ server {{ listen 8080; location / {{ proxy_pass http://localhost; {name} 1; {name} 2; }} }} }}")).unwrap();
+        let http = ngxora_compile::ir::Ir::from_ast(&ast)
+            .unwrap()
+            .http
+            .unwrap();
+        assert!(
+            CompiledRouter::from_http(&http)
+                .unwrap_err()
+                .contains("duplicated")
+        );
+    }
 }

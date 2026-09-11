@@ -32,6 +32,7 @@ fn proto_snapshot_roundtrips_upstream_client_certificate() {
             tls: None,
             routes: vec![proto::Route {
                 url_rewrite: None,
+                upstream_http2: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),
@@ -109,6 +110,7 @@ fn proto_snapshot_rejects_client_cert_without_key() {
             tls: None,
             routes: vec![proto::Route {
                 url_rewrite: None,
+                upstream_http2: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),
@@ -168,6 +170,7 @@ fn proto_upstream_tls_options_roundtrips_client_certificate() {
             tls: None,
             routes: vec![proto::Route {
                 url_rewrite: None,
+                upstream_http2: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),
@@ -271,6 +274,7 @@ fn proto_rejects_client_certificate_without_key() {
             tls: None,
             routes: vec![proto::Route {
                 url_rewrite: None,
+                upstream_http2: None,
                 r#match: Some(proto::Match {
                     kind: Some(proto::r#match::Kind::Prefix("/".into())),
                 }),

@@ -89,6 +89,16 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
         tcp_nodelay: Switch::On,
         allow_connect_method_proxying: switch_from_bool(options.allow_connect_method_proxying),
         h2c: switch_from_bool(options.h2c),
+        http2: options
+            .http2
+            .as_ref()
+            .map(|h2| ngxora_compile::ir::Http2Options {
+                max_concurrent_streams: h2.max_concurrent_streams,
+                max_header_list_size: h2.max_header_list_size,
+                stream_window_size: h2.stream_window_size,
+                connection_window_size: h2.connection_window_size,
+            })
+            .unwrap_or_default(),
         proxy_cache_max_size: none_if_zero_u64(options.proxy_cache_max_size_bytes),
         ssl_provider: snapshot.le_config.as_ref().map(le_config_from_proto),
     })
@@ -282,6 +292,18 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
 
     if let Some(protocol) = upstream_http_protocol_from_proto(route.upstream_protocol)? {
         directives.push(LocationDirective::ProxyUpstreamProtocol(protocol));
+    }
+
+    if let Some(h2) = &route.upstream_http2 {
+        if let Some(value) = h2.max_concurrent_streams {
+            directives.push(LocationDirective::ProxyHttp2MaxConcurrentStreams(value));
+        }
+        if let Some(value) = h2.stream_window_size {
+            directives.push(LocationDirective::ProxyHttp2StreamWindowSize(value));
+        }
+        if let Some(value) = h2.connection_window_size {
+            directives.push(LocationDirective::ProxyHttp2ConnectionWindowSize(value));
+        }
     }
 
     let action = route

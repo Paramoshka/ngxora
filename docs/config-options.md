@@ -786,3 +786,63 @@ IP-only targets are rejected with HTTP 502 because the current Pingora/OpenSSL
 connector cannot securely verify IP SANs through its hostname-verification API.
 NRF endpoints with an IP transport address and a DNS TLS identity remain supported.
 `proxy_ssl_verify off` explicitly disables certificate verification.
+
+
+## HTTP/2 limits and flow control
+
+Pingora 0.9.0 bounds downstream connections to 100 concurrent streams and a
+64 KiB decoded header list by default. The receive windows default to 65,535
+bytes downstream and 8 MiB upstream. Upstream connections allow one concurrent
+stream by default; increase `proxy_http2_max_concurrent_streams` to enable more
+multiplexing for gRPC/SBI traffic.
+
+| Directive | Context | Default |
+| --- | --- | --- |
+| `http2_max_concurrent_streams` | `http` | 100 |
+| `http2_max_header_list_size` | `http` | 64k |
+| `http2_stream_window_size` | `http` | 65535 |
+| `http2_connection_window_size` | `http` | 65535 |
+| `proxy_http2_max_concurrent_streams` | `location` | 1 |
+| `proxy_http2_stream_window_size` | `location` | 8m |
+| `proxy_http2_connection_window_size` | `location` | 8m |
+
+Counts are positive integers up to 4,294,967,295. Sizes accept the usual byte,
+`k`, and `m` literals. Windows must be between 1 and 2,147,483,647 bytes; the
+header-list limit must be between 1 and 4,294,967,295 bytes. Zero, overflow and
+duplicate directives are rejected. Connection windows below the protocol's
+initial 65,535 bytes cannot retract credit already granted to the sender.
+Larger windows and stream counts may increase memory usage.
+
+These are receive-side settings: downstream windows control uploads to ngxora,
+and upstream windows control responses received by ngxora. They do not enable
+HTTP/2 themselves and have no effect on HTTP/1 connections. Downstream settings
+apply to both TLS HTTP/2 and h2c and require a restart. Changing them through
+`ApplySnapshot` returns `restart_required` and retains the active snapshot.
+Upstream settings apply live to new snapshot generations, including ordinary,
+weighted, discovery and SCP routes. Existing requests finish with their original
+settings; the new generation uses separate upstream connections.
+
+The control API exposes `HttpOptions.http2` and `Route.upstream_http2`. Each
+message uses optional fields: absence retains the default, while explicit zero
+is invalid. Older clients can omit both messages.
+
+```nginx
+http {
+    h2c on;
+    http2_max_concurrent_streams 100;
+    http2_max_header_list_size 64k;
+    http2_stream_window_size 1m;
+    http2_connection_window_size 4m;
+
+    server {
+        listen 8080;
+        location / {
+            proxy_pass http://127.0.0.1:50051;
+            proxy_upstream_protocol h2c;
+            proxy_http2_max_concurrent_streams 100;
+            proxy_http2_stream_window_size 1m;
+            proxy_http2_connection_window_size 4m;
+        }
+    }
+}
+```

@@ -146,6 +146,21 @@ fn lower_http(block: &Block) -> Result<Http, LowerErr> {
 }
 
 fn apply_http_directive(http: &mut Http, d: &Directive) -> Result<(), LowerErr> {
+    let http2_slot = match d.name.as_str() {
+        "http2_max_concurrent_streams" => Some(&mut http.http2.max_concurrent_streams),
+        "http2_max_header_list_size" => Some(&mut http.http2.max_header_list_size),
+        "http2_stream_window_size" => Some(&mut http.http2.stream_window_size),
+        "http2_connection_window_size" => Some(&mut http.http2.connection_window_size),
+        _ => None,
+    };
+    if let Some(slot) = http2_slot {
+        if slot.replace(values::parse_http2_value(d)?).is_some() {
+            return Err(LowerErr {
+                message: format!("{} is duplicated in http", d.name),
+            });
+        }
+        return Ok(());
+    }
     match d.name.as_str() {
         consts::KEEPALIVE_TIMEOUT => {
             http.keepalive_timeout = parse_keepalive_timeout(&d.args)?;

@@ -45,6 +45,7 @@ pub(crate) struct SelectedRoute {
     access_rules: Vec<ngxora_compile::ir::LocationIpRule>,
     upstream_timeouts: UpstreamTimeouts,
     upstream_protocol: Option<UpstreamHttpProtocol>,
+    upstream_http2: ngxora_compile::ir::UpstreamHttp2Options,
     upstream_ssl_options: UpstreamSslOptions,
     upstream_trusted_ca: Option<RuntimeTrustedCa>,
     upstream_client_identity: Option<RuntimeClientIdentity>,

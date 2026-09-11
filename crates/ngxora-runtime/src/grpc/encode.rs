@@ -345,6 +345,11 @@ fn proto_route_from_runtime(route: &CompiledLocation) -> Result<ProtoRoute, Stri
         upstream_protocol: proto_upstream_http_protocol_from_runtime(route.upstream_protocol)
             as i32,
         cache: route.cache.as_ref().map(proto_route_cache_from_runtime),
+        upstream_http2: Some(proto::UpstreamHttp2Options {
+            max_concurrent_streams: route.upstream_http2.max_concurrent_streams,
+            stream_window_size: route.upstream_http2.stream_window_size,
+            connection_window_size: route.upstream_http2.connection_window_size,
+        }),
     })
 }
 
@@ -503,6 +508,12 @@ fn proto_http_options_from_runtime(options: &HttpRuntimeOptions) -> ProtoHttpOpt
         keepalive_requests: options.keepalive_requests.unwrap_or(0),
         allow_connect_method_proxying: options.allow_connect_method_proxying,
         h2c: options.h2c,
+        http2: Some(proto::Http2Options {
+            max_concurrent_streams: options.http2.max_concurrent_streams,
+            max_header_list_size: options.http2.max_header_list_size,
+            stream_window_size: options.http2.stream_window_size,
+            connection_window_size: options.http2.connection_window_size,
+        }),
         client_max_body_size_bytes: options.client_max_body_size.unwrap_or(0),
         proxy_cache_max_size_bytes: options.proxy_cache_max_size.unwrap_or(0),
     }

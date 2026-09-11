@@ -189,6 +189,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
         tcp_nodelay: Switch::On,
         allow_connect_method_proxying: Switch::Off,
         h2c: Switch::Off,
+        http2: Default::default(),
         proxy_cache_max_size: None,
         ssl_provider: None,
     };
