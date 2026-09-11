@@ -192,6 +192,7 @@ fn router_with_tls_and_plugin() -> CompiledRouter {
         http2: Default::default(),
         proxy_cache_max_size: None,
         ssl_provider: None,
+        geoip: None,
     };
 
     CompiledRouter::from_http(&http).expect("router compiles")

@@ -123,50 +123,18 @@ struct ClientIpForwarding {
 }
 
 impl ClientIpForwarding {
-    fn is_trusted(&self, ip: &IpAddr) -> bool {
-        self.trusted_proxies
-            .iter()
-            .any(|network| network.contains(ip))
-    }
-
     fn resolve_chain(
         &self,
         client_ip: Option<IpAddr>,
         headers: &dyn HeaderMapMut,
     ) -> Option<Vec<IpAddr>> {
-        let peer_ip = client_ip?;
-        if !self.is_trusted(&peer_ip) {
-            return Some(vec![peer_ip]);
-        }
-
-        let Some(raw_forwarded_for) = headers.get(&X_FORWARDED_FOR) else {
-            return Some(vec![peer_ip]);
-        };
-        let Ok(raw_forwarded_for) = raw_forwarded_for.to_str() else {
-            return Some(vec![peer_ip]);
-        };
-        let Ok(mut forwarded_for) = raw_forwarded_for
-            .split(',')
-            .map(|value| value.trim().parse::<IpAddr>())
-            .collect::<Result<Vec<_>, _>>()
-        else {
-            return Some(vec![peer_ip]);
-        };
-        if forwarded_for.is_empty() {
-            return Some(vec![peer_ip]);
-        }
-
-        let mut current_ip = peer_ip;
-        let mut trusted_chain = vec![peer_ip];
-        while self.is_trusted(&current_ip) {
-            let Some(next_ip) = forwarded_for.pop() else {
-                break;
-            };
-            current_ip = next_ip;
-            trusted_chain.push(current_ip);
-        }
-        trusted_chain.reverse();
-        Some(trusted_chain)
+        ngxora_plugin_api::client_ip::resolve_chain(
+            client_ip,
+            headers
+                .get(&X_FORWARDED_FOR)
+                .and_then(|value| value.to_str().ok()),
+            &self.trusted_proxies,
+        )
     }
 
     fn apply(

@@ -86,6 +86,19 @@ pub(super) fn proto_snapshot_from_runtime(
                 .collect()
         },
         version: snapshot.version.clone(),
+        geoip: snapshot
+            .router
+            .geoip
+            .as_ref()
+            .map(|config| proto::GeoIpConfig {
+                database: config.database.to_string_lossy().into_owned(),
+                reload_interval_ms: Some(config.reload_interval.as_millis() as u64),
+                trusted_proxies: config
+                    .trusted_proxies
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            }),
         http: Some(proto_http_options_from_runtime(
             &snapshot.router.http_options,
         )),

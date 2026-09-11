@@ -336,6 +336,8 @@ pub(crate) fn replace_upstream_backend_readiness(
 
 #[derive(Debug, Serialize)]
 struct AccessLogEntry {
+    #[serde(flatten)]
+    geoip: crate::geoip::GeoIpRecord,
     method: String,
     path: String,
     status: u16,
@@ -363,6 +365,7 @@ struct AccessLogEntry {
 
 /// Write a structured JSON access log line.
 pub(crate) struct AccessLogContext<'a> {
+    pub geoip: &'a crate::geoip::GeoIpRecord,
     pub method: &'a str,
     pub path: &'a str,
     pub status: u16,
@@ -376,6 +379,7 @@ pub(crate) struct AccessLogContext<'a> {
 
 pub(crate) fn write_access_log(session: &Session, context: AccessLogContext<'_>) {
     let AccessLogContext {
+        geoip,
         method,
         path,
         status,
@@ -398,6 +402,7 @@ pub(crate) fn write_access_log(session: &Session, context: AccessLogContext<'_>)
         .map(|s| s.to_string());
 
     let entry = AccessLogEntry {
+        geoip: geoip.clone(),
         method: method.to_string(),
         path: path.to_string(),
         status,

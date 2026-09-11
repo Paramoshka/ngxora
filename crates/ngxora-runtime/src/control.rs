@@ -113,6 +113,7 @@ impl RuntimeSnapshot {
 /// boundary for transport-sensitive config.
 pub struct RuntimeState {
     current: ArcSwap<RuntimeSnapshot>,
+    pub(crate) geoip: Option<Arc<crate::geoip::GeoIp>>,
     apply_lock: Mutex<()>,
     // Transport/bootstrap settings cannot be changed live with Pingora listeners,
     // so we reject snapshots that modify this fingerprint.
@@ -130,11 +131,18 @@ impl RuntimeState {
     /// Creates a runtime state with a caller-provided plugin registry.
     pub fn with_registry(snapshot: ConfigSnapshot, registry: Arc<PluginRegistry>) -> Self {
         let bootstrap_config = restart_fingerprint(&snapshot.router);
+        let geoip = snapshot
+            .router
+            .geoip
+            .clone()
+            .map(crate::geoip::GeoIp::new)
+            .map(Arc::new);
         let initial_snapshot =
             Self::build_runtime_snapshot(&registry, snapshot.version, snapshot.router, 1, None)
                 .expect("bootstrap snapshot plugin resolution failed");
         Self {
             current: ArcSwap::from_pointee(initial_snapshot),
+            geoip,
             apply_lock: Mutex::new(()),
             bootstrap_config,
             registry,
@@ -447,6 +455,7 @@ impl BackgroundService for RuntimeUpstreamHealthChecks {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct RestartConfigFingerprint {
+    geoip: Option<ngxora_compile::ir::GeoIpConfig>,
     listeners: BTreeMap<ListenKey, ListenerRestartConfig>,
     allow_connect_method_proxying: bool,
     h2c: bool,
@@ -479,6 +488,7 @@ fn restart_fingerprint(router: &CompiledRouter) -> RestartConfigFingerprint {
     }
 
     RestartConfigFingerprint {
+        geoip: router.geoip.clone(),
         listeners,
         allow_connect_method_proxying: router.http_options.allow_connect_method_proxying,
         h2c: router.http_options.h2c,

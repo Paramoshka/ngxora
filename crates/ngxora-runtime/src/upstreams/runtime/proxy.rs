@@ -127,6 +127,11 @@ impl ProxyHttp for DynamicProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> PingoraResult<bool> {
+        if let Some(geoip) = &self.state.geoip {
+            ctx.geoip =
+                geoip.lookup_request(request_client_ip(session), &session.req_header().headers);
+            crate::geoip::remove_headers(session.req_header_mut());
+        }
         // ── Tracing: extract parent context from downstream headers ──
         ctx.parent_ctx = crate::tracing::extract_context(&session.req_header().headers);
         let method = session.req_header().method.to_string();
@@ -264,6 +269,9 @@ impl ProxyHttp for DynamicProxy {
             respond_from_plugin_flow(flow, "upstream_request_filter")?;
         }
 
+        if self.state.geoip.is_some() {
+            crate::geoip::set_headers(upstream_request, &ctx.geoip)?;
+        }
         // ── Inject W3C TraceContext into upstream headers ──
         let mut trace_headers = http::HeaderMap::new();
         crate::tracing::inject_context(&ctx.upstream_trace_ctx, &mut trace_headers);

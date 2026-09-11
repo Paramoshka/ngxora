@@ -13,6 +13,7 @@ fn proto_snapshot_roundtrips_upstream_client_certificate() {
 
     let snapshot = proto::ConfigSnapshot {
         version: "mtls-v1".into(),
+        geoip: None,
         scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
@@ -91,6 +92,7 @@ fn proto_snapshot_rejects_client_cert_without_key() {
 
     let snapshot = proto::ConfigSnapshot {
         version: "mtls-broken".into(),
+        geoip: None,
         scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
@@ -151,6 +153,7 @@ fn proto_upstream_tls_options_roundtrips_client_certificate() {
 
     let snapshot = proto::ConfigSnapshot {
         version: "v-mtls".into(),
+        geoip: None,
         scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
@@ -255,6 +258,7 @@ fn proto_upstream_tls_options_roundtrips_client_certificate() {
 fn proto_rejects_client_certificate_without_key() {
     let snapshot = proto::ConfigSnapshot {
         version: "v-bad".into(),
+        geoip: None,
         scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {

@@ -105,6 +105,7 @@ async fn connect_uds(_path: PathBuf) -> Result<Channel, Box<dyn Error>> {
 
 fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
     ConfigSnapshot {
+        geoip: None,
         scp_profiles: Vec::new(),
         version: cli.version.clone(),
         http: Some(HttpOptions {

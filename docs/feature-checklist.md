@@ -22,6 +22,7 @@ The rule is simple:
 
 | Feature | Status | Text Config | gRPC | Reload | Notes |
 |---|---|---|---|---|---|
+| MaxMind GeoIP | ✅ | `geoip {}` | `ConfigSnapshot.geoip` | Config: restart; database: automatic | City/Country, ISO, trusted proxy lookup, upstream headers and access logs |
 | HTTP/1.1 reverse proxy | ✅ | `proxy_pass http://...` | ✅ | Live | Pingora dataplane |
 | HTTPS/TLS reverse proxy | ✅ | `proxy_pass https://...` | ✅ | Live | SNI + upstream TLS |
 | HTTP/2 downstream (TLS) | ✅ | `listen ... http2` | Bootstrap | Restart | ALPN negotiation |

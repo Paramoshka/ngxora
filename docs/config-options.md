@@ -23,6 +23,68 @@ For `gRPC ApplySnapshot` reload semantics, see [docs/README.md](./README.md).
 - `proxy_cache_max_size <size>;`
   Global default for per-location cache size. Overridden by `proxy_cache_max_size` in a `proxy_cache { ... }` block. Default if omitted: `50m`. Supports size suffixes: `k`/`K`, `m`/`M`, `g`/`G`.
 
+## GeoIP (MaxMind)
+
+One optional `geoip` block inside `http` enables lookup from a local GeoIP2 or
+GeoLite2 **City** or **Country** `.mmdb` database. It is disabled when omitted.
+
+```nginx
+http {
+    geoip {
+        database /var/lib/ngxora/GeoLite2-City.mmdb;
+        reload_interval 5s;
+        trusted_proxy 10.0.0.0/8;
+        trusted_proxy ::1;
+    }
+    server {
+        listen 8080;
+        location / { proxy_pass http://127.0.0.1:9000; }
+    }
+}
+```
+
+- `database <path>;` is required. The file is supplied externally; ngxora does
+  not download databases. Paths follow normal process working-directory rules.
+- `reload_interval <duration>;` defaults to `5s`, with a minimum of `1ms`.
+  Duplicate blocks/directives, unsupported options and invalid IP/CIDR values
+  reject configuration; a missing or unreadable database does not reject startup.
+- Repeat `trusted_proxy <IP|CIDR>;` for proxies allowed to supply
+  `X-Forwarded-For`. The default list is empty. The chain is walked right to left
+  through trusted hops; untrusted peers, malformed or duplicate XFF fields fall
+  back to the socket IP. `X-Real-IP` is not used for GeoIP. These trust settings
+  are independent of the headers plugin's forwarding configuration.
+
+Each request gets one lookup before request plugins and cache lookup. JSON
+access logs include available `geoip_city`, `geoip_country`, `geoip_country_iso`
+fields, including on cache hits and local responses. Country names and city
+names use English; ISO is the two-character `country.iso_code`, with no fallback
+to `registered_country`. Country databases omit the city field.
+
+Upstream requests receive available `X-GeoIP-City`, `X-GeoIP-Country`, and
+`X-GeoIP-Country-ISO` headers. Names are UTF-8. When GeoIP is enabled, incoming
+headers with these names are removed and the computed values are set after
+upstream plugins. Unknown IPs, missing fields and unavailable databases omit
+these headers and log fields. No geolocation headers are added to responses.
+
+A background service checks file metadata and replacement identity, loads and
+validates a new database in memory, and atomically replaces the reader. Request
+handling performs no file I/O. Missing, unreadable, unsupported or corrupt files
+produce a warning; repeated identical errors are suppressed. The last working
+database stays active until a valid replacement appears. Without a previously
+loaded database, traffic continues without GeoIP. Successful loads are logged
+at `info`. GeoIP lifecycle logs are visible by default; `RUST_LOG` overrides this.
+
+Changing GeoIP configuration requires restart, including through gRPC
+`ConfigSnapshot.geoip`. Replacing database contents does not. Mount the **parent
+directory** into Docker (for example `-v /srv/geoip:/var/lib/ngxora:ro`) so atomic
+file replacement is visible; update with a temporary file followed by rename.
+The production database is not included in the image. Reload briefly holds both
+old and new database buffers in memory.
+
+If an upstream response depends on GeoIP, return an appropriate `Vary` header
+(for example `Vary: X-GeoIP-Country-ISO`). ngxora currently skips caching all
+responses with `Vary`. GeoIP does not change cache keys or add country blocking.
+
 ## Upstream Blocks
 
 For SBI-aware routes, an HTTP-level `scp <name> { ... }` block supports one

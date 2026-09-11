@@ -12,6 +12,7 @@ use values::{
 };
 
 mod auth_plugins;
+mod geoip;
 mod headers_plugin;
 mod listeners;
 mod locations;
@@ -54,6 +55,14 @@ fn lower_http(block: &Block) -> Result<Http, LowerErr> {
         match children_block {
             Node::Directive(directive) => apply_http_directive(&mut http, directive)?,
             Node::Block(block) => match block.name.as_str() {
+                "geoip" => {
+                    if http.geoip.is_some() {
+                        return Err(LowerErr {
+                            message: "duplicate geoip block".into(),
+                        });
+                    }
+                    http.geoip = Some(geoip::lower_geoip(block)?);
+                }
                 "scp" => http.scp_profiles.push(lower_scp(block)?),
                 consts::SERVER => {
                     let server = lower_server(block)?;

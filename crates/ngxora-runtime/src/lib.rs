@@ -11,6 +11,7 @@
 pub mod admin;
 pub mod cache;
 pub mod control;
+pub mod geoip;
 pub mod grpc;
 pub mod le;
 pub mod metrics;

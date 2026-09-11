@@ -38,7 +38,10 @@ struct GrpcTlsFiles {
 }
 
 fn main() -> ExitCode {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("error,ngxora_runtime::geoip=info"),
+    )
+    .init();
 
     // Install the rustls crypto provider early — needed by background services
     // running in Pingora worker threads.
@@ -108,6 +111,10 @@ fn run(cli: CliArgs) -> Result<(), String> {
         LeReconcilerService::new(Arc::clone(&state), le_tokens),
     );
     server.add_service(le_service);
+    server.add_service(background_service(
+        "geoip reload",
+        ngxora_runtime::geoip::GeoIpService::new(Arc::clone(&state)),
+    ));
 
     let mut proxy = pingora_proxy::http_proxy_service(&server.configuration, dynamic_proxy);
     let upstream_health_checks = background_service(

@@ -26,6 +26,13 @@ message ConfigSnapshot {
   repeated UpstreamGroup upstreams = 5;
   LetsEncryptConfig le_config = 6;
   repeated ScpProfile scp_profiles = 7;
+  GeoIpConfig geoip = 8;
+}
+
+message GeoIpConfig {
+  string database = 1;
+  optional uint64 reload_interval_ms = 2;
+  repeated string trusted_proxies = 3;
 }
 
 message ScpProfile {

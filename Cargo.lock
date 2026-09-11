@@ -1488,6 +1488,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1711,6 +1717,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
+name = "maxminddb"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0673d20587e2a92e0a02e372a626ddc914955d645a0947613b8a7f39455e332b"
+dependencies = [
+ "ipnetwork",
+ "memchr",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1891,6 +1909,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "http",
+ "ipnet",
  "serde",
  "serde_json",
 ]
@@ -1924,6 +1943,7 @@ dependencies = [
  "instant-acme",
  "ipnet",
  "log",
+ "maxminddb",
  "ngxora-compile",
  "ngxora-config",
  "ngxora-plugin-api",

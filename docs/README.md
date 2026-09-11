@@ -60,6 +60,7 @@ http {
 
 | Option | Scope | gRPC ApplySnapshot | Notes |
 | --- | --- | --- | --- |
+| `geoip` | HTTP | Restart | Local MMDB contents reload automatically; City/Country enrich upstream headers and access logs |
 | `location` / `proxy_pass` | route | Live | Applied through `RuntimeState` swap |
 | `scp` / `scp_pass` | profile / route | Live | Unchanged discovery templates retain per-profile caches; changed profiles are replaced; HTTP/2 listener settings remain bootstrap-only |
 | `upstream` blocks / backend sets | upstream group | Live | Rebuilds changed weighted/NRF-discovered pools, selection state, hash keys, and health checks; unchanged groups retain runtime discovery state |

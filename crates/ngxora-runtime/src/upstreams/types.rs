@@ -283,6 +283,7 @@ pub struct HttpRuntimeOptions {
 // request time and by restart-boundary checks at apply time.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct CompiledRouter {
+    pub geoip: Option<ngxora_compile::ir::GeoIpConfig>,
     pub scp_profiles: HashMap<String, ngxora_compile::ir::ScpProfile>,
     pub upstreams: HashMap<String, CompiledUpstreamGroup>,
     pub listeners: HashMap<ListenKey, VirtualHostRoutes>,

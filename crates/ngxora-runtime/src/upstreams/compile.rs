@@ -26,6 +26,9 @@ impl CompiledRouter {
         }
 
         http.http2.validate()?;
+        if let Some(config) = &http.geoip {
+            config.validate()?;
+        }
         let mut router = Self {
             upstreams: compile_upstreams(&http.upstreams)?,
             http_options: HttpRuntimeOptions {
@@ -44,6 +47,7 @@ impl CompiledRouter {
                 http2: http.http2,
             },
             le_config: http.ssl_provider.clone(),
+            geoip: http.geoip.clone(),
             ..Self::default()
         };
         let mut next_route_id = 1;

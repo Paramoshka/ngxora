@@ -76,6 +76,8 @@ pub trait HeaderMapMut: Send {
     fn remove(&mut self, name: &HeaderName);
 }
 
+pub mod client_ip;
+
 pub struct RequestCtx<'a> {
     pub state: &'a mut PluginState,
     pub path: &'a str,

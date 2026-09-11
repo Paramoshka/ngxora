@@ -47,3 +47,10 @@ Their optional numeric fields use pointers: `nil` retains Pingora defaults;
 explicit zero is rejected. Global HTTP/2 changes require restart, while route
 settings apply live to new upstream connections. See
 [HTTP/2 configuration](../../docs/config-options.md#http2-limits-and-flow-control).
+
+GeoIP is configured through `ConfigSnapshot.Geoip` (`*controlv1.GeoIpConfig`):
+`Database` is a local MMDB path, `ReloadIntervalMs` defaults to 5000 when nil
+(explicit zero is rejected), and `TrustedProxies` contains IP addresses/CIDRs.
+A nil GeoIP configuration disables the feature. Configuration changes require
+restart; database file updates are loaded automatically. See
+[GeoIP configuration](../../docs/config-options.md#geoip-maxmind).

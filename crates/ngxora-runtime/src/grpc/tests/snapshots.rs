@@ -12,9 +12,86 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 #[test]
+fn geoip_round_trip_validation_and_restart_boundary() {
+    let config = proto::GeoIpConfig {
+        database: "/missing.mmdb".into(),
+        reload_interval_ms: None,
+        trusted_proxies: vec!["127.0.0.1/32".into(), "::1/128".into()],
+    };
+    let wire = proto::ConfigSnapshot {
+        geoip: Some(config),
+        ..Default::default()
+    };
+    let decoded = runtime_snapshot_from_proto(wire.clone()).unwrap();
+    assert_eq!(
+        decoded.router.geoip.as_ref().unwrap().reload_interval,
+        Duration::from_secs(5)
+    );
+    let state = RuntimeState::new(decoded);
+    let encoded = proto_snapshot_from_runtime(&state.snapshot()).unwrap();
+    assert_eq!(
+        encoded.geoip.as_ref().unwrap().reload_interval_ms,
+        Some(5000)
+    );
+    assert_eq!(
+        runtime_snapshot_from_proto(encoded.clone()).unwrap().router,
+        state.snapshot().router
+    );
+    assert!(
+        state
+            .apply_snapshot(runtime_snapshot_from_proto(encoded.clone()).unwrap())
+            .applied
+    );
+    let mut changed = encoded.clone();
+    changed.geoip.as_mut().unwrap().database = "/other.mmdb".into();
+    assert!(
+        state
+            .apply_snapshot(runtime_snapshot_from_proto(changed).unwrap())
+            .restart_required
+    );
+    let mut disabled = encoded.clone();
+    disabled.geoip = None;
+    assert!(
+        state
+            .apply_snapshot(runtime_snapshot_from_proto(disabled).unwrap())
+            .restart_required
+    );
+    for invalid in [
+        proto::GeoIpConfig {
+            reload_interval_ms: Some(0),
+            ..wire.geoip.clone().unwrap()
+        },
+        proto::GeoIpConfig {
+            database: "".into(),
+            ..wire.geoip.clone().unwrap()
+        },
+        proto::GeoIpConfig {
+            trusted_proxies: vec!["invalid".into()],
+            ..wire.geoip.clone().unwrap()
+        },
+    ] {
+        assert!(
+            runtime_snapshot_from_proto(proto::ConfigSnapshot {
+                geoip: Some(invalid),
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+    assert!(
+        runtime_snapshot_from_proto(proto::ConfigSnapshot::default())
+            .unwrap()
+            .router
+            .geoip
+            .is_none()
+    );
+}
+
+#[test]
 fn proto_snapshot_converts_into_runtime_router() {
     let snapshot = proto::ConfigSnapshot {
         version: "v2".into(),
+        geoip: None,
         scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions {
             downstream_keepalive_timeout_seconds: 15,
@@ -217,6 +294,7 @@ fn proto_snapshot_converts_into_runtime_router() {
 fn proto_snapshot_defaults_tcp_nodelay_to_on() {
     let snapshot = proto::ConfigSnapshot {
         version: "v1".into(),
+        geoip: None,
         scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {
@@ -264,6 +342,7 @@ fn proto_snapshot_defaults_tcp_nodelay_to_on() {
 fn proto_redirect_route_converts_into_runtime_return_target() {
     let snapshot = proto::ConfigSnapshot {
         version: "v-redirect".into(),
+        geoip: None,
         scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions::default()),
         listeners: vec![proto::Listener {

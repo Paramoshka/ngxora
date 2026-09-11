@@ -14,6 +14,47 @@ use std::time::Duration;
 use url::Url;
 
 #[test]
+fn geoip_config_defaults_and_validation() {
+    let parse =
+        |body: &str| Ir::from_ast(&Ast::parse_config(&format!("http {{ {body} }}")).unwrap());
+    assert!(parse("").unwrap().http.unwrap().geoip.is_none());
+    let config =
+        parse("geoip { database /missing.mmdb; trusted_proxy 127.0.0.1; trusted_proxy ::1/128; }")
+            .unwrap()
+            .http
+            .unwrap()
+            .geoip
+            .unwrap();
+    assert_eq!(config.reload_interval, Duration::from_secs(5));
+    assert_eq!(config.trusted_proxies.len(), 2);
+    assert_eq!(
+        parse("geoip { database /missing.mmdb; reload_interval 20ms; }")
+            .unwrap()
+            .http
+            .unwrap()
+            .geoip
+            .unwrap()
+            .reload_interval,
+        Duration::from_millis(20)
+    );
+    for body in [
+        "geoip {}",
+        "geoip extra { database /x; }",
+        "geoip { database /x; database /y; }",
+        "geoip { database /x; reload_interval 0s; }",
+        "geoip { database /x; reload_interval 18446744073709551615y; }",
+        "geoip { database /x; reload_interval 1s; reload_interval 2s; }",
+        "geoip { database /x; trusted_proxy garbage; }",
+        "geoip { database /x; unknown on; }",
+        "geoip { database /x; nested {} }",
+        "geoip { database /x /y; }",
+        "geoip { database /x; } geoip { database /y; }",
+    ] {
+        assert!(parse(body).is_err(), "accepted: {body}");
+    }
+}
+
+#[test]
 fn from_ast_parses_basic_http() {
     let input = r#"
 http {

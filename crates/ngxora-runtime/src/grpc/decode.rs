@@ -101,6 +101,27 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
             .unwrap_or_default(),
         proxy_cache_max_size: none_if_zero_u64(options.proxy_cache_max_size_bytes),
         ssl_provider: snapshot.le_config.as_ref().map(le_config_from_proto),
+        geoip: snapshot
+            .geoip
+            .as_ref()
+            .map(|config| {
+                Ok::<_, String>(http_ir::GeoIpConfig {
+                    database: config.database.clone().into(),
+                    reload_interval: Duration::from_millis(
+                        config.reload_interval_ms.unwrap_or(5000),
+                    ),
+                    trusted_proxies: config
+                        .trusted_proxies
+                        .iter()
+                        .map(|raw| {
+                            raw.parse()
+                                .or_else(|_| raw.parse::<IpAddr>().map(Into::into))
+                                .map_err(|_| format!("invalid geoip trusted_proxy `{raw}`"))
+                        })
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .transpose()?,
     })
 }
 

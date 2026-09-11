@@ -60,6 +60,7 @@ impl SelectedRoute {
 }
 
 pub struct ProxyContext {
+    pub(crate) geoip: crate::geoip::GeoIpRecord,
     pub(crate) snapshot: Option<Arc<RuntimeSnapshot>>,
     pub(crate) response_plugins_applied: bool,
     pub(crate) snapshot_generation: u64,
@@ -92,6 +93,7 @@ pub struct ProxyContext {
 impl Default for ProxyContext {
     fn default() -> Self {
         Self {
+            geoip: crate::geoip::GeoIpRecord::default(),
             snapshot: None,
             response_plugins_applied: false,
             snapshot_generation: 0,

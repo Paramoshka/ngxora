@@ -59,7 +59,7 @@ impl Proxy {
             .arg("--grpc-uds")
             .arg(&socket)
             .arg(&config)
-            .stdout(Stdio::null())
+            .stdout(std::fs::File::create(temp.path().join("access.log")).unwrap())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
@@ -910,3 +910,6 @@ async fn pingora_upgrade_sanitizes_headers_and_preserves_websocket_tunnels() {
         upstream.await.unwrap();
     }).await.expect("HTTP/WebSocket proxy stalled");
 }
+
+#[path = "geoip/mod.rs"]
+mod geoip;

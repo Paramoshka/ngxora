@@ -9,6 +9,31 @@ use ipnet::IpNet;
 
 use url::Url;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeoIpConfig {
+    pub database: PathBuf,
+    pub reload_interval: Duration,
+    pub trusted_proxies: Vec<IpNet>,
+}
+
+impl GeoIpConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.database.as_os_str().is_empty() || self.database.to_str().is_none() {
+            return Err("geoip database must be a nonempty UTF-8 path".into());
+        }
+        if self.reload_interval < Duration::from_millis(1)
+            || self.reload_interval.as_millis() > u64::MAX as u128
+            || !self
+                .reload_interval
+                .subsec_nanos()
+                .is_multiple_of(1_000_000)
+        {
+            return Err("geoip reload_interval must be a positive whole number of milliseconds fitting uint64".into());
+        }
+        Ok(())
+    }
+}
+
 /// How the server obtains its TLS certificate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SslProvider {
@@ -50,6 +75,7 @@ pub struct Http {
     pub h2c: Switch,
     pub http2: Http2Options,
     pub ssl_provider: Option<LetsEncryptConfig>,
+    pub geoip: Option<GeoIpConfig>,
 }
 
 impl Default for Http {
@@ -67,6 +93,7 @@ impl Default for Http {
             h2c: Switch::Off,
             http2: Http2Options::default(),
             ssl_provider: None,
+            geoip: None,
         }
     }
 }
