@@ -21,6 +21,9 @@ RUN ARCH="$(uname -m)" \
 RUN /usr/local/bin/ngxora --check /app/examples/basic/ngxora.conf
 RUN /usr/local/bin/ngxora --check /app/examples/sbi-ready/ngxora.conf
 RUN /usr/local/bin/ngxora --check /app/examples/scp/ngxora.conf
+RUN cat LICENSE THIRD-PARTY-NOTICES > /tmp/expected-licenses \
+    && /usr/local/bin/ngxora --licenses > /tmp/actual-licenses \
+    && cmp /tmp/expected-licenses /tmp/actual-licenses
 
 FROM scratch
 
@@ -29,6 +32,7 @@ WORKDIR /etc/ngxora
 COPY --from=builder /usr/local/bin/ngxora /usr/local/bin/ngxora
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY examples/basic/ngxora.conf /etc/ngxora/ngxora.conf
+COPY LICENSE THIRD-PARTY-NOTICES /usr/share/licenses/ngxora/
 
 EXPOSE 8080
 

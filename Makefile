@@ -86,6 +86,7 @@ build: build-bin build-image ## Build all artifacts
 
 build-bin: ## Build local release binary with plugins from plugins.cfg
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) build $(CARGO_LOCK_FLAGS) --release --bin $(APP) $(CARGO_PLUGIN_FLAGS)
+	cp LICENSE THIRD-PARTY-NOTICES "$(CARGO_TARGET_DIR)/release/"
 
 build-image: ## Build docker image locally
 	CARGO_BUILD_FLAGS="$(CARGO_PLUGIN_FLAGS)" $(DOCKER) build \

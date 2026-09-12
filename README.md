@@ -3,6 +3,14 @@
 `ngxora` is a reverse proxy built on top of Pingora:
 familiar like nginx on the outside, dynamic and programmable on the inside.
 
+Licensed under [Apache-2.0](LICENSE). [GeoIP dependency notices](THIRD-PARTY-NOTICES)
+include the ISC license for `maxminddb` and the MIT license selected for `ipnetwork`.
+Both files are embedded in the binary and printed by `ngxora --licenses` without
+a configuration file. `make build-bin` also places them beside the release binary;
+Docker images include them in `/usr/share/licenses/ngxora/`.
+To print them from an image, run
+`docker run --rm --entrypoint /usr/local/bin/ngxora paramoshka/ngxora:latest --licenses`.
+
 It aims for a simple split:
 - nginx-style config for bootstrap and local development
 - dynamic control-plane snapshots for live routing updates

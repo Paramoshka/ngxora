@@ -13,6 +13,7 @@ use pingora::server::Server;
 use pingora::server::configuration::Opt;
 use pingora::services::background::background_service;
 use std::env;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -321,6 +322,19 @@ where
                 print_usage();
                 return Ok(None);
             }
+            "--licenses" => {
+                std::io::stdout()
+                    .lock()
+                    .write_all(
+                        concat!(
+                            include_str!("../../../LICENSE"),
+                            include_str!("../../../THIRD-PARTY-NOTICES")
+                        )
+                        .as_bytes(),
+                    )
+                    .map_err(|err| format!("failed to write licenses: {err}"))?;
+                return Ok(None);
+            }
             value if value.starts_with('-') => {
                 return Err(format!("unknown flag: {value}"));
             }
@@ -386,6 +400,7 @@ fn print_usage() {
     eprintln!(
         "Usage: ngxora [--check] [--metrics-addr <host:port> [--unsafe-admin-listen]] [--otel-endpoint <url>] [--grpc-addr <host:port> --grpc-tls-cert <pem> --grpc-tls-key <pem> --grpc-client-ca <pem> | --grpc-uds <path>] <config-path>"
     );
+    eprintln!("       ngxora --licenses");
 }
 
 #[cfg(test)]
