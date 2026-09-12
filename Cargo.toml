@@ -34,6 +34,8 @@ pingora = { version = "0.9.0", default-features = false, features = ["lb", "open
 pingora-proxy = { version = "0.9.0", default-features = false, features = ["openssl"] }
 pingora-cache = "0.9.0"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "signal"] }
 
 [[bin]]
 name = "ngxora"

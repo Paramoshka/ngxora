@@ -171,6 +171,41 @@ fn apply_http_directive(http: &mut Http, d: &Directive) -> Result<(), LowerErr> 
         return Ok(());
     }
     match d.name.as_str() {
+        "set_real_ip_from" => {
+            let value = parse_exactly_one_argument(&d.args, &d.name)?;
+            let network = value
+                .parse::<ipnet::IpNet>()
+                .or_else(|_| value.parse::<std::net::IpAddr>().map(ipnet::IpNet::from))
+                .map_err(|_| LowerErr {
+                    message: "set_real_ip_from: expected IP or CIDR".into(),
+                })?;
+            http.real_ip
+                .get_or_insert_with(Default::default)
+                .trusted_proxies
+                .push(network);
+        }
+        "real_ip_header" => {
+            let config = http.real_ip.get_or_insert_with(Default::default);
+            config.header = parse_exactly_one_argument(&d.args, &d.name)?;
+            config.validate().map_err(|message| LowerErr { message })?;
+        }
+        "real_ip_recursive" => {
+            http.real_ip.get_or_insert_with(Default::default).recursive =
+                matches!(get_directive_switch(d)?, crate::ir::Switch::On);
+        }
+        "client_header_timeout" | "client_body_timeout" | "send_timeout" => {
+            let value = values::parse_single_duration_directive(&d.args, &d.name)?;
+            let slot = match d.name.as_str() {
+                "client_header_timeout" => &mut http.client_header_timeout,
+                "client_body_timeout" => &mut http.client_body_timeout,
+                _ => &mut http.send_timeout,
+            };
+            if slot.replace(value).is_some() {
+                return Err(LowerErr {
+                    message: format!("{} is duplicated in http", d.name),
+                });
+            }
+        }
         consts::KEEPALIVE_TIMEOUT => {
             http.keepalive_timeout = parse_keepalive_timeout(&d.args)?;
         }

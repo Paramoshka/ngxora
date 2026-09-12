@@ -913,3 +913,6 @@ async fn pingora_upgrade_sanitizes_headers_and_preserves_websocket_tunnels() {
 
 #[path = "geoip/mod.rs"]
 mod geoip;
+
+#[path = "client_policy/mod.rs"]
+mod client_policy;

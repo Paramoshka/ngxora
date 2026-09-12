@@ -200,10 +200,17 @@ impl HttpPlugin for HeadersPlugin {
     }
 
     async fn on_request(&self, ctx: &mut RequestCtx<'_>) -> Result<PluginFlow, PluginError> {
-        let client_ip_chain = self
-            .client_ip_forwarding
-            .as_ref()
-            .and_then(|forwarding| forwarding.resolve_chain(ctx.client_ip, ctx.headers));
+        let client_ip_chain = match ctx
+            .state
+            .extensions
+            .get::<ngxora_plugin_api::client_ip::ResolvedClientIp>()
+        {
+            Some(identity) => identity.chain.clone(),
+            None => self
+                .client_ip_forwarding
+                .as_ref()
+                .and_then(|forwarding| forwarding.resolve_chain(ctx.client_ip, ctx.headers)),
+        };
         self.request.apply(self.name(), ctx.headers)?;
         if let Some(forwarding) = &self.client_ip_forwarding {
             forwarding.apply(self.name(), client_ip_chain, ctx.headers)?;

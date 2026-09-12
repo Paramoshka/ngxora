@@ -6,6 +6,81 @@ This document is the source of truth for currently supported text-config directi
 
 For `gRPC ApplySnapshot` reload semantics, see [docs/README.md](./README.md).
 
+## Client identity and request policy
+
+```nginx
+http {
+    set_real_ip_from 10.0.0.0/8;
+    set_real_ip_from 2001:db8::/32;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+    client_header_timeout 10s;
+    send_timeout 30s;
+    client_max_body_size 1m;
+
+    server {
+        listen 8080;
+        location /api/ {
+            allow 192.0.2.0/24;
+            deny all;
+            allow_methods GET HEAD POST OPTIONS;
+            client_max_body_size 8m;
+            client_body_timeout 30s;
+            proxy_pass http://127.0.0.1:9000;
+        }
+    }
+}
+```
+
+`set_real_ip_from <IP|CIDR>;`, `real_ip_header X-Forwarded-For|X-Real-IP;`
+and `real_ip_recursive on|off;` are HTTP-level options. The defaults are
+X-Forwarded-For and recursive `on`; no peer is trusted unless listed. The
+recursive XFF walk stops at the first untrusted address from the right. With
+recursion off, the last address is used only when the socket peer is trusted.
+X-Real-IP must contain a single IP. Missing, malformed or repeated header fields
+fall back to the socket peer; forwarding headers from untrusted peers are ignored.
+
+When any HTTP real-IP directive is configured, the identity is resolved once,
+before plugins mutate headers, and used by ACL, rate limiting, GeoIP, client-IP
+upstream hashing, forwarding and access logging. This configuration overrides
+the legacy GeoIP/headers `trusted_proxy` settings. Without HTTP real-IP settings,
+legacy behavior is retained; migrate trust settings here to share client identity.
+The headers plugin still needs `forward_client_ip on` to emit sanitized forwarding
+headers. Access logs contain the effective IP in `client_ip` and the original
+socket address, including port, in `peer_addr`.
+
+`allow_methods <method>...;` is location-level, case-sensitive and must be
+nonempty. An omitted list permits any method; listing GET does not implicitly
+allow HEAD or OPTIONS. A disallowed method returns 405 with an `Allow` header
+before request plugins, cache and upstream selection. ACL runs first. Response
+plugins still apply. The service-level CONNECT restriction also remains in effect.
+
+| Directive | Scope | Behavior |
+| --- | --- | --- |
+| `client_header_timeout` | http | Total HTTP/1 header deadline from the start of each session, including idle time on keepalive reuse; expiry closes the connection |
+| `client_body_timeout` | http, location | HTTP/1 timeout between downstream body reads; expiry returns 408 if a response has not started |
+| `send_timeout` | http, location | Downstream write timeout for HTTP/1 and HTTP/2; expiry closes/resets the response |
+| `client_max_body_size` | http, location | Content-Length precheck and streaming byte limit, including chunked and HTTP/2 bodies; exceeded limit returns 413 |
+
+Route body/write timeouts and body size inherit the HTTP value when omitted.
+Zero explicitly disables that limit on the route. Timeout values use the existing
+duration syntax, with whole-millisecond precision. Omitted timeouts retain
+Pingora defaults (HTTP/1 reads: 60s, writes: unlimited). Header/body timeouts do
+not bound the entire upstream exchange. A configured header deadline is separate
+from the body timeout and stops once headers have been parsed.
+
+Pingora 0.9 does not expose an HTTP/2 body read timeout. A positive
+`client_body_timeout` on a server accepting HTTP/2 is rejected at config/snapshot
+validation; do not configure it for H2 listeners. `client_header_timeout` applies
+to HTTP/1: H2 sessions arrive with their headers already decoded. WebSocket
+tunnel traffic remains exempt from the HTTP body-size limit.
+Positive `client_header_timeout` requires `h2c off`, because Pingora's plaintext
+protocol detection runs before the HTTP session and cannot be covered by this
+deadline. TLS listeners negotiating H1/H2 can still use the H1 header deadline.
+
+All these options round-trip through gRPC and apply to new requests without
+restarting. Active requests retain their snapshot.
+
 ## HTTP Block
 
 - `client_max_body_size <size>;`
@@ -52,7 +127,8 @@ http {
   `X-Forwarded-For`. The default list is empty. The chain is walked right to left
   through trusted hops; untrusted peers, malformed or duplicate XFF fields fall
   back to the socket IP. `X-Real-IP` is not used for GeoIP. These trust settings
-  are independent of the headers plugin's forwarding configuration.
+  are independent of the headers plugin's forwarding configuration unless HTTP
+  real-IP settings are present; those take precedence for both.
 
 Each request gets one lookup before request plugins and cache lookup. JSON
 access logs include available `geoip_city`, `geoip_country`, `geoip_country_iso`
@@ -385,7 +461,7 @@ If no `allow`/`deny` directives exist on a location, all clients are allowed.
 Notes:
 
 - `proxy_ssl_trusted_certificate` currently requires an `openssl` build.
-- There is no separate `send_timeout` directive today; upstream timeouts are modeled as `connect`, `read`, and `write`.
+- `send_timeout` controls downstream writes; `proxy_write_timeout` controls upstream writes.
 - `proxy_upstream_protocol h2` requires a TLS upstream target such as `proxy_pass https://...`.
 - `proxy_upstream_protocol h2c` requires a plaintext upstream target such as `proxy_pass http://...`.
 - Classic HTTP/1.1 WebSocket proxying works with plain `proxy_pass`; no extra `Upgrade` or `Connection` rewrite is required.
@@ -523,7 +599,8 @@ without enabling `forward_client_ip` has no runtime effect.
 
 Only plain IPv4 and IPv6 addresses are accepted in `X-Forwarded-For`; quoted
 values and addresses with ports are treated as invalid. This setting affects
-forwarded headers only and does not change the client IP seen by other plugins.
+forwarded headers only when no HTTP real-IP configuration is present. Configure
+`set_real_ip_from` at HTTP scope to share the resolved identity with ACL and other plugins.
 
 ### `basic_auth` / `basic-auth`
 
@@ -760,7 +837,7 @@ The JSON access log is written to stdout on every request (always on):
 Each line is a JSON object:
 
 ```json
-{"method":"GET","path":"/api/users","status":200,"latency_secs":0.042,"upstream":"10.0.0.5:8080","cache_status":"miss","client_ip":"192.168.1.1:54321","route_id":1}
+{"method":"GET","path":"/api/users","status":200,"latency_secs":0.042,"upstream":"10.0.0.5:8080","cache_status":"miss","client_ip":"192.168.1.1","peer_addr":"192.168.1.1:54321","route_id":1}
 ```
 
 Fields:
@@ -773,7 +850,8 @@ Fields:
 | `latency_secs` | f64 | Request duration in seconds. |
 | `upstream` | string? | Upstream `host:port` (absent for redirects/cache hits). |
 | `cache_status` | string? | `hit`, `miss`, or `bypass`. |
-| `client_ip` | string? | Client socket address. |
+| `client_ip` | string? | Effective client IP. |
+| `peer_addr` | string? | Original socket peer, including port. |
 | `route_id` | u64? | Matched location route ID. |
 | `request_id` | string? | Value of `X-Request-Id` header, if present. |
 

@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+#[cfg(unix)]
+mod reload;
+
 #[derive(Debug)]
 struct CliArgs {
     config_path: PathBuf,
@@ -71,6 +74,9 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: CliArgs) -> Result<(), String> {
+    let mut cli = cli;
+    cli.config_path = std::path::absolute(&cli.config_path)
+        .map_err(|e| format!("failed to resolve config path: {e}"))?;
     let router = load_router(&cli.config_path)?;
     let version = format!("file:{}", cli.config_path.display());
     let state = Arc::new(RuntimeState::new(ConfigSnapshot::new(version, router)));
@@ -92,6 +98,11 @@ fn run(cli: CliArgs) -> Result<(), String> {
     let mut server = Server::new(None::<Opt>)
         .map_err(|err| format!("failed to create pingora server: {err}"))?;
     server.bootstrap();
+    #[cfg(unix)]
+    server.add_service(background_service(
+        "config reload",
+        reload::ConfigReload::new(cli.config_path.clone(), control.clone())?,
+    ));
 
     // Configure OpenTelemetry if an endpoint is given (exporter built lazily).
     if let Some(ref endpoint) = cli.otel_endpoint {
@@ -117,7 +128,11 @@ fn run(cli: CliArgs) -> Result<(), String> {
         ngxora_runtime::geoip::GeoIpService::new(Arc::clone(&state)),
     ));
 
-    let mut proxy = pingora_proxy::http_proxy_service(&server.configuration, dynamic_proxy);
+    let mut proxy = ngxora_runtime::server::client_timeouts::http_proxy_service(
+        &server.configuration,
+        dynamic_proxy,
+        Arc::clone(&state),
+    );
     let upstream_health_checks = background_service(
         "upstream health checks",
         RuntimeUpstreamHealthChecks::new(Arc::clone(&state)),

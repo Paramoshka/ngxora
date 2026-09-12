@@ -340,6 +340,21 @@ fn proto_routes_from_runtime(routes: &ServerRoutes) -> Result<Vec<ProtoRoute>, S
 
 fn proto_route_from_runtime(route: &CompiledLocation) -> Result<ProtoRoute, String> {
     Ok(ProtoRoute {
+        access_rules: route
+            .access_rules
+            .iter()
+            .map(super::client_policy::access_to_proto)
+            .collect(),
+        allowed_methods: route.client_limits.allowed_methods.clone(),
+        client_max_body_size_bytes: route.client_limits.max_body_size,
+        client_body_timeout_ms: route
+            .client_limits
+            .body_timeout
+            .map(|v| v.as_millis() as u64),
+        send_timeout_ms: route
+            .client_limits
+            .send_timeout
+            .map(|v| v.as_millis() as u64),
         url_rewrite: route.url_rewrite.as_ref().map(|rewrite| proto::UrlRewrite {
             hostname: rewrite.hostname.clone(),
             path: rewrite.path.as_ref().map(modifier_to_proto),
@@ -516,6 +531,13 @@ fn proto_plugin_from_runtime(plugin: &PluginSpec) -> Result<ProtoPlugin, String>
 
 fn proto_http_options_from_runtime(options: &HttpRuntimeOptions) -> ProtoHttpOptions {
     ProtoHttpOptions {
+        real_ip: options
+            .real_ip
+            .as_ref()
+            .map(super::client_policy::real_ip_to_proto),
+        client_header_timeout_ms: options.client_header_timeout.map(|v| v.as_millis() as u64),
+        client_body_timeout_ms: options.client_body_timeout.map(|v| v.as_millis() as u64),
+        send_timeout_ms: options.send_timeout.map(|v| v.as_millis() as u64),
         downstream_keepalive_timeout_seconds: options.downstream_keepalive_timeout.unwrap_or(0),
         tcp_nodelay: options.tcp_nodelay,
         keepalive_requests: options.keepalive_requests.unwrap_or(0),

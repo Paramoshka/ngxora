@@ -26,12 +26,26 @@ impl CompiledRouter {
         }
 
         http.http2.validate()?;
+        if let Some(config) = &http.real_ip {
+            config.validate()?;
+        }
+        for value in [
+            http.client_header_timeout,
+            http.client_body_timeout,
+            http.send_timeout,
+        ] {
+            ngxora_compile::ir::validate_client_timeout(value)?;
+        }
         if let Some(config) = &http.geoip {
             config.validate()?;
         }
         let mut router = Self {
             upstreams: compile_upstreams(&http.upstreams)?,
             http_options: HttpRuntimeOptions {
+                real_ip: http.real_ip.clone(),
+                client_header_timeout: http.client_header_timeout,
+                client_body_timeout: http.client_body_timeout,
+                send_timeout: http.send_timeout,
                 downstream_keepalive_timeout: downstream_keepalive_timeout_secs(
                     &http.keepalive_timeout,
                 ),
@@ -67,6 +81,25 @@ impl CompiledRouter {
             router.add_server(server, &mut next_route_id)?;
         }
 
+        // Pingora 0.9's downstream set_read_timeout is a no-op for H2.
+        // Reject an unenforceable policy instead of silently accepting it.
+        for server in &http.servers {
+            let accepts_h2 = server.listens.iter().any(|l| {
+                (l.ssl && (l.http2 || l.http2_only)) || (!l.ssl && matches!(http.h2c, Switch::On))
+            });
+            if accepts_h2 && (http.client_body_timeout.is_some_and(|d| !d.is_zero())
+                || server.locations.iter().any(|l| l.directives.iter().any(|d|
+                    matches!(d, ngxora_compile::ir::LocationDirective::ClientBodyTimeout(v) if !v.is_zero())))) {
+                return Err("client_body_timeout is not supported on HTTP/2 listeners by Pingora 0.9; disable HTTP/2 or omit the body timeout".into());
+            }
+        }
+        // Plaintext protocol detection happens before HttpServerApp and may wait
+        // for the H2 preface. Our H1 header deadline cannot cover that wait.
+        if matches!(http.h2c, Switch::On)
+            && http.client_header_timeout.is_some_and(|v| !v.is_zero())
+        {
+            return Err("client_header_timeout requires h2c off; Pingora performs plaintext protocol detection before the header deadline".into());
+        }
         Ok(router)
     }
 

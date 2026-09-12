@@ -28,6 +28,7 @@ use proto::{
     GetSnapshotRequest as ProtoGetSnapshotRequest,
 };
 
+mod client_policy;
 mod decode;
 mod encode;
 mod http_routes;

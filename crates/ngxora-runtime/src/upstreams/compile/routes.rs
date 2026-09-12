@@ -383,6 +383,7 @@ fn compile_location(
         _ => {}
     }
     let compiled = CompiledLocation {
+        client_limits: compile_client_limits(location)?,
         url_rewrite,
         route_id: *next_route_id,
         matcher,
@@ -422,6 +423,45 @@ pub(super) fn compile_locations(
             Err(err) => Some(Err(err)),
         })
         .collect()
+}
+
+fn compile_client_limits(location: &Location) -> Result<ngxora_compile::ir::ClientLimits, String> {
+    let mut limits = ngxora_compile::ir::ClientLimits::default();
+    let mut seen_methods = false;
+    for directive in &location.directives {
+        match directive {
+            LocationDirective::ClientMaxBodySize(value) => {
+                if limits.max_body_size.is_some() {
+                    return Err("client_max_body_size is duplicated in location".into());
+                }
+                limits.max_body_size = Some(*value);
+            }
+            LocationDirective::ClientBodyTimeout(value) => {
+                set_timeout_once(&mut limits.body_timeout, *value, "client_body_timeout")?;
+            }
+            LocationDirective::SendTimeout(value) => {
+                set_timeout_once(&mut limits.send_timeout, *value, "send_timeout")?;
+            }
+            LocationDirective::AllowMethods(methods) => {
+                if seen_methods || methods.is_empty() {
+                    return Err("allow_methods must be nonempty and declared once".into());
+                }
+                seen_methods = true;
+                for method in methods {
+                    http::Method::from_bytes(method.as_bytes())
+                        .map_err(|_| "invalid allowed HTTP method")?;
+                    if !limits.allowed_methods.contains(method) {
+                        limits.allowed_methods.push(method.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for timeout in [limits.body_timeout, limits.send_timeout] {
+        ngxora_compile::ir::validate_client_timeout(timeout)?;
+    }
+    Ok(limits)
 }
 
 fn validate_direct_status(status: u16) -> Result<(), String> {

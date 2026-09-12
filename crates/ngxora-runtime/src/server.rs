@@ -11,7 +11,8 @@ use pingora::listeners::ALPN;
 use pingora::listeners::tls::TlsSettings;
 use pingora::services::listening::Service;
 use pingora::tls::ssl::{SslVerifyMode, SslVersion};
-use pingora_proxy::{HttpProxy, ProxyHttp};
+pub mod client_timeouts;
+use client_timeouts::ClientTimeoutProxy;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -400,13 +401,10 @@ fn required_verify_mode() -> SslVerifyMode {
     SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT
 }
 
-fn configure_proxy_service<SV>(
-    svc: &mut Service<HttpProxy<SV, ()>>,
+fn configure_proxy_service(
+    svc: &mut Service<ClientTimeoutProxy>,
     router: &CompiledRouter,
-) -> Result<()>
-where
-    SV: ProxyHttp,
-{
+) -> Result<()> {
     let proxy = svc.app_logic_mut().ok_or_else(|| {
         pingora::Error::explain(
             pingora::ErrorType::InternalError,
@@ -414,6 +412,12 @@ where
         )
     })?;
 
+    let proxy = Arc::get_mut(&mut proxy.inner).ok_or_else(|| {
+        pingora::Error::explain(
+            pingora::ErrorType::InternalError,
+            "proxy already shared during configuration",
+        )
+    })?;
     let mut options = HttpServerOptions::default();
     options.h2c = router.http_options.h2c;
     options.allow_connect_method_proxying = router.http_options.allow_connect_method_proxying;
@@ -477,14 +481,11 @@ fn listener_tls<'a>(
 
 // Bind each unique socket once. Virtual hosts, SNI maps, and route selection
 // are handled later from the compiled runtime snapshot.
-fn bind_listeners<SV>(
-    svc: &mut Service<HttpProxy<SV, ()>>,
+fn bind_listeners(
+    svc: &mut Service<ClientTimeoutProxy>,
     router: &CompiledRouter,
     state: Arc<RuntimeState>,
-) -> Result<()>
-where
-    SV: ProxyHttp,
-{
+) -> Result<()> {
     configure_proxy_service(svc, router)?;
 
     for key in sorted_listener_keys(router) {
@@ -503,26 +504,20 @@ where
     Ok(())
 }
 
-pub fn bind_listeners_from_state<SV>(
-    svc: &mut Service<HttpProxy<SV, ()>>,
+pub fn bind_listeners_from_state(
+    svc: &mut Service<ClientTimeoutProxy>,
     state: Arc<RuntimeState>,
-) -> Result<()>
-where
-    SV: ProxyHttp,
-{
+) -> Result<()> {
     let snapshot = state.snapshot();
     bind_listeners(svc, &snapshot.router, state)
 }
 
 // Bind one endpoint per unique listen socket. Virtual hosts sharing the same
 // addr:port are routed later via CompiledRouter.
-pub fn bind_listeners_from_router<SV>(
-    svc: &mut Service<HttpProxy<SV, ()>>,
+pub fn bind_listeners_from_router(
+    svc: &mut Service<ClientTimeoutProxy>,
     router: &CompiledRouter,
-) -> Result<()>
-where
-    SV: ProxyHttp,
-{
+) -> Result<()> {
     bind_listeners(
         svc,
         router,

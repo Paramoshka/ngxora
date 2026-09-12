@@ -19,6 +19,7 @@ async-trait = "0.1.89"
 bytes = "1"
 futures = "0.3"
 http = "1"
+ipnet = "2"
 hyper-util = { version = "0.1", features = ["tokio"] }
 ngxora-compile = { path = "../ngxora-compile" }
 ngxora-plugin-api = { path = "../ngxora-plugin-api" }

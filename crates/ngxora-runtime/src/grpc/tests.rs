@@ -109,6 +109,10 @@ fn test_route_plugins() -> Vec<PluginSpec> {
 
 fn router_with_tls_and_plugin() -> CompiledRouter {
     let http = Http {
+        real_ip: None,
+        client_header_timeout: None,
+        client_body_timeout: None,
+        send_timeout: None,
         scp_profiles: Vec::new(),
         upstreams: vec![UpstreamBlock {
             allow_empty: false,

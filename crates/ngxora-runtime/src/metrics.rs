@@ -354,6 +354,8 @@ struct AccessLogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     client_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    peer_addr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     route_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
@@ -365,6 +367,7 @@ struct AccessLogEntry {
 
 /// Write a structured JSON access log line.
 pub(crate) struct AccessLogContext<'a> {
+    pub client_ip: Option<std::net::IpAddr>,
     pub geoip: &'a crate::geoip::GeoIpRecord,
     pub method: &'a str,
     pub path: &'a str,
@@ -379,6 +382,7 @@ pub(crate) struct AccessLogContext<'a> {
 
 pub(crate) fn write_access_log(session: &Session, context: AccessLogContext<'_>) {
     let AccessLogContext {
+        client_ip,
         geoip,
         method,
         path,
@@ -392,7 +396,8 @@ pub(crate) fn write_access_log(session: &Session, context: AccessLogContext<'_>)
     } = context;
     let latency_secs = latency.map(|d| d.as_secs_f64());
 
-    let client_ip = session.as_downstream().client_addr().map(|a| a.to_string());
+    let peer_addr = session.as_downstream().client_addr().map(|a| a.to_string());
+    let client_ip = client_ip.map(|ip| ip.to_string());
 
     let request_id = session
         .req_header()
@@ -413,6 +418,7 @@ pub(crate) fn write_access_log(session: &Session, context: AccessLogContext<'_>)
         bytes_sent: None,
         client_ip,
         route_id,
+        peer_addr,
         request_id,
         nf_instance_id: nf.map(|m| m.nf_instance_id.clone()),
         nf_service_instance_id: nf.map(|m| m.service_instance_id.clone()),

@@ -58,6 +58,15 @@ http {
 
 ## Reload Matrix
 
+On Unix, send `SIGHUP` to ngxora to reread its original text configuration and
+includes: `kill -HUP <pid>` or `docker kill --signal=HUP <container>`. Parsing,
+compilation, plugin and TLS validation use the same snapshot application path as
+gRPC. Invalid changes and changes requiring restart leave the current snapshot
+active; the reason is written to stderr. Successful reloads report the new
+generation. A reload applies the whole file configuration, so it replaces any
+intervening gRPC configuration. Use one configuration owner per deployment.
+The GeoIP database watcher remains independent of text-config reload.
+
 | Option | Scope | gRPC ApplySnapshot | Notes |
 | --- | --- | --- | --- |
 | `geoip` | HTTP | Restart | Local MMDB contents reload automatically; City/Country enrich upstream headers and access logs |
@@ -72,7 +81,11 @@ http {
 | `server_name` | virtual host | Live | Host routing updates without restart |
 | `ssl_certificate` / `ssl_certificate_key` | TLS identity | Live | Works for existing TLS listeners through runtime SNI cert lookup; successful Let's Encrypt renewals are used by new TLS handshakes without restart |
 | plugin config | route | Live | Only if plugin code is already compiled into the binary |
-| `client_max_body_size` | http | Live | Prechecked via `Content-Length` and enforced while streaming request body |
+| `allow` / `deny`, `allow_methods` | route | Live | Ordered ACL and method allowlist survive GetSnapshot/ApplySnapshot |
+| `set_real_ip_from`, `real_ip_header`, `real_ip_recursive` | http | Live | Shared identity resolved before plugins |
+| `client_header_timeout` | http | Live | HTTP/1 header deadline, including keepalive reuse; applies to new sessions |
+| `client_body_timeout`, `send_timeout` | http, route | Live | Route overrides; HTTP/2 body timeout is unsupported and rejected |
+| `client_max_body_size` | http, route | Live | Route override; Content-Length precheck and streaming body enforcement |
 | `keepalive_timeout` | http | Live | Applied per downstream session in request path |
 | `listen addr:port` | listener | Restart required | New or removed socket cannot be rebound live |
 | `listen ... ssl` | listener | Restart required | Transport stack changes |

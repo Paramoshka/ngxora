@@ -260,6 +260,10 @@ See the [reload matrix](./docs/README.md), [snapshot schema](./docs/snapshot-sch
 and [Go SDK guide](./sdk/go/README.md) for the complete control-plane contract,
 TCP mTLS setup, and live/restart boundaries.
 
+On Unix, `kill -HUP <pid>` rereads the text config and its includes through the
+same snapshot pipeline. Invalid changes leave the active config intact; changes
+to listener topology still require a restart.
+
 ## Plugins
 
 Plugins are compiled in, not loaded through unstable runtime ABI tricks.

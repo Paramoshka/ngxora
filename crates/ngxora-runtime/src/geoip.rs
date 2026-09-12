@@ -164,6 +164,10 @@ impl GeoIp {
             &self.config.trusted_proxies,
         )
         .and_then(|chain| chain.first().copied());
+        self.lookup_ip(ip)
+    }
+
+    pub(crate) fn lookup_ip(&self, ip: Option<IpAddr>) -> GeoIpRecord {
         let reader = self.reader.load();
         let (Some(ip), Some(reader)) = (ip, reader.as_ref()) else {
             return GeoIpRecord::default();

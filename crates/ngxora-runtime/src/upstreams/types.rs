@@ -204,6 +204,7 @@ use ngxora_compile::ir::CacheConfig;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CompiledLocation {
+    pub client_limits: ngxora_compile::ir::ClientLimits,
     pub url_rewrite: Option<ngxora_compile::ir::UrlRewrite>,
     pub route_id: u64,
     pub matcher: CompiledMatcher,
@@ -269,6 +270,10 @@ pub struct ListenerTlsConfig {
 // Pingora proxy service and request filters.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct HttpRuntimeOptions {
+    pub real_ip: Option<ngxora_compile::ir::RealIpConfig>,
+    pub client_header_timeout: Option<std::time::Duration>,
+    pub client_body_timeout: Option<std::time::Duration>,
+    pub send_timeout: Option<std::time::Duration>,
     pub downstream_keepalive_timeout: Option<u64>,
     pub keepalive_requests: Option<u32>,
     pub client_max_body_size: Option<u64>,

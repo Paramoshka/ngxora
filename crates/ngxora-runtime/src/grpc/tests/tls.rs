@@ -32,6 +32,11 @@ fn proto_snapshot_roundtrips_upstream_client_certificate() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                access_rules: vec![],
+                allowed_methods: vec![],
+                client_max_body_size_bytes: None,
+                client_body_timeout_ms: None,
+                send_timeout_ms: None,
                 url_rewrite: None,
                 upstream_http2: None,
                 r#match: Some(proto::Match {
@@ -111,6 +116,11 @@ fn proto_snapshot_rejects_client_cert_without_key() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                access_rules: vec![],
+                allowed_methods: vec![],
+                client_max_body_size_bytes: None,
+                client_body_timeout_ms: None,
+                send_timeout_ms: None,
                 url_rewrite: None,
                 upstream_http2: None,
                 r#match: Some(proto::Match {
@@ -172,6 +182,11 @@ fn proto_upstream_tls_options_roundtrips_client_certificate() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                access_rules: vec![],
+                allowed_methods: vec![],
+                client_max_body_size_bytes: None,
+                client_body_timeout_ms: None,
+                send_timeout_ms: None,
                 url_rewrite: None,
                 upstream_http2: None,
                 r#match: Some(proto::Match {
@@ -277,6 +292,11 @@ fn proto_rejects_client_certificate_without_key() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                access_rules: vec![],
+                allowed_methods: vec![],
+                client_max_body_size_bytes: None,
+                client_body_timeout_ms: None,
+                send_timeout_ms: None,
                 url_rewrite: None,
                 upstream_http2: None,
                 r#match: Some(proto::Match {

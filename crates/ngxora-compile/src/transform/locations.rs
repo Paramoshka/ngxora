@@ -320,6 +320,27 @@ fn parse_proxy_upstream_protocol(args: &[String]) -> Result<UpstreamHttpProtocol
 
 fn apply_location_directive(directive: &Directive) -> Result<LocationDirective, LowerErr> {
     match directive.name.as_str() {
+        "allow_methods" => {
+            if directive.args.is_empty() {
+                return Err(LowerErr {
+                    message: "allow_methods requires at least one method".into(),
+                });
+            }
+            Ok(LocationDirective::AllowMethods(directive.args.clone()))
+        }
+        "client_max_body_size" => {
+            let raw = parse_exactly_one_argument(&directive.args, &directive.name)?;
+            Ok(LocationDirective::ClientMaxBodySize(parse_size_literal(
+                &raw,
+                &directive.name,
+            )?))
+        }
+        "client_body_timeout" => Ok(LocationDirective::ClientBodyTimeout(
+            parse_single_duration_directive(&directive.args, &directive.name)?,
+        )),
+        "send_timeout" => Ok(LocationDirective::SendTimeout(
+            parse_single_duration_directive(&directive.args, &directive.name)?,
+        )),
         "proxy_http2_max_concurrent_streams" => {
             Ok(LocationDirective::ProxyHttp2MaxConcurrentStreams(
                 super::values::parse_http2_value(directive)?,

@@ -57,6 +57,7 @@ fn nrf_api_prefix_preserves_root_path_separator() {
 
 fn cached_route(cache: CacheConfig, plugins: ngxora_plugin_api::PluginChain) -> SelectedRoute {
     SelectedRoute {
+        client_limits: Default::default(),
         url_rewrite: None,
         matched_prefix: None,
         route_id: 1,

@@ -209,6 +209,7 @@ async fn consistent_hash_header_requires_one_nonempty_value() {
                 "X-Tenant-ID".into(),
             )),
             &session,
+            None,
         )
         .expect("header key"),
         b"tenant-a"
@@ -228,6 +229,7 @@ async fn consistent_hash_header_requires_one_nonempty_value() {
             "X-Tenant-ID".into(),
         )),
         &session,
+        None,
     )
     .expect_err("repeated header and missing socket IP must fail");
     assert_eq!(err.etype(), &pingora::ErrorType::HTTPStatus(503));

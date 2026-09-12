@@ -36,6 +36,7 @@ fn router_with_route_plugin(port: u16, plugin_name: &str) -> CompiledRouter {
         ssl: false,
     };
     let location = CompiledLocation {
+        client_limits: Default::default(),
         url_rewrite: None,
         route_id: 1,
         matcher: CompiledMatcher::Prefix("/".into()),

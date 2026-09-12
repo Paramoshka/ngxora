@@ -1787,6 +1787,7 @@ name = "ngxora"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "bytes",
  "dashmap 6.2.1",
  "env_logger",

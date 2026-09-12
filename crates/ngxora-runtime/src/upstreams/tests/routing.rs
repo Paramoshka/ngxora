@@ -23,6 +23,7 @@ pub(super) fn target(id: &str) -> RouteTarget {
 
 pub(super) fn location(matcher: CompiledMatcher, id: &str) -> CompiledLocation {
     CompiledLocation {
+        client_limits: Default::default(),
         url_rewrite: None,
         route_id: 1,
         matcher,

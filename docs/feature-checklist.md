@@ -74,7 +74,8 @@ controller. See [snapshot semantics](snapshot-schema.md#httproute-dataplane-prim
 | `proxy_write_timeout` | ✅ | ✅ | ✅ | Live | |
 | `keepalive_timeout` | ✅ | ✅ | Bootstrap | Restart | |
 | `keepalive_requests` | ✅ | ✅ | Bootstrap | Restart | |
-| `client_max_body_size` | ✅ | ✅ | Bootstrap | Restart | Enforced per-request |
+| `client_max_body_size` | ✅ | ✅ | ✅ | Live | HTTP default and route override, including explicit zero |
+| Client timeouts | ✅ | ✅ | ✅ | Live | H1 header/body deadlines and H1/H2 downstream write timeout; H2 body timeout rejected |
 | `tcp_nodelay` | 🟡 | `on` only | ✅ | Bootstrap | Pingora forces `TCP_NODELAY`; `off` is rejected |
 
 ## Caching
@@ -97,9 +98,11 @@ controller. See [snapshot semantics](snapshot-schema.md#httproute-dataplane-prim
 | `cors` | ✅ | ✅ | ✅ | request/response | Preflight + headers |
 | `basic-auth` | ✅ | ✅ | ✅ | request | RFC 7617 |
 | `jwt-auth` | ✅ | ✅ | ✅ | request | HS256/RS256/ES256/EdDSA, jsonwebtoken 10.3 |
-| `rate-limit` | ✅ | ✅ | ✅ | request | Per-IP sliding window |
+| `rate-limit` | ✅ | ✅ | ✅ | request | Per-IP fixed one-second window |
 | `ext-authz` | ✅ | ✅ | ✅ | request | External HTTP auth |
-| **IP allow/deny** | 🟡 | ✅ | 🔧 | request | nginx `allow`/`deny` analog in text config; gRPC path not exposed yet |
+| **IP allow/deny** | ✅ | ✅ | ✅ | request | Ordered ACL preserved by snapshots |
+| HTTP method allowlist | ✅ | ✅ | ✅ | request | `allow_methods`, 405 with Allow |
+| Shared real client IP | ✅ | ✅ | ✅ | request | HTTP trust settings shared by ACL, plugins, GeoIP, hashing and logs |
 
 ## Observability
 
@@ -130,7 +133,7 @@ controller. See [snapshot semantics](snapshot-schema.md#httproute-dataplane-prim
 | Dry-run `--check` | ✅ | `ngxora --check ngxora.conf` |
 | Liveness probe (`GET /healthz`) | ✅ | Served by `--metrics-addr` alongside `/metrics` |
 | Readiness probe (`GET /readyz`) | ✅ | Active listeners + valid, current TLS cert/key material |
-| Graceful reload (SIGHUP) | 💤 | Use gRPC for live updates |
+| Text config reload (SIGHUP) | ✅ | Unix; includes, validation and atomic snapshot application; invalid changes retain current config |
 | Let's Encrypt / ACME | ✅ | `instant-acme`, HTTP-01 challenges, background reconciler every 1h |
 | Admin API endpoint | 💤 | Runtime inspection: routes, stats, cache |
 
@@ -143,13 +146,13 @@ controller. See [snapshot semantics](snapshot-schema.md#httproute-dataplane-prim
 1. ✅ **Fail-closed cache safety** — authentication runs before lookup; private/conditional requests bypass; snapshots and hosts are isolated; response buffering is bounded.
 2. ✅ **Safe management defaults** — TCP gRPC requires mTLS for every bind; prefer gRPC UDS for local agents.
 3. ✅ **Non-panicking IR validation** — unsupported programmatic IR is rejected before runtime.
-4. 🔴 **Externalize rate-limit and cache backends** — both are in-process (`DashMap`), not shared across replicas. Add an optional shared backend before relying on consistent limits/cache across replicas.
+4. 🔴 **Externalize rate-limit and cache backends** — both are in-process, not shared across replicas. Add an optional shared backend before relying on consistent limits/cache across replicas.
 
 ## Useful before real load
 
 5. ✅ **Separate liveness/readiness endpoints** — `/healthz` checks the process; `/readyz` checks active config and TLS material.
 6. ✅ **IP allow/deny** — `allow 10.0.0.0/8; deny all;` inside `location {}`.
-7. 🔧 **SIGHUP live-reload for text config** — currently only gRPC `ApplySnapshot` or full restart.
+7. ✅ **SIGHUP live-reload for text config** — uses the snapshot pipeline; transport changes still require restart.
 8. 🔧 **PROXY protocol for trusted L4 load balancers** — requires a pre-TLS integration point in the listener stack.
 
 ## Nice to have

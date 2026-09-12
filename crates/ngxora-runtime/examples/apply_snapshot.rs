@@ -109,6 +109,10 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
         scp_profiles: Vec::new(),
         version: cli.version.clone(),
         http: Some(HttpOptions {
+            real_ip: None,
+            client_header_timeout_ms: None,
+            client_body_timeout_ms: None,
+            send_timeout_ms: None,
             http2: None,
             downstream_keepalive_timeout_seconds: 30,
             tcp_nodelay: true,
@@ -134,6 +138,11 @@ fn build_snapshot(cli: &CliArgs) -> ConfigSnapshot {
             default_server: true,
             tls: None,
             routes: vec![Route {
+                access_rules: vec![],
+                allowed_methods: vec![],
+                client_max_body_size_bytes: None,
+                client_body_timeout_ms: None,
+                send_timeout_ms: None,
                 upstream_http2: None,
                 url_rewrite: None,
                 r#match: Some(Match {

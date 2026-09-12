@@ -52,7 +52,7 @@ pub(super) fn runtime_snapshot_from_proto(
 // Reconstruct the shared IR shape from the wire snapshot so protobuf input goes
 // through the same validation and compilation path as other config sources.
 fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, String> {
-    let options = snapshot.http.unwrap_or_default();
+    let options = snapshot.http.clone().unwrap_or_default();
     let listener_defs = listener_defs(&snapshot.listeners)?;
     let mut servers = Vec::with_capacity(snapshot.virtual_hosts.len());
 
@@ -84,6 +84,14 @@ fn http_from_proto_snapshot(snapshot: &ProtoConfigSnapshot) -> Result<Http, Stri
         ),
         keepalive_requests: none_if_zero(options.keepalive_requests),
         client_max_body_size: none_if_zero_u64(options.client_max_body_size_bytes),
+        real_ip: options
+            .real_ip
+            .as_ref()
+            .map(super::client_policy::real_ip_from_proto)
+            .transpose()?,
+        client_header_timeout: options.client_header_timeout_ms.map(Duration::from_millis),
+        client_body_timeout: options.client_body_timeout_ms.map(Duration::from_millis),
+        send_timeout: options.send_timeout_ms.map(Duration::from_millis),
         // Pingora enables TCP_NODELAY on accepted downstream sockets, and
         // proto3 bool cannot distinguish "unset" from explicit false.
         tcp_nodelay: Switch::On,
@@ -384,10 +392,30 @@ fn location_from_proto_route(route: &ProtoRoute) -> Result<Location, String> {
             path: rewrite.path.as_ref().map(modifier_from_proto).transpose()?,
         }));
     }
+    if let Some(value) = route.client_max_body_size_bytes {
+        directives.push(LocationDirective::ClientMaxBodySize(value));
+    }
+    if let Some(value) = route.client_body_timeout_ms {
+        directives.push(LocationDirective::ClientBodyTimeout(Duration::from_millis(
+            value,
+        )));
+    }
+    if let Some(value) = route.send_timeout_ms {
+        directives.push(LocationDirective::SendTimeout(Duration::from_millis(value)));
+    }
+    if !route.allowed_methods.is_empty() {
+        directives.push(LocationDirective::AllowMethods(
+            route.allowed_methods.clone(),
+        ));
+    }
     Ok(Location {
         matcher,
         directives,
-        access_rules: Vec::new(),
+        access_rules: route
+            .access_rules
+            .iter()
+            .map(super::client_policy::access_from_proto)
+            .collect::<Result<_, _>>()?,
         plugins: route
             .plugins
             .iter()

@@ -136,3 +136,31 @@ New fields round-trip through GetSnapshot and apply live on existing listeners.
 Invalid snapshots preserve the current configuration. Existing protobuf field
 numbers and nginx match semantics are unchanged. Deploy the new dataplane before
 controllers start using these additions; old dataplanes cannot interpret them.
+
+## Client policy
+
+`Route.access_rules` is an ordered list of `IpAccessRule { action, source }`.
+Action must explicitly be `ALLOW` or `DENY`; source is an IP, CIDR, or `all`.
+The first matching rule wins. An empty list allows all clients; a nonempty list
+with no match denies access, matching the existing ngxora text-config semantics.
+Unknown actions and invalid networks reject the complete snapshot. GetSnapshot
+preserves the rule order and exports individual IPs as /32 or /128 networks.
+
+`HttpOptions.real_ip` supplies trusted proxy networks, `header` (default
+X-Forwarded-For), and optional `recursive` (default true). Presence enables the
+shared client identity for ACL, plugins, GeoIP, hashing and logs; an empty trusted
+list trusts no forwarding headers. Absence retains legacy configuration behavior.
+
+`Route.allowed_methods` is an ordered, case-sensitive list. Empty means no method
+restriction. Repeated methods are deduplicated in order; invalid method tokens
+reject the snapshot. GET, HEAD and OPTIONS are independent entries. Rejected
+methods receive 405 with the list in `Allow`.
+
+`HttpOptions.client_header_timeout_ms`, `client_body_timeout_ms`, `send_timeout_ms`
+are optional millisecond durations. Route fields `client_body_timeout_ms`,
+`send_timeout_ms`, and `client_max_body_size_bytes` are overrides: absent inherits,
+explicit zero disables. These fields are live configuration. See
+[client policy and protocol limitations](config-options.md#client-identity-and-request-policy).
+
+Deploy the updated dataplane before using these fields: older protobuf readers
+ignore unknown fields and cannot enforce these policies.

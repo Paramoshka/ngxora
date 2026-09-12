@@ -10,6 +10,52 @@ use ipnet::IpNet;
 use url::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealIpConfig {
+    pub trusted_proxies: Vec<IpNet>,
+    pub header: String,
+    pub recursive: bool,
+}
+
+impl Default for RealIpConfig {
+    fn default() -> Self {
+        Self {
+            trusted_proxies: Vec::new(),
+            header: "X-Forwarded-For".into(),
+            recursive: true,
+        }
+    }
+}
+
+impl RealIpConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.header.eq_ignore_ascii_case("x-forwarded-for")
+            && !self.header.eq_ignore_ascii_case("x-real-ip")
+        {
+            return Err("real_ip_header must be X-Forwarded-For or X-Real-IP".into());
+        }
+        Ok(())
+    }
+}
+
+// Optional route overrides retain zero as an explicit disabled limit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientLimits {
+    pub max_body_size: Option<u64>,
+    pub body_timeout: Option<Duration>,
+    pub send_timeout: Option<Duration>,
+    pub allowed_methods: Vec<String>,
+}
+
+pub fn validate_client_timeout(value: Option<Duration>) -> Result<(), String> {
+    if value.is_some_and(|v| {
+        v.as_millis() > u64::MAX as u128 || !v.subsec_nanos().is_multiple_of(1_000_000)
+    }) {
+        return Err("client timeout must be whole milliseconds fitting uint64".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeoIpConfig {
     pub database: PathBuf,
     pub reload_interval: Duration,
@@ -63,6 +109,10 @@ pub struct Ir {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Http {
+    pub real_ip: Option<RealIpConfig>,
+    pub client_header_timeout: Option<Duration>,
+    pub client_body_timeout: Option<Duration>,
+    pub send_timeout: Option<Duration>,
     pub scp_profiles: Vec<ScpProfile>,
     pub upstreams: Vec<UpstreamBlock>,
     pub servers: Vec<Server>,
@@ -81,6 +131,10 @@ pub struct Http {
 impl Default for Http {
     fn default() -> Self {
         Self {
+            real_ip: None,
+            client_header_timeout: None,
+            client_body_timeout: None,
+            send_timeout: None,
             scp_profiles: Vec::new(),
             upstreams: Vec::new(),
             servers: Vec::new(),
@@ -382,6 +436,10 @@ pub enum LocationMatcher {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum LocationDirective {
+    ClientMaxBodySize(u64),
+    ClientBodyTimeout(Duration),
+    SendTimeout(Duration),
+    AllowMethods(Vec<String>),
     WeightedBackends(Vec<WeightedBackend>),
     DirectResponse(u16),
     HttpRedirect(HttpRedirect),

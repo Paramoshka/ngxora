@@ -38,6 +38,7 @@ enum SelectedTarget {
 
 #[derive(Clone)]
 pub(crate) struct SelectedRoute {
+    client_limits: ngxora_compile::ir::ClientLimits,
     url_rewrite: Option<ngxora_compile::ir::UrlRewrite>,
     matched_prefix: Option<String>,
     route_id: u64,
@@ -60,6 +61,7 @@ impl SelectedRoute {
 }
 
 pub struct ProxyContext {
+    pub(crate) client_ip: Option<std::net::IpAddr>,
     pub(crate) geoip: crate::geoip::GeoIpRecord,
     pub(crate) snapshot: Option<Arc<RuntimeSnapshot>>,
     pub(crate) response_plugins_applied: bool,
@@ -93,6 +95,7 @@ pub struct ProxyContext {
 impl Default for ProxyContext {
     fn default() -> Self {
         Self {
+            client_ip: None,
             geoip: crate::geoip::GeoIpRecord::default(),
             snapshot: None,
             response_plugins_applied: false,

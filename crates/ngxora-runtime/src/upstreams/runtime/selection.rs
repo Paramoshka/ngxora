@@ -114,6 +114,7 @@ impl SelectedRoute {
         };
 
         Ok(Self {
+            client_limits: resolved.location.client_limits.clone(),
             url_rewrite: resolved.location.url_rewrite.clone(),
             matched_prefix,
             route_id: resolved.location.route_id,
@@ -168,6 +169,7 @@ pub(super) fn select_backend_target(
     route_id: u64,
     target: &RouteTarget,
     session: &Session,
+    client_ip: Option<std::net::IpAddr>,
 ) -> PingoraResult<SelectedTarget> {
     let unavailable =
         || pingora::Error::explain(pingora::ErrorType::HTTPStatus(503), "no available backends");
@@ -184,7 +186,13 @@ pub(super) fn select_backend_target(
             let mut slot = counter.fetch_add(1, Ordering::Relaxed) % total;
             for backend in backends {
                 if slot < u64::from(backend.weight) {
-                    return select_backend_target(snapshot, route_id, &backend.target, session);
+                    return select_backend_target(
+                        snapshot,
+                        route_id,
+                        &backend.target,
+                        session,
+                        client_ip,
+                    );
                 }
                 slot -= u64::from(backend.weight);
             }
@@ -209,7 +217,7 @@ pub(super) fn select_backend_target(
                 .upstream_group(name)
                 .ok_or_else(|| runtime_config_error("missing upstream group"))?;
             let key = if group.uses_consistent_hash() {
-                upstream_selection_key(group.hash_key(), session)?
+                upstream_selection_key(group.hash_key(), session, client_ip)?
             } else {
                 Vec::new()
             };
@@ -230,6 +238,7 @@ pub(super) fn select_backend_target(
 pub(crate) fn upstream_selection_key(
     configured: Option<&UpstreamHashKey>,
     session: &Session,
+    client_ip: Option<std::net::IpAddr>,
 ) -> PingoraResult<Vec<u8>> {
     if let Some(UpstreamHashKey::Header(name)) = configured {
         let mut values = session.req_header().headers.get_all(name).iter();
@@ -240,7 +249,7 @@ pub(crate) fn upstream_selection_key(
         }
     }
 
-    request_client_ip(session)
+    client_ip
         .map(|ip| ip.to_string().into_bytes())
         .ok_or_else(|| {
             pingora::Error::explain(

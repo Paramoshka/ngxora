@@ -12,6 +12,82 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 #[test]
+fn client_policy_text_snapshot_round_trip_and_validation() {
+    let ast = ngxora_config::Ast::parse_config(
+        r#"http {
+        set_real_ip_from 127.0.0.1;
+        set_real_ip_from 2001:db8::/32;
+        real_ip_header X-Forwarded-For;
+        real_ip_recursive on;
+        client_header_timeout 2s;
+        client_body_timeout 3s;
+        send_timeout 4s;
+        client_max_body_size 1k;
+        server { listen 8080;
+            location / {
+                deny 192.0.2.1;
+                allow 192.0.2.0/24;
+                allow 2001:db8::/32;
+                deny all;
+                allow_methods GET HEAD POST;
+                client_max_body_size 0;
+                client_body_timeout 0;
+                send_timeout 5s;
+                return 302 https://example.test/;
+            }
+        }
+    }"#,
+    )
+    .unwrap();
+    let ir = ngxora_compile::ir::Ir::from_ast(&ast).unwrap();
+    let router = CompiledRouter::from_http(ir.http.as_ref().unwrap()).unwrap();
+    let state = RuntimeState::new(ConfigSnapshot::new("policy", router));
+    let wire = proto_snapshot_from_runtime(&state.snapshot()).unwrap();
+    let route = &wire.virtual_hosts[0].routes[0];
+    assert_eq!(route.access_rules.len(), 4);
+    assert_eq!(route.access_rules[0].source, "192.0.2.1/32");
+    assert_eq!(route.allowed_methods, ["GET", "HEAD", "POST"]);
+    assert_eq!(route.client_max_body_size_bytes, Some(0));
+    assert_eq!(route.client_body_timeout_ms, Some(0));
+    let decoded = runtime_snapshot_from_proto(wire.clone()).unwrap();
+    assert_eq!(decoded.router, state.snapshot().router);
+    assert!(state.apply_snapshot(decoded).applied);
+    for (action, source) in [(0, "all"), (99, "all"), (1, ""), (2, "bad"), (1, "::/129")] {
+        let mut bad = wire.clone();
+        bad.virtual_hosts[0].routes[0].access_rules[0] = proto::IpAccessRule {
+            action,
+            source: source.into(),
+        };
+        assert!(runtime_snapshot_from_proto(bad).is_err());
+    }
+    let mut bad = wire.clone();
+    bad.virtual_hosts[0].routes[0].allowed_methods = vec!["GET\r\nInjected: yes".into()];
+    assert!(runtime_snapshot_from_proto(bad).is_err());
+    let mut bad = wire.clone();
+    bad.http.as_mut().unwrap().real_ip.as_mut().unwrap().header = "Authorization".into();
+    assert!(runtime_snapshot_from_proto(bad).is_err());
+    assert_eq!(
+        proto_snapshot_from_runtime(&state.snapshot()).unwrap(),
+        wire
+    );
+    let mut h2 = wire.clone();
+    h2.http.as_mut().unwrap().h2c = true;
+    assert!(
+        runtime_snapshot_from_proto(h2)
+            .unwrap_err()
+            .contains("client_body_timeout")
+    );
+    let mut h2 = wire;
+    h2.http.as_mut().unwrap().h2c = true;
+    h2.http.as_mut().unwrap().client_body_timeout_ms = None;
+    assert!(
+        runtime_snapshot_from_proto(h2)
+            .unwrap_err()
+            .contains("client_header_timeout")
+    );
+}
+
+#[test]
 fn geoip_round_trip_validation_and_restart_boundary() {
     let config = proto::GeoIpConfig {
         database: "/missing.mmdb".into(),
@@ -94,6 +170,10 @@ fn proto_snapshot_converts_into_runtime_router() {
         geoip: None,
         scp_profiles: Vec::new(),
         http: Some(proto::HttpOptions {
+            real_ip: None,
+            client_header_timeout_ms: None,
+            client_body_timeout_ms: None,
+            send_timeout_ms: None,
             downstream_keepalive_timeout_seconds: 15,
             tcp_nodelay: true,
             keepalive_requests: 200,
@@ -154,6 +234,11 @@ fn proto_snapshot_converts_into_runtime_router() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                access_rules: vec![],
+                allowed_methods: vec![],
+                client_max_body_size_bytes: None,
+                client_body_timeout_ms: None,
+                send_timeout_ms: None,
                 url_rewrite: None,
                 upstream_http2: None,
                 r#match: Some(proto::Match {
@@ -313,6 +398,11 @@ fn proto_snapshot_defaults_tcp_nodelay_to_on() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                access_rules: vec![],
+                allowed_methods: vec![],
+                client_max_body_size_bytes: None,
+                client_body_timeout_ms: None,
+                send_timeout_ms: None,
                 url_rewrite: None,
                 upstream_http2: None,
                 r#match: Some(proto::Match {
@@ -361,6 +451,11 @@ fn proto_redirect_route_converts_into_runtime_return_target() {
             default_server: true,
             tls: None,
             routes: vec![proto::Route {
+                access_rules: vec![],
+                allowed_methods: vec![],
+                client_max_body_size_bytes: None,
+                client_body_timeout_ms: None,
+                send_timeout_ms: None,
                 url_rewrite: None,
                 upstream_http2: None,
                 r#match: Some(proto::Match {

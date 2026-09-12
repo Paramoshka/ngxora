@@ -97,6 +97,7 @@ impl DynamicProxy {
             crate::metrics::write_access_log(
                 session,
                 crate::metrics::AccessLogContext {
+                    client_ip: ctx.client_ip,
                     geoip: &ctx.geoip,
                     method: &method,
                     path: &path,

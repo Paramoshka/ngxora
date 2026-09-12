@@ -51,6 +51,27 @@ message HttpOptions {
   uint64 client_max_body_size_bytes = 6;
   uint64 proxy_cache_max_size_bytes = 7;
   Http2Options http2 = 8;
+  RealIpConfig real_ip = 9;
+  optional uint64 client_header_timeout_ms = 10;
+  optional uint64 client_body_timeout_ms = 11;
+  optional uint64 send_timeout_ms = 12;
+}
+
+message RealIpConfig {
+  repeated string trusted_proxies = 1;
+  // X-Forwarded-For (default) or X-Real-IP.
+  string header = 2;
+  optional bool recursive = 3; // defaults to true
+}
+
+message IpAccessRule {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ALLOW = 1;
+    DENY = 2;
+  }
+  Action action = 1;
+  string source = 2; // IP, CIDR, or "all"
 }
 
 message Listener {
@@ -107,6 +128,12 @@ message Route {
   RouteCache cache = 8;
   UrlRewrite url_rewrite = 13;
   UpstreamHttp2Options upstream_http2 = 14;
+  repeated IpAccessRule access_rules = 15;
+  // Empty means unrestricted. Methods are case-sensitive; GET does not imply HEAD.
+  repeated string allowed_methods = 16;
+  optional uint64 client_max_body_size_bytes = 17; // absent inherits; zero disables
+  optional uint64 client_body_timeout_ms = 18;
+  optional uint64 send_timeout_ms = 19;
 }
 
 message Redirect {

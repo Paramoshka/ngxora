@@ -120,6 +120,19 @@ impl ProxyHttp for DynamicProxy {
         ProxyContext::default()
     }
 
+    fn on_connection_reuse(
+        &self,
+        _session: &mut Session,
+        _ctx: &mut Self::CTX,
+        previous: Box<dyn std::any::Any + Send + Sync>,
+    ) {
+        if let Ok(complete) = previous.downcast::<crate::server::client_timeouts::HeaderComplete>()
+        {
+            // The receiver may have gone away when the header deadline expired.
+            let _ = complete.0.send(());
+        }
+    }
+
     // Request plugins run in declaration order and may terminate the request
     // locally before any upstream peer is selected.
     async fn request_filter(
@@ -127,9 +140,27 @@ impl ProxyHttp for DynamicProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> PingoraResult<bool> {
+        let snapshot = self.state.snapshot();
+        ctx.client_ip = request_client_ip(session);
+        if let Some(config) = &snapshot.router.http_options.real_ip {
+            let chain = ngxora_plugin_api::client_ip::resolve_headers(
+                ctx.client_ip,
+                &session.req_header().headers,
+                &config.header,
+                &config.trusted_proxies,
+                config.recursive,
+            );
+            ctx.client_ip = chain.as_ref().and_then(|c| c.first().copied());
+            ctx.plugin_state
+                .extensions
+                .insert(ngxora_plugin_api::client_ip::ResolvedClientIp { chain });
+        }
         if let Some(geoip) = &self.state.geoip {
-            ctx.geoip =
-                geoip.lookup_request(request_client_ip(session), &session.req_header().headers);
+            ctx.geoip = if snapshot.router.http_options.real_ip.is_some() {
+                geoip.lookup_ip(ctx.client_ip)
+            } else {
+                geoip.lookup_request(ctx.client_ip, &session.req_header().headers)
+            };
             crate::geoip::remove_headers(session.req_header_mut());
         }
         // ── Tracing: extract parent context from downstream headers ──
@@ -141,8 +172,12 @@ impl ProxyHttp for DynamicProxy {
             opentelemetry::Context::new().with_remote_span_context(span.span_context().clone());
         ctx.span = Some(span);
 
-        let snapshot = self.state.snapshot();
         session.set_keepalive(snapshot.router.http_options.downstream_keepalive_timeout);
+        apply_client_timeouts(
+            session,
+            snapshot.router.http_options.client_body_timeout,
+            snapshot.router.http_options.send_timeout,
+        );
         ctx.snapshot = Some(snapshot.clone());
         ctx.snapshot_generation = snapshot.generation;
         ctx.client_max_body_size = snapshot.router.http_options.client_max_body_size;
@@ -150,10 +185,6 @@ impl ProxyHttp for DynamicProxy {
 
         self.cache_backend
             .advance_generation(self.state.generation());
-
-        if restrict_client_max_body_size(session, ctx).await? {
-            return Ok(true);
-        }
 
         // Let's Encrypt HTTP-01 challenge responder.
         if let Some(token) = session
@@ -178,10 +209,27 @@ impl ProxyHttp for DynamicProxy {
 
         let Some((mut selected, host)) = select_runtime_route(&snapshot, session)? else {
             ctx.selected = None;
-            return Ok(false);
+            return restrict_client_max_body_size(session, ctx).await;
         };
 
         ctx.selected = Some(selected.clone());
+        if let Some(limit) = selected.client_limits.max_body_size {
+            ctx.client_max_body_size = (limit != 0).then_some(limit);
+        }
+        apply_client_timeouts(
+            session,
+            selected
+                .client_limits
+                .body_timeout
+                .or(snapshot.router.http_options.client_body_timeout),
+            selected
+                .client_limits
+                .send_timeout
+                .or(snapshot.router.http_options.send_timeout),
+        );
+        if restrict_client_max_body_size(session, ctx).await? {
+            return Ok(true);
+        }
         let method = session.req_header().method.clone();
         let request_was_cacheable = is_cacheable_request(&method, &session.req_header().headers);
         if authorize_request(session, ctx, &selected, host.as_deref()).await? {
@@ -197,7 +245,13 @@ impl ProxyHttp for DynamicProxy {
         }
 
         if let SelectedTarget::Pending(target) = &selected.target {
-            selected.target = select_backend_target(&snapshot, selected.route_id, target, session)?;
+            selected.target = select_backend_target(
+                &snapshot,
+                selected.route_id,
+                target,
+                session,
+                ctx.client_ip,
+            )?;
             ctx.selected = Some(selected.clone());
         }
         respond_to_selected_target(session, ctx, &selected).await
@@ -390,6 +444,11 @@ impl ProxyHttp for DynamicProxy {
         }
         let code = match proxy_error.etype() {
             pingora::ErrorType::HTTPStatus(code) => *code,
+            pingora::ErrorType::ReadTimedout
+                if proxy_error.esource() == &pingora::ErrorSource::Downstream =>
+            {
+                408
+            }
             _ => match proxy_error.esource() {
                 pingora::ErrorSource::Upstream => 502,
                 pingora::ErrorSource::Downstream => 400,
@@ -536,7 +595,13 @@ impl ProxyHttp for DynamicProxy {
                 .snapshot
                 .clone()
                 .unwrap_or_else(|| self.state.snapshot());
-            selected.target = select_backend_target(&snapshot, selected.route_id, target, session)?;
+            selected.target = select_backend_target(
+                &snapshot,
+                selected.route_id,
+                target,
+                session,
+                ctx.client_ip,
+            )?;
             ctx.selected = Some(selected.clone());
         }
         let peer = match &selected.target {
@@ -660,7 +725,7 @@ async fn authorize_request(
 ) -> PingoraResult<bool> {
     let path = session.req_header().uri.path().to_string();
     let method = session.req_header().method.clone();
-    let client_ip = request_client_ip(session);
+    let client_ip = ctx.client_ip;
     if !location_allows_client(&selected.access_rules, client_ip) {
         session.set_keepalive(None);
         write_route_response(
@@ -672,6 +737,25 @@ async fn authorize_request(
         return Ok(true);
     }
 
+    if !selected.client_limits.allowed_methods.is_empty()
+        && !selected
+            .client_limits
+            .allowed_methods
+            .iter()
+            .any(|m| m == method.as_str())
+    {
+        let mut response = LocalResponse::new(http::StatusCode::METHOD_NOT_ALLOWED, "");
+        response.headers.push((
+            http::header::ALLOW,
+            http::HeaderValue::from_str(&selected.client_limits.allowed_methods.join(", "))
+                .map_err(|e| {
+                    pingora::Error::explain(pingora::ErrorType::InternalError, e.to_string())
+                })?,
+        ));
+        session.set_keepalive(None);
+        write_route_response(session, ctx, response).await?;
+        return Ok(true);
+    }
     let mut headers = RequestHeaderEditor {
         inner: session.downstream_session.req_header_mut(),
     };
@@ -698,13 +782,25 @@ async fn authorize_request(
     Ok(false)
 }
 
+fn apply_client_timeouts(
+    session: &mut Session,
+    body: Option<std::time::Duration>,
+    send: Option<std::time::Duration>,
+) {
+    let body = body.unwrap_or(std::time::Duration::from_secs(60));
+    session.set_read_timeout((!body.is_zero()).then_some(body));
+    if let Some(timeout) = send {
+        session.set_write_timeout((!timeout.is_zero()).then_some(timeout));
+    }
+}
+
 async fn prepare_scp_request(
     session: &mut Session,
     ctx: &mut ProxyContext,
     snapshot: &RuntimeSnapshot,
     selected: &SelectedRoute,
 ) -> PingoraResult<bool> {
-    let client_ip = request_client_ip(session);
+    let client_ip = ctx.client_ip;
     if let SelectedTarget::Scp(name) = &selected.target {
         let profile = snapshot.scp_profiles.get(name).cloned().ok_or_else(|| {
             pingora::Error::explain(
