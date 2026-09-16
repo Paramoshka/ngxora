@@ -165,13 +165,22 @@ fn run(cli: CliArgs) -> Result<(), String> {
         let tls = grpc_tls.ok_or_else(|| {
             "internal error: missing validated gRPC TLS configuration for TCP listener".to_string()
         })?;
-        spawn_control_plane(addr, control.clone(), tls)?;
-        println!("gRPC control plane listening with mTLS on {addr}");
+        spawn_control_plane(
+            addr,
+            control.clone(),
+            tls,
+            server.watch_execution_phase(),
+            cli.upgrade,
+        )?;
     }
 
     if let Some(path) = cli.grpc_uds {
-        spawn_control_plane_uds(path.clone(), control.clone())?;
-        println!("gRPC control plane listening on unix://{}", path.display());
+        spawn_control_plane_uds(
+            path,
+            control.clone(),
+            server.watch_execution_phase(),
+            cli.upgrade,
+        )?;
     }
 
     if let Some(addr) = cli.metrics_addr {

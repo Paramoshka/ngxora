@@ -229,7 +229,7 @@ async fn handoff_preserves_requests_h2_websocket_and_metrics() {
         client_tls.alpn_protocols = vec![b"h2".to_vec()];
         let slow = format!("location /slow {{ proxy_pass http://127.0.0.1:{upstream_port}; }} location /ws {{ proxy_pass http://127.0.0.1:{upstream_port}; }}");
         let config = |label| format!("http {{ {} server {{ listen 127.0.0.1:{s} ssl http2; server_name localhost; {tls_settings} {slow} location / {{ return 302 https://{label}.example/; }} }} }}", server(p, label, &slow));
-        let metrics = ["--metrics-addr".into(), format!("127.0.0.1:{m}")];
+        let metrics = ["--metrics-addr".into(), format!("127.0.0.1:{m}"), "--grpc-uds".into(), dir.path().join("grpc.sock").to_str().unwrap().into()];
         drop((http_reserved, https_reserved, metrics_reserved));
         let mut old = Process::start(dir.path(), "old", &config("old"), false, &metrics);
         ready(&mut old, p, "old.example").await;
@@ -270,6 +270,8 @@ async fn handoff_preserves_requests_h2_websocket_and_metrics() {
         });
         old.logged("Broadcast graceful shutdown complete").await;
         ready(&mut new, p, "new.example").await;
+        old.logged("gRPC control plane stopped").await;
+        new.logged("gRPC control plane listening").await;
         assert!(!slow_h2.is_finished(), "old HTTP/2 request ended before backend replied");
         for backend in [&mut backend_h1, &mut backend_h2] {
             backend.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK").await.unwrap();
@@ -411,21 +413,108 @@ async fn failed_handoffs_do_not_roll_back_in_stock_pingora() {
     }
 }
 
-#[tokio::test]
-async fn grpc_uds_is_not_transferred_with_proxy_listeners() {
-    use ngxora_runtime::grpc::proto::{
-        GetSnapshotRequest, control_plane_client::ControlPlaneClient,
-    };
-    use tonic::transport::Endpoint;
+type GrpcClient = ngxora_runtime::grpc::proto::control_plane_client::ControlPlaneClient<
+    tonic::transport::Channel,
+>;
 
+async fn uds_client(path: PathBuf) -> GrpcClient {
+    let channel = tonic::transport::Endpoint::from_static("http://localhost")
+        .timeout(Duration::from_secs(3))
+        .connect_with_connector(tower::service_fn(move |_| {
+            let path = path.clone();
+            async move {
+                tokio::net::UnixStream::connect(path)
+                    .await
+                    .map(TokioIo::new)
+            }
+        }))
+        .await
+        .unwrap();
+    GrpcClient::new(channel)
+}
+
+async fn tcp_client(dir: &Path, port: u16) -> GrpcClient {
+    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+    let cert = std::fs::read(dir.join("cert.pem")).unwrap();
+    let key = std::fs::read(dir.join("key.pem")).unwrap();
+    let tls = ClientTlsConfig::new()
+        .domain_name("localhost")
+        .ca_certificate(Certificate::from_pem(&cert))
+        .identity(Identity::from_pem(cert, key));
+    let channel = Endpoint::from_shared(format!("https://127.0.0.1:{port}"))
+        .unwrap()
+        .timeout(Duration::from_secs(3))
+        .connect_timeout(Duration::from_secs(3))
+        .tls_config(tls)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    GrpcClient::new(channel)
+}
+
+fn tcp_args(dir: &Path, port: u16) -> Vec<String> {
+    vec![
+        "--grpc-addr".into(),
+        format!("127.0.0.1:{port}"),
+        "--grpc-tls-cert".into(),
+        dir.join("cert.pem").to_str().unwrap().into(),
+        "--grpc-tls-key".into(),
+        dir.join("key.pem").to_str().unwrap().into(),
+        "--grpc-client-ca".into(),
+        dir.join("cert.pem").to_str().unwrap().into(),
+    ]
+}
+
+async fn snapshot(client: &mut GrpcClient) -> ngxora_runtime::grpc::proto::ConfigSnapshot {
+    client
+        .get_snapshot(ngxora_runtime::grpc::proto::GetSnapshotRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+}
+
+async fn verify_new_control_plane(
+    old_client: &mut GrpcClient,
+    new_client: &mut GrpcClient,
+    port: u16,
+) {
+    use ngxora_runtime::grpc::proto::{DirectResponse, GetSnapshotRequest, route::Action};
+    // Tonic may transparently reconnect. An RPC must never succeed against the old generation.
+    if let Ok(response) = old_client.get_snapshot(GetSnapshotRequest {}).await {
+        assert!(response.into_inner().version.ends_with("new.conf"));
+    }
+    let mut next = snapshot(new_client).await;
+    assert!(next.version.ends_with("new.conf"));
+    next.version = "controller-after-upgrade".into();
+    for host in &mut next.virtual_hosts {
+        for route in &mut host.routes {
+            route.action = Some(Action::DirectResponse(DirectResponse { status: 201 }));
+        }
+    }
+    assert!(
+        new_client
+            .apply_snapshot(next)
+            .await
+            .unwrap()
+            .into_inner()
+            .applied
+    );
+    assert_eq!(
+        snapshot(new_client).await.version,
+        "controller-after-upgrade"
+    );
+    assert!(http(port, "/").await.unwrap().starts_with("HTTP/1.1 201"));
+}
+
+#[tokio::test]
+async fn grpc_uds_disconnects_old_controller_and_applies_to_new_process() {
     let dir = tempfile::tempdir().unwrap();
     let reserved = reserve();
     let p = port(&reserved);
     drop(reserved);
-    let grpc = [
-        "--grpc-uds".into(),
-        dir.path().join("grpc.sock").to_str().unwrap().into(),
-    ];
+    let socket = dir.path().join("grpc.sock");
+    let grpc = ["--grpc-uds".into(), socket.to_str().unwrap().into()];
     let mut old = Process::start(
         dir.path(),
         "old",
@@ -434,31 +523,15 @@ async fn grpc_uds_is_not_transferred_with_proxy_listeners() {
         &grpc,
     );
     ready(&mut old, p, "old.example").await;
-    let connect = || {
-        let socket = dir.path().join("grpc.sock");
-        async move {
-            Endpoint::from_static("http://localhost")
-                .connect_with_connector(tower::service_fn(move |_| {
-                    let socket = socket.clone();
-                    async move {
-                        tokio::net::UnixStream::connect(socket)
-                            .await
-                            .map(TokioIo::new)
-                    }
-                }))
-                .await
-        }
-    };
-    let mut old_client = ControlPlaneClient::new(connect().await.unwrap());
+    old.logged("gRPC control plane listening").await;
+    let mut old_client = uds_client(socket.clone()).await;
     assert!(
-        old_client
-            .get_snapshot(GetSnapshotRequest {})
+        snapshot(&mut old_client)
             .await
-            .unwrap()
-            .into_inner()
             .version
             .ends_with("old.conf")
     );
+    let mut idle = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let mut new = Process::start(
         dir.path(),
         "new",
@@ -468,46 +541,30 @@ async fn grpc_uds_is_not_transferred_with_proxy_listeners() {
     );
     receiver_ready(&mut new, dir.path()).await;
     old.signal("-QUIT");
+    old.logged("gRPC control plane stopped").await;
+    new.logged("gRPC control plane listening").await;
     old.logged("Broadcast graceful shutdown complete").await;
     ready(&mut new, p, "new.example").await;
-    let mut new_client = ControlPlaneClient::new(connect().await.unwrap());
-    assert!(
-        new_client
-            .get_snapshot(GetSnapshotRequest {})
-            .await
-            .unwrap()
-            .into_inner()
-            .version
-            .ends_with("new.conf")
-    );
-    // The existing controller channel is still attached to the draining generation.
-    assert!(
-        old_client
-            .get_snapshot(GetSnapshotRequest {})
-            .await
-            .unwrap()
-            .into_inner()
-            .version
-            .ends_with("old.conf")
-    );
+    assert_connection_closed(&mut idle).await;
+    let mut new_client = uds_client(socket).await;
+    verify_new_control_plane(&mut old_client, &mut new_client, p).await;
+}
+
+async fn assert_connection_closed(stream: &mut (impl AsyncRead + Unpin)) {
+    let mut bytes = Vec::new();
+    let result = timeout(Duration::from_secs(3), stream.read_to_end(&mut bytes))
+        .await
+        .expect("old gRPC connection stayed open");
+    assert!(result.is_ok() || result.unwrap_err().kind() == std::io::ErrorKind::ConnectionReset);
 }
 
 #[tokio::test]
-async fn grpc_tcp_bind_failure_does_not_stop_new_proxy() {
+async fn grpc_tcp_disconnects_old_controller_and_applies_to_new_process() {
     let dir = tempfile::tempdir().unwrap();
     let reservations = [reserve(), reserve()];
     let [p, grpc_port] = reservations.each_ref().map(port);
     let _ = tls_config(dir.path());
-    let grpc = [
-        "--grpc-addr".into(),
-        format!("127.0.0.1:{grpc_port}"),
-        "--grpc-tls-cert".into(),
-        dir.path().join("cert.pem").to_str().unwrap().into(),
-        "--grpc-tls-key".into(),
-        dir.path().join("key.pem").to_str().unwrap().into(),
-        "--grpc-client-ca".into(),
-        dir.path().join("cert.pem").to_str().unwrap().into(),
-    ];
+    let grpc = tcp_args(dir.path(), grpc_port);
     drop(reservations);
     let mut old = Process::start(
         dir.path(),
@@ -517,7 +574,16 @@ async fn grpc_tcp_bind_failure_does_not_stop_new_proxy() {
         &grpc,
     );
     ready(&mut old, p, "old.example").await;
-    TcpStream::connect(("127.0.0.1", grpc_port)).await.unwrap();
+    old.logged("gRPC control plane listening").await;
+    let mut old_client = tcp_client(dir.path(), grpc_port).await;
+    assert!(
+        snapshot(&mut old_client)
+            .await
+            .version
+            .ends_with("old.conf")
+    );
+    // A peer that never sends TLS ClientHello must also be disconnected on shutdown.
+    let mut stalled_tls = TcpStream::connect(("127.0.0.1", grpc_port)).await.unwrap();
     let mut new = Process::start(
         dir.path(),
         "new",
@@ -527,9 +593,61 @@ async fn grpc_tcp_bind_failure_does_not_stop_new_proxy() {
     );
     receiver_ready(&mut new, dir.path()).await;
     old.signal("-QUIT");
+    old.logged("gRPC control plane stopped").await;
+    new.logged("gRPC control plane listening").await;
     old.logged("Broadcast graceful shutdown complete").await;
     ready(&mut new, p, "new.example").await;
-    new.logged("gRPC control plane stopped").await;
-    assert!(!old.logs().contains("gRPC control plane stopped"));
-    // A live data plane therefore does not prove that the new control plane is ready.
+    assert_connection_closed(&mut stalled_tls).await;
+    let mut new_client = tcp_client(dir.path(), grpc_port).await;
+    verify_new_control_plane(&mut old_client, &mut new_client, p).await;
+}
+
+#[tokio::test]
+async fn grpc_upgrade_retries_occupied_tcp_and_uds_addresses() {
+    for uds in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let reserved = reserve();
+        let p = port(&reserved);
+        drop(reserved);
+        let mut old = Process::start(
+            dir.path(),
+            "old",
+            &format!("http {{ {} }}", server(p, "old", "")),
+            false,
+            &[],
+        );
+        ready(&mut old, p, "old.example").await;
+        let tcp = reserve();
+        let grpc_port = port(&tcp);
+        let socket = dir.path().join("grpc.sock");
+        let unix = tokio::net::UnixListener::bind(&socket).unwrap();
+        let _ = tls_config(dir.path());
+        let grpc = if uds {
+            vec!["--grpc-uds".into(), socket.to_str().unwrap().into()]
+        } else {
+            tcp_args(dir.path(), grpc_port)
+        };
+        let mut new = Process::start(
+            dir.path(),
+            "new",
+            &format!("http {{ {} }}", server(p, "new", "")),
+            true,
+            &grpc,
+        );
+        receiver_ready(&mut new, dir.path()).await;
+        old.signal("-QUIT");
+        new.logged("gRPC waiting for address").await;
+        assert!(!new.logs().contains("gRPC control plane listening"));
+        // More than one retry, with the HTTP data plane remaining operational.
+        old.logged("Broadcast graceful shutdown complete").await;
+        ready(&mut new, p, "new.example").await;
+        drop((tcp, unix));
+        new.logged("gRPC control plane listening").await;
+        let mut client = if uds {
+            uds_client(socket).await
+        } else {
+            tcp_client(dir.path(), grpc_port).await
+        };
+        assert!(snapshot(&mut client).await.version.ends_with("new.conf"));
+    }
 }

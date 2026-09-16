@@ -2,8 +2,9 @@
 
 use crate::control::{ConfigSnapshot, InProcessControlPlane, RuntimeState};
 #[cfg(unix)]
-use crate::grpc::set_uds_permissions;
-use crate::grpc::{GrpcControlPlane, GrpcTlsConfig, grpc_runtime, grpc_server, proto};
+use crate::grpc::transport::set_uds_permissions;
+use crate::grpc::transport::{grpc_runtime, grpc_server};
+use crate::grpc::{GrpcControlPlane, GrpcTlsConfig, proto};
 use crate::upstreams::{
     CompiledRouter, apply_upstream_http_protocol, apply_upstream_ssl_options,
     build_runtime_client_identities, build_runtime_trusted_cas,
