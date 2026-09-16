@@ -10,7 +10,7 @@ use ngxora_runtime::metrics::spawn_metrics_service_with_state;
 use ngxora_runtime::server::bind_listeners_from_state;
 use ngxora_runtime::upstreams::{CompiledRouter, DynamicProxy};
 use pingora::server::Server;
-use pingora::server::configuration::Opt;
+use pingora::server::configuration::{Opt, ServerConf};
 use pingora::services::background::background_service;
 use std::env;
 use std::io::Write;
@@ -26,6 +26,8 @@ mod reload;
 struct CliArgs {
     config_path: PathBuf,
     check_only: bool,
+    upgrade: bool,
+    upgrade_sock: Option<String>,
     grpc_addr: Option<SocketAddr>,
     grpc_uds: Option<PathBuf>,
     grpc_tls: Option<GrpcTlsFiles>,
@@ -95,8 +97,17 @@ fn run(cli: CliArgs) -> Result<(), String> {
 
     let grpc_tls = cli.grpc_tls.as_ref().map(load_grpc_tls).transpose()?;
 
-    let mut server = Server::new(None::<Opt>)
-        .map_err(|err| format!("failed to create pingora server: {err}"))?;
+    let mut conf = ServerConf::default();
+    if let Some(path) = cli.upgrade_sock {
+        conf.upgrade_sock = path;
+    }
+    let mut server = Server::new_with_opt_and_conf(
+        Opt {
+            upgrade: cli.upgrade,
+            ..Default::default()
+        },
+        conf,
+    );
     server.bootstrap();
     #[cfg(unix)]
     server.add_service(background_service(
@@ -154,13 +165,22 @@ fn run(cli: CliArgs) -> Result<(), String> {
         let tls = grpc_tls.ok_or_else(|| {
             "internal error: missing validated gRPC TLS configuration for TCP listener".to_string()
         })?;
-        spawn_control_plane(addr, control.clone(), tls)?;
-        println!("gRPC control plane listening with mTLS on {addr}");
+        spawn_control_plane(
+            addr,
+            control.clone(),
+            tls,
+            server.watch_execution_phase(),
+            cli.upgrade,
+        )?;
     }
 
     if let Some(path) = cli.grpc_uds {
-        spawn_control_plane_uds(path.clone(), control.clone())?;
-        println!("gRPC control plane listening on unix://{}", path.display());
+        spawn_control_plane_uds(
+            path,
+            control.clone(),
+            server.watch_execution_phase(),
+            cli.upgrade,
+        )?;
     }
 
     if let Some(addr) = cli.metrics_addr {
@@ -256,6 +276,8 @@ where
 {
     let mut config_path: Option<PathBuf> = None;
     let mut check_only = false;
+    let mut upgrade = false;
+    let mut upgrade_sock = None;
     let mut grpc_addr: Option<SocketAddr> = None;
     let mut grpc_uds: Option<PathBuf> = None;
     let mut grpc_certificate: Option<PathBuf> = None;
@@ -269,6 +291,24 @@ where
     while let Some(arg) = args.next() {
         match arg.to_string_lossy().as_ref() {
             "--check" => check_only = true,
+            "--upgrade" => upgrade = true,
+            "--upgrade-sock" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--upgrade-sock requires a filesystem path".to_string())?;
+                let value = value
+                    .into_string()
+                    .map_err(|_| "--upgrade-sock requires a UTF-8 path".to_string())?;
+                if value.is_empty() {
+                    return Err("--upgrade-sock requires a non-empty path".into());
+                }
+                if !Path::new(&value).is_absolute() {
+                    return Err("--upgrade-sock requires an absolute filesystem path".into());
+                }
+                if upgrade_sock.replace(value).is_some() {
+                    return Err("--upgrade-sock specified more than once".into());
+                }
+            }
             "--unsafe-admin-listen" => unsafe_admin_listen = true,
             "--grpc-addr" => {
                 let value = args
@@ -365,6 +405,13 @@ where
         return Err("missing config path".into());
     };
 
+    if upgrade && upgrade_sock.is_none() {
+        return Err("--upgrade requires --upgrade-sock".into());
+    }
+    if (upgrade || upgrade_sock.is_some()) && !cfg!(target_os = "linux") {
+        return Err("graceful upgrade is only supported on Linux".into());
+    }
+
     if grpc_addr.is_some() && grpc_uds.is_some() {
         return Err("use either --grpc-addr or --grpc-uds, not both".into());
     }
@@ -402,6 +449,8 @@ where
     Ok(Some(CliArgs {
         config_path,
         check_only,
+        upgrade,
+        upgrade_sock,
         grpc_addr,
         grpc_uds,
         grpc_tls,
@@ -413,7 +462,7 @@ where
 
 fn print_usage() {
     eprintln!(
-        "Usage: ngxora [--check] [--metrics-addr <host:port> [--unsafe-admin-listen]] [--otel-endpoint <url>] [--grpc-addr <host:port> --grpc-tls-cert <pem> --grpc-tls-key <pem> --grpc-client-ca <pem> | --grpc-uds <path>] <config-path>"
+        "Usage: ngxora [--check] [--upgrade-sock <path> [--upgrade]] [--metrics-addr <host:port> [--unsafe-admin-listen]] [--otel-endpoint <url>] [--grpc-addr <host:port> --grpc-tls-cert <pem> --grpc-tls-key <pem> --grpc-client-ca <pem> | --grpc-uds <path>] <config-path>"
     );
     eprintln!("       ngxora --licenses");
 }
@@ -421,6 +470,61 @@ fn print_usage() {
 #[cfg(test)]
 mod tests {
     use super::parse_cli_args;
+
+    #[test]
+    fn upgrade_requires_explicit_socket() {
+        assert!(
+            parse_cli_args(["ngxora", "--upgrade", "ngxora.conf"])
+                .unwrap_err()
+                .contains("--upgrade requires --upgrade-sock")
+        );
+        for args in [
+            vec!["ngxora", "ngxora.conf", "--upgrade-sock"],
+            vec!["ngxora", "ngxora.conf", "--upgrade-sock", ""],
+            vec![
+                "ngxora",
+                "ngxora.conf",
+                "--upgrade-sock",
+                "a",
+                "--upgrade-sock",
+                "b",
+            ],
+        ] {
+            assert!(parse_cli_args(args).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn upgrade_socket_rejects_relative_paths() {
+        for path in ["upgrade.sock", "./upgrade.sock", "../upgrade.sock"] {
+            let error = parse_cli_args(["ngxora", "--upgrade-sock", path, "ngxora.conf"])
+                .expect_err("upgrade coordination requires an absolute path");
+            assert!(error.contains("absolute"), "{error}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn upgrade_sender_and_receiver_use_explicit_socket() {
+        for upgrade in [false, true] {
+            let mut args = vec![
+                "ngxora",
+                "--upgrade-sock",
+                "/run/ngxora/upgrade.sock",
+                "ngxora.conf",
+            ];
+            if upgrade {
+                args.push("--upgrade");
+            }
+            let cli = parse_cli_args(args).unwrap().unwrap();
+            assert_eq!(cli.upgrade, upgrade);
+            assert_eq!(
+                cli.upgrade_sock.as_deref(),
+                Some("/run/ngxora/upgrade.sock")
+            );
+        }
+    }
 
     #[test]
     fn tcp_grpc_requires_all_mtls_files() {

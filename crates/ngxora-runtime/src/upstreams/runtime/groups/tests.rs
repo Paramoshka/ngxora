@@ -65,6 +65,241 @@ fn nrf_topology(
         .unwrap()
 }
 
+fn nrf_group() -> RuntimeUpstreamGroup {
+    use crate::upstreams::{CompiledHealthCheck, CompiledNrfDiscovery, HealthCheckType};
+    use ngxora_compile::ir::{NrfEndpointScheme, UpstreamSslOptions};
+
+    RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        name: "refresh".into(),
+        allow_empty: false,
+        policy: UpstreamSelectionPolicy::RoundRobin,
+        hash_key: None,
+        servers: Vec::new(),
+        nrf_discovery: Some(CompiledNrfDiscovery {
+            api_root: "http://127.0.0.1:1/nnrf-disc/v1".parse().unwrap(),
+            target_nf_type: "SMF".into(),
+            requester_nf_type: "SCP".into(),
+            service_name: "nsmf-pdusession".into(),
+            endpoint_scheme: NrfEndpointScheme::Http,
+            timeout: Duration::from_secs(1),
+            stale_if_error: Duration::from_secs(60),
+            tls_options: UpstreamSslOptions::default(),
+        }),
+        health_check: Some(CompiledHealthCheck {
+            check_type: HealthCheckType::Tcp,
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_secs(5),
+            consecutive_success: 1,
+            consecutive_failure: 1,
+        }),
+    })
+    .unwrap()
+}
+
+#[test]
+fn nrf_refresh_keeps_selection_and_readiness_consistent() {
+    let group = nrf_group();
+    let discovery = group.nrf_discovery.as_ref().unwrap();
+    let endpoints = [
+        nrf_server("nf", "service", 1, 1, "192.0.2.1", 80),
+        nrf_server("nf", "service", 1, 1, "192.0.2.2", 80),
+    ];
+    let publish = |server: &CompiledUpstreamServer| {
+        let backends = dynamic_synthetic_backends(std::slice::from_ref(server)).unwrap();
+        futures::executor::block_on(discovery.publish_backends(backends)).unwrap();
+    };
+    publish(&endpoints[0]);
+    {
+        let mut schedule = discovery.schedule.lock().unwrap();
+        schedule.last_success_at = Some(Instant::now());
+        schedule.expires_at = Some(Instant::now() + Duration::from_secs(60));
+        schedule.candidate_count = 1;
+    }
+
+    let start = std::sync::Barrier::new(5);
+    let running = std::sync::atomic::AtomicBool::new(true);
+    std::thread::scope(|threads| {
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                threads.spawn(|| {
+                    start.wait();
+                    let mut failures = 0;
+                    let mut requests = 0;
+                    while running.load(Ordering::Relaxed) {
+                        failures += usize::from(group.select(b"").is_none());
+                        failures += usize::from(group.scp_select(b"", |_| true).is_none());
+                        requests += 2;
+                    }
+                    (requests, failures)
+                })
+            })
+            .collect();
+        start.wait();
+        for index in 0..2_000 {
+            publish(&endpoints[index % 2]);
+        }
+        running.store(false, Ordering::Relaxed);
+        for reader in readers {
+            let (requests, failures) = reader.join().unwrap();
+            assert!(requests > 0);
+            assert_eq!(
+                failures, 0,
+                "healthy endpoints must stay selectable during refresh"
+            );
+        }
+    });
+
+    let snapshot = discovery.selection.load_full().unwrap();
+    let backends = snapshot.backends.get_backend();
+    snapshot
+        .backends
+        .set_enable(backends.first().unwrap(), false);
+    publish(&endpoints[1]);
+    assert!(group.select(b"").is_none());
+    assert!(group.scp_select(b"", |_| true).is_none());
+
+    futures::executor::block_on(discovery.publish_backends(BTreeSet::new())).unwrap();
+    assert!(group.select(b"").is_none());
+    assert!(group.scp_select(b"", |_| true).is_none());
+    assert!(group.readiness().is_empty());
+}
+
+#[tokio::test]
+async fn nrf_snapshot_remains_usable_after_replacement_and_failed_build() {
+    let group = nrf_group();
+    let discovery = group.nrf_discovery.as_ref().unwrap();
+    let a = nrf_server("nf", "service", 1, 1, "192.0.2.1", 80);
+    let b = nrf_server("nf", "service", 1, 1, "192.0.2.2", 80);
+    discovery
+        .publish_backends(dynamic_synthetic_backends(std::slice::from_ref(&a)).unwrap())
+        .await
+        .unwrap();
+    let old = discovery.selection.load_full().unwrap();
+    discovery
+        .publish_backends(dynamic_synthetic_backends(std::slice::from_ref(&b)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(group.select(b""), Some(b.clone()));
+    assert_eq!(
+        old.topology
+            .select(b"", |backend| old.backends.ready(backend)),
+        Some(a)
+    );
+
+    let current = discovery.selection.load_full().unwrap();
+    discovery
+        .publish_backends(dynamic_synthetic_backends(std::slice::from_ref(&b)).unwrap())
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        &current,
+        &discovery.selection.load_full().unwrap()
+    ));
+    // A malformed candidate must fail before replacing the working snapshot.
+    let invalid = BTreeSet::from([Backend::new("192.0.2.3:80").unwrap()]);
+    assert!(discovery.publish_backends(invalid).await.is_err());
+    assert!(Arc::ptr_eq(
+        &current,
+        &discovery.selection.load_full().unwrap()
+    ));
+    assert_eq!(group.select(b""), Some(b));
+
+    discovery.expire_snapshot();
+    assert!(group.select(b"").is_none());
+    assert!(group.readiness().is_empty());
+    assert_eq!(discovery.health_registry.target_count(), 2);
+    drop(old);
+    drop(current);
+    assert_eq!(discovery.health_registry.target_count(), 0);
+}
+
+#[tokio::test]
+async fn nrf_snapshots_share_live_health_and_preserve_thresholds() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    struct Check {
+        failing: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl pingora::lb::health_check::HealthCheck for Check {
+        async fn check(&self, backend: &Backend) -> pingora::Result<()> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.failing.load(Ordering::Relaxed)
+                && backend.ext.get::<CompiledUpstreamServer>().unwrap().host == "192.0.2.1"
+            {
+                return Err(pingora::Error::new(pingora::ErrorType::ConnectRefused));
+            }
+            Ok(())
+        }
+        fn health_threshold(&self, _success: bool) -> usize {
+            2
+        }
+    }
+    let mut group = nrf_group();
+    let failing = Arc::new(AtomicBool::new(true));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(HealthRegistry::new());
+    registry.set_health_check(Box::new(Check {
+        failing: failing.clone(),
+        calls: calls.clone(),
+    }));
+    group.nrf_discovery.as_mut().unwrap().health_registry = registry.clone();
+    let discovery = group.nrf_discovery.as_ref().unwrap();
+    let a = nrf_server("nf", "service", 1, 1, "192.0.2.1", 80);
+    let b = nrf_server("nf", "service", 1, 1, "192.0.2.2", 80);
+    discovery
+        .publish_backends(dynamic_synthetic_backends(std::slice::from_ref(&a)).unwrap())
+        .await
+        .unwrap();
+    let old = discovery.selection.load_full().unwrap();
+    let backend_a = old.backends.get_backend().first().unwrap().clone();
+    let now = Instant::now();
+    group.run_due_health_check(now).await;
+    assert!(
+        old.backends.ready(&backend_a),
+        "one failure must not exceed the threshold"
+    );
+    discovery
+        .publish_backends(dynamic_synthetic_backends(&[a.clone(), b.clone()]).unwrap())
+        .await
+        .unwrap();
+    group
+        .run_due_health_check(now + Duration::from_secs(5))
+        .await;
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        3,
+        "shared endpoints must only be probed once per pass"
+    );
+    assert!(
+        !old.backends.ready(&backend_a),
+        "new health observations must reach retained snapshots"
+    );
+    assert_eq!(group.select(b""), Some(b));
+
+    failing.store(false, Ordering::Relaxed);
+    group
+        .run_due_health_check(now + Duration::from_secs(10))
+        .await;
+    assert!(
+        !old.backends.ready(&backend_a),
+        "one success must not reset the threshold"
+    );
+    discovery
+        .publish_backends(dynamic_synthetic_backends(std::slice::from_ref(&a)).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        group.select(b"").is_none(),
+        "refresh must not reset an unhealthy endpoint"
+    );
+    group
+        .run_due_health_check(now + Duration::from_secs(15))
+        .await;
+    assert!(old.backends.ready(&backend_a));
+    assert_eq!(group.select(b""), Some(a));
+}
+
 #[test]
 fn nrf_service_capacity_weights_services_not_endpoints() {
     let topology = nrf_topology(

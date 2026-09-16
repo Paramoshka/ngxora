@@ -257,6 +257,12 @@ The NRF `load` attribute is not applied because its selection policy is
 implementation-specific. OAuth and NF registration are not part of this first
 implementation.
 
+NRF refresh publishes service topology and backend membership together in one
+atomic snapshot. Concurrent selection can finish using the previous snapshot;
+it never checks old topology against a new backend set. Health observations and
+success/failure counters are shared across snapshots for retained endpoints.
+An unchanged topology reuses its snapshot, preserving round-robin position.
+
 Supported policies:
 
 - `round_robin` - default policy

@@ -241,13 +241,19 @@ through atomic snapshots. Listener topology changes are reported as
 For local control, start the gRPC control plane on a Unix domain socket:
 
 ```bash
-cargo run -- --grpc-uds /tmp/ngxora-control.sock examples/basic/ngxora.conf
+cargo run -- --grpc-uds /tmp/ngxora-$UID/control.sock examples/basic/ngxora.conf
 ```
+
+The socket must be inside a directory owned by the service user with owner-only
+access (`0700`). Missing directories are created with these permissions; existing
+directories are validated without changing their permissions. Parent directories
+must be owned by the service user or root and must not be writable by other users,
+except for sticky directories such as `/tmp`.
 
 Inspect the current snapshot with the example Rust client:
 
 ```bash
-cargo run -p ngxora-runtime --example get_snapshot -- --uds /tmp/ngxora-control.sock
+cargo run -p ngxora-runtime --example get_snapshot -- --uds /tmp/ngxora-$UID/control.sock
 ```
 
 Generate the Go control-plane SDK with:
@@ -263,6 +269,11 @@ TCP mTLS setup, and live/restart boundaries.
 On Unix, `kill -HUP <pid>` rereads the text config and its includes through the
 same snapshot pipeline. Invalid changes leave the active config intact; changes
 to listener topology still require a restart.
+
+An experimental Linux-only process handoff is available through `--upgrade` and
+`--upgrade-sock`. It uses stock Pingora, without a local dependency patch. It is
+not an automatic or transactional reload; see the [experiment and its failure
+modes](./docs/graceful-upgrade.md) before using it.
 
 ## Plugins
 
