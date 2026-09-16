@@ -65,7 +65,10 @@ checks do not provide atomic conditional unlink against those processes.
 
 Temporary API unavailability is expected. The controller must reconnect and send
 its latest desired snapshot to the new process, retrying transport failures with
-backoff. Existing controller retry behavior is not changed by this implementation.
+backoff. The [Go SDK synchronization client](../sdk/go/README.md#uds-snapshot-synchronization)
+provides UDS reconnect, periodic version checks and restoration of the latest
+desired snapshot. The controller supplies that snapshot and handles permanent
+errors; the client does not initiate upgrades.
 HTTP `/readyz` still reports configuration/TLS readiness, not gRPC availability.
 
 ## Observed boundaries
@@ -97,4 +100,4 @@ suite takes approximately five minutes. It is included in `make test-e2e` and CI
 Before automatic SIGHUP-driven upgrade can be considered, a separate stage must
 define application readiness, the accepted failure behavior after socket transfer
 and the authoritative configuration source. Automatic process replacement and
-controller-side retries are not implemented here.
+readiness gating on controller synchronization are not implemented here.
