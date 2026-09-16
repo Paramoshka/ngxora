@@ -3,10 +3,12 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -413,5 +415,151 @@ func TestCancellationWithoutDesiredSnapshot(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("idle client did not honor cancellation")
+	}
+}
+
+func TestSupersededRPCsRespectPacing(t *testing.T) {
+	for _, failure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unavailable=%t", failure), func(t *testing.T) {
+			path := filepath.Join(socketDirectory(t), "control.sock")
+			c, err := NewUDS(path, Options{PollInterval: 50 * time.Millisecond, RetryMin: 50 * time.Millisecond, RetryMax: 200 * time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mu sync.Mutex
+			var attempts []time.Time
+			s := &testServer{snapshot: &controlv1.ConfigSnapshot{Version: "bootstrap"}}
+			s.getHook = func(context.Context) error {
+				mu.Lock()
+				attempts = append(attempts, time.Now())
+				version := fmt.Sprint(len(attempts))
+				mu.Unlock()
+				if err := c.SetSnapshot(&controlv1.ConfigSnapshot{Version: version}); err != nil {
+					return err
+				}
+				if failure {
+					return status.Error(codes.Unavailable, "busy")
+				}
+				return nil
+			}
+			serve(t, path, s)
+			set(t, c, &controlv1.ConfigSnapshot{Version: "initial"})
+			ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+			defer cancel()
+			if err := c.Run(ctx); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(attempts) < 3 {
+				t.Fatalf("only %d attempts observed", len(attempts))
+			}
+			for i := 1; i < len(attempts); i++ {
+				minimum := 50 * time.Millisecond
+				if failure {
+					minimum = 40 * time.Millisecond
+					if i == 2 {
+						minimum = 80 * time.Millisecond
+					}
+					if i >= 3 {
+						minimum = 160 * time.Millisecond
+					}
+				}
+				if gap := attempts[i].Sub(attempts[i-1]); gap < minimum {
+					t.Fatalf("attempt %d after %s; expected at least %s (%d total attempts)", i, gap, minimum, len(attempts))
+				}
+			}
+		})
+	}
+}
+
+func TestWakeStreamCannotBypassPollInterval(t *testing.T) {
+	path := filepath.Join(socketDirectory(t), "control.sock")
+	s := &testServer{snapshot: &controlv1.ConfigSnapshot{Version: "bootstrap"}}
+	serve(t, path, s)
+	c, err := NewUDS(path, Options{PollInterval: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set(t, c, &controlv1.ConfigSnapshot{Version: "initial"})
+	cancel, done := runClient(t, c)
+	ctx, stop := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for n := 0; ctx.Err() == nil; n++ {
+		select {
+		case <-ctx.Done():
+		case <-ticker.C:
+			set(t, c, &controlv1.ConfigSnapshot{Version: fmt.Sprint(n)})
+		}
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if gets, _ := s.counts(); gets > 7 {
+		t.Fatalf("wake stream caused %d polls in 300ms", gets)
+	}
+}
+
+func TestReconnectDoesNotWaitForAccumulatedRPCBackoff(t *testing.T) {
+	path := filepath.Join(socketDirectory(t), "control.sock")
+	var attempts atomic.Int64
+	s := &testServer{snapshot: &controlv1.ConfigSnapshot{Version: "bootstrap"}}
+	s.getHook = func(context.Context) error {
+		return status.Errorf(codes.Unavailable, "attempt-%d", attempts.Add(1))
+	}
+	stop := serve(t, path, s)
+	c, err := NewUDS(path, Options{PollInterval: 20 * time.Millisecond, RetryMin: 100 * time.Millisecond, RetryMax: 4 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set(t, c, &controlv1.ConfigSnapshot{Version: "desired"})
+	runClient(t, c)
+	// The next application retry would wait 3.2s +/-20%. Disconnect while it
+	// is pending, then recover the transport well before that timer expires.
+	eventually(t, func() bool {
+		return status.Convert(c.Status().LastError).Message() == "get snapshot: rpc error: code = Unavailable desc = attempt-6"
+	})
+	stop()
+	time.Sleep(600 * time.Millisecond) // Several real UDS dial failures.
+	replacement := &testServer{snapshot: &controlv1.ConfigSnapshot{Version: "bootstrap"}}
+	serve(t, path, replacement)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if c.Status().Synced {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("channel recovered, but application retry delayed restore: %+v", c.Status())
+}
+
+func TestCancellationDuringChannelReconnect(t *testing.T) {
+	c, err := NewUDS(filepath.Join(socketDirectory(t), "absent.sock"), Options{
+		RPCTimeout: 10 * time.Millisecond, RetryMin: time.Minute, RetryMax: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set(t, c, &controlv1.ConfigSnapshot{Version: "desired"})
+	cancel, done := runClient(t, c)
+	eventually(t, func() bool { return c.Status().LastError != nil })
+	// RPC timeout does not terminate channel waiting or introduce a second
+	// retry clock; the Run context must still interrupt a minute-long reconnect.
+	select {
+	case err := <-done:
+		t.Fatalf("channel wait exited early: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("channel wait did not honor cancellation")
 	}
 }

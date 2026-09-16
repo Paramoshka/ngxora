@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -164,38 +165,35 @@ func (c *Client) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("create UDS connection: %w", err)
 	}
 	defer func() { runErr = errors.Join(runErr, conn.Close()) }()
-	return c.run(ctx, controlv1.NewControlPlaneClient(conn))
+	return c.run(ctx, conn)
 }
 
-func (c *Client) run(ctx context.Context, rpc controlv1.ControlPlaneClient) error {
+func (c *Client) run(ctx context.Context, conn *grpc.ClientConn) error {
+	c.mu.Lock()
+	hasDesired := c.desired != nil
+	c.mu.Unlock()
+	if !hasDesired {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.wake:
+		}
+	}
+	rpc := controlv1.NewControlPlaneClient(conn)
 	retry := c.options.RetryMin
-	var previous *controlv1.ConfigSnapshot
+	var delay time.Duration
 	for {
-		if err := ctx.Err(); err != nil {
+		reconnected, err := c.waitForAttempt(ctx, conn, delay)
+		if err != nil {
 			return err
+		}
+		if reconnected {
+			retry = c.options.RetryMin
 		}
 		c.mu.Lock()
 		desired := c.desired
-		// Consume notifications before the attempt, so SetSnapshot during an RPC
-		// still wakes the next iteration without causing duplicate idle polls.
-		select {
-		case <-c.wake:
-		default:
-		}
 		c.mu.Unlock()
-		if desired == nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-c.wake:
-				continue
-			}
-		}
-		if desired != previous {
-			retry = c.options.RetryMin
-			previous = desired
-		}
-		err := c.reconcile(ctx, rpc, desired)
+		err = c.reconcile(ctx, rpc, desired)
 		c.mu.Lock()
 		current := c.desired == desired
 		if current {
@@ -206,17 +204,13 @@ func (c *Client) run(ctx context.Context, rpc controlv1.ControlPlaneClient) erro
 			}
 		}
 		c.mu.Unlock()
-		if !current {
-			continue // An old result must not acknowledge or reject a newer desired snapshot.
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		delay := c.options.PollInterval
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if status.Code(err) != codes.Unavailable && status.Code(err) != codes.DeadlineExceeded {
-				return err
-			}
+		delay = c.options.PollInterval
+		if status.Code(err) == codes.Unavailable || status.Code(err) == codes.DeadlineExceeded {
+			// A changed desired snapshot does not make a failing API healthy.
+			// Preserve its backoff even when this result is otherwise obsolete.
 			delay = time.Duration(float64(retry) * (0.8 + rand.Float64()*0.4))
 			if retry >= c.options.RetryMax/2 {
 				retry = c.options.RetryMax
@@ -224,16 +218,52 @@ func (c *Client) run(ctx context.Context, rpc controlv1.ControlPlaneClient) erro
 				retry *= 2
 			}
 		} else {
+			if err != nil && current {
+				return err
+			}
 			retry = c.options.RetryMin
 		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-c.wake:
-			timer.Stop()
-		case <-timer.C:
+	}
+}
+
+// While disconnected, grpc-go alone schedules reconnects. A channel transition
+// interrupts the RPC cooldown, so reconnect never waits for a second backoff.
+// Desired updates do not interrupt either wait; run samples the latest afterward.
+func (c *Client) waitForAttempt(ctx context.Context, conn *grpc.ClientConn, delay time.Duration) (bool, error) {
+	notBefore := time.Now().Add(delay)
+	reconnected := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return reconnected, err
+		}
+		state := conn.GetState()
+		if state == connectivity.Shutdown {
+			return reconnected, errors.New("UDS connection closed")
+		}
+		if state != connectivity.Ready {
+			reconnected = true
+			notBefore = time.Time{}
+			c.mu.Lock()
+			c.state.Synced = false
+			c.state.LastError = status.Errorf(codes.Unavailable, "waiting for UDS channel: %s", state)
+			c.mu.Unlock()
+			if state == connectivity.Idle {
+				conn.Connect()
+			}
+			conn.WaitForStateChange(ctx, state)
+			continue
+		}
+		if !time.Now().Before(notBefore) {
+			return reconnected, nil
+		}
+		waitCtx, cancel := context.WithDeadline(ctx, notBefore)
+		changed := conn.WaitForStateChange(waitCtx, state)
+		cancel()
+		if changed {
+			// A quick disconnect/reconnect can already be Ready again by the
+			// time we observe it. The notification still invalidates this wait.
+			reconnected = true
+			notBefore = time.Time{}
 		}
 	}
 }
@@ -252,7 +282,7 @@ func (c *Client) reconcile(ctx context.Context, rpc controlv1.ControlPlaneClient
 	current := c.desired == desired
 	c.mu.Unlock()
 	if !current {
-		return nil // Run discards this result and immediately reconciles the new desired state.
+		return nil // Run discards this result; the next paced attempt samples new desired state.
 	}
 	callCtx, cancel = context.WithTimeout(ctx, c.options.RPCTimeout)
 	result, err := rpc.ApplySnapshot(callCtx, desired)

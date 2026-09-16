@@ -56,25 +56,36 @@ writers must follow the same version contract. Equality is checked by version,
 not by comparing the runtime's normalized protobuf export with the input.
 Manual changes that preserve the version cannot be detected.
 
-`Run` checks `GetSnapshot` immediately and every second, applying the desired
-snapshot only if versions differ. Thus a replacement process regains its
-configuration without a new Kubernetes event, and a lost successful
+`Run` waits for the UDS channel to become ready, then checks `GetSnapshot`,
+applying the desired snapshot only if versions differ. Normal attempts are
+separated by `PollInterval` (one second by default), including when an in-flight
+result was superseded. New snapshots replace pending state without interrupting
+this wait, so frequent updates cannot generate an RPC burst. Thus a replacement
+process regains its configuration without a new Kubernetes event, and a lost successful
 `ApplySnapshot` response can be confirmed without another apply. Manual updates
 with another version, including SIGHUP, are overwritten by the desired snapshot.
 RPCs are serialized; a result for an older desired version cannot acknowledge a
 newer one.
 
 Defaults are a 3-second deadline per RPC and exponential retry from 200 ms to
-5 seconds with ±20% jitter, reset after success or a new desired snapshot.
-`Options` permits overriding these durations. Only `Unavailable` and
-`DeadlineExceeded` are retried. Other RPC errors and rejected applies terminate
+5 seconds with ±20% jitter. A new desired snapshot does not reset error backoff.
+While the channel is unavailable, only grpc-go schedules reconnects; the SDK
+waits for readiness without issuing RPCs or running a separate retry timer.
+An observed disconnect interrupts the pending RPC cooldown, and reconnection
+starts reconciliation immediately with the latest desired snapshot. RPC deadlines
+start after channel readiness; waiting for connection is bounded by the `Run`
+context. `RetryMax` bounds the base retry delay, not total recovery time.
+
+On a ready channel, `Unavailable` and `DeadlineExceeded` responses use the
+SDK retry delay, reset after success or reconnection. `Options` permits
+overriding these durations. Other RPC errors and rejected applies terminate
 `Run`. Inspect `*client.RestartRequiredError` or `*client.ApplyError` with
 `errors.As`; fix the cause before running again. Restart-required errors never
 trigger an automatic process upgrade.
 
 `Status()` returns desired/confirmed versions, `Synced`, and `LastError`.
-It represents the last observation: disconnections are detected on subsequent
-RPCs, not synchronously. Errors, changed desired state and exit clear `Synced`.
+It represents the last observation: channel state changes and RPC results update
+it asynchronously. Errors, changed desired state and exit clear `Synced`.
 Transient errors remain observable through status while retrying. Canceling the
 context interrupts RPCs and waits, closes the connection, and returns an error
 matching `context.Canceled` or `context.DeadlineExceeded`. Only one `Run` may be
