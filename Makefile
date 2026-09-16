@@ -72,6 +72,7 @@ test-unit: ## Run unit tests
 	GOCACHE="$(GO_BUILD_CACHE)" $(GO) -C sdk/go test ./...
 
 test-e2e: ## Run hermetic process-level tests
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --test graceful_upgrade
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --test nrf_e2e
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --test http_routes_e2e
 

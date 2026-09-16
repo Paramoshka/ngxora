@@ -264,6 +264,11 @@ On Unix, `kill -HUP <pid>` rereads the text config and its includes through the
 same snapshot pipeline. Invalid changes leave the active config intact; changes
 to listener topology still require a restart.
 
+An experimental Linux-only process handoff is available through `--upgrade` and
+`--upgrade-sock`. It uses stock Pingora, without a local dependency patch. It is
+not an automatic or transactional reload; see the [experiment and its failure
+modes](./docs/graceful-upgrade.md) before using it.
+
 ## Plugins
 
 Plugins are compiled in, not loaded through unstable runtime ABI tricks.
