@@ -9,6 +9,7 @@ Routing snapshots and SIGHUP retain their existing behavior.
 Use a dedicated directory accessible only to the service owner. Both processes
 must use the same absolute Unix socket path; its parent must already exist.
 Pingora opens this coordination socket in the receiving process.
+Relative `--upgrade-sock` paths are rejected by the CLI, including with `--check`.
 
 1. Start the old process with `ngxora --upgrade-sock /run/ngxora/upgrade.sock old.conf`.
 2. Validate the new file with `ngxora --check new.conf`.
@@ -46,12 +47,21 @@ errors stop the API task and are logged; they are not retried. Without `--upgrad
 an occupied address is reported immediately. The `listening` message is emitted
 only after bind succeeds; waiting is logged initially and at most every 30 seconds.
 
-TCP retains mTLS. UDS retains permissions `0600` and uses a neighboring `.lock`
-file to serialize ownership. Leave this lock file in place: its existence does
-not mean the API is running, and the OS releases the lock on process exit. A live
-UDS listener is never unlinked; an abandoned socket is removed on the next bind.
-Regular files and symlinks at the socket path are rejected. Both generations need
-access to the same socket directory and lock file.
+TCP retains mTLS. UDS requires a directory owned by the service UID with owner-only
+access (`0700`). Missing directories are created with that mode; existing directory
+permissions are never changed automatically. Ancestors must be owned by the service
+UID or root and may not be group/other writable unless sticky (e.g. `/tmp`). This
+prevents other users from connecting between bind and socket chmod to `0600`, or
+replacing the socket directory during ownership checks. A public path such as
+`/tmp/control.sock` is rejected; use `/run/ngxora/control.sock` in a private directory.
+
+A neighboring `.lock` file serializes ownership. Leave this lock file in place:
+its existence does not mean the API is running, and the OS releases the lock on
+process exit. Cooperating processes wait for live listeners; abandoned sockets are
+removed on the next bind. Regular files and symlinks at the socket path are rejected.
+Both generations need access to the same directory and lock file. Root and processes
+with the service UID are trusted and must respect this locking protocol: inode
+checks do not provide atomic conditional unlink against those processes.
 
 Temporary API unavailability is expected. The controller must reconnect and send
 its latest desired snapshot to the new process, retrying transport failures with

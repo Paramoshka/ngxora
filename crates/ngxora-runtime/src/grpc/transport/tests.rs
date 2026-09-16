@@ -1,5 +1,105 @@
 use super::*;
 
+#[cfg(unix)]
+fn private_directory() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_directory_is_private_with_permissive_umask() {
+    const CHILD: &str = "NGXORA_TEST_UDS_UMASK_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "grpc::transport::tests::uds_directory_is_private_with_permissive_umask",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    // SAFETY: this isolated test process runs no other tests; umask has no preconditions.
+    unsafe {
+        libc::umask(0);
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_directory();
+    let path = dir.path().join("private/control.sock");
+    let (_listener, _ownership) = uds::bind(&path).await.unwrap();
+    assert_eq!(
+        std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    tokio::net::UnixStream::connect(&path).await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_rejects_public_directory_without_changing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o775)).unwrap();
+    let path = dir.path().join("control.sock");
+    assert!(
+        matches!(uds::bind(&path).await, Err(e) if e.kind() == io::ErrorKind::PermissionDenied)
+    );
+    assert!(!path.exists());
+    assert!(!dir.path().join("control.sock.lock").exists());
+    assert_eq!(
+        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o775
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_creates_private_directory_and_rejects_writable_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_directory();
+    let path = dir.path().join("private/control.sock");
+    let (listener, ownership) = uds::bind(&path).await.unwrap();
+    assert_eq!(
+        std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    drop(listener);
+    drop(ownership);
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(
+        matches!(uds::bind(&path).await, Err(e) if e.kind() == io::ErrorKind::PermissionDenied)
+    );
+    assert!(!path.exists());
+    // Sticky shared parents such as /tmp cannot unlink another user's private directory.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
+    let (_listener, _ownership) = uds::bind(&path).await.unwrap();
+}
+
 #[tokio::test]
 async fn tcp_bind_retries_until_address_is_released() {
     let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -75,7 +175,7 @@ async fn lifecycle_closure_and_lag_stop_api() {
 #[cfg(unix)]
 #[tokio::test]
 async fn uds_waits_for_owner_then_recovers_stale_socket() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_directory();
     let path = dir.path().join("control.sock");
     let (listener, ownership) = uds::bind(&path).await.unwrap();
     assert!(matches!(uds::bind(&path).await, Err(e) if e.kind() == io::ErrorKind::AddrInUse));
@@ -100,7 +200,7 @@ async fn uds_waits_for_owner_then_recovers_stale_socket() {
 #[tokio::test]
 async fn uds_does_not_remove_live_socket_file_or_symlink() {
     use std::os::unix::fs::{MetadataExt, symlink};
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_directory();
     let path = dir.path().join("control.sock");
     // A server from before the locking protocol still owns its live socket.
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -127,7 +227,7 @@ async fn uds_does_not_remove_live_socket_file_or_symlink() {
 #[tokio::test]
 async fn old_uds_cleanup_preserves_replacement() {
     use std::os::unix::fs::MetadataExt;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_directory();
     let path = dir.path().join("control.sock");
     let (old, ownership) = uds::bind(&path).await.unwrap();
     std::fs::remove_file(&path).unwrap();
@@ -147,7 +247,7 @@ async fn stopping_uds_runtime_closes_existing_connections_and_releases_lock() {
     use crate::upstreams::CompiledRouter;
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_directory();
     let path = dir.path().join("control.sock");
     let control = InProcessControlPlane::new(Arc::new(RuntimeState::new(ConfigSnapshot::new(
         "v1",

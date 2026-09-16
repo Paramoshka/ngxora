@@ -9,7 +9,8 @@
 Use gRPC as the control API. Local agents use a Unix domain socket, while a
 remote controller connects over TCP with mTLS:
 
-- UDS is owner-only (`0600`) and remains local to the pod or process
+- UDS is owner-only (`0600`) inside a service-owned private directory (`0700`),
+  which also protects the socket before chmod; root and same-UID processes are trusted
 - every TCP listener, including loopback, requires a server certificate, key,
   and dedicated controller client CA
 - the client CA makes a client certificate mandatory; plaintext TCP is not

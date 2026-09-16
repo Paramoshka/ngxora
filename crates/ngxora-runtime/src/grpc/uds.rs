@@ -1,7 +1,7 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::{DirBuilder, File, OpenOptions},
     io,
-    os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -16,7 +16,7 @@ pub(super) struct Ownership {
 
 impl Drop for Ownership {
     fn drop(&mut self) {
-        // The lock is still held; never unlink a replacement created outside this protocol.
+        // Same-UID processes must honor the lock. Preserve replacements visible at this check.
         match std::fs::symlink_metadata(&self.path) {
             Ok(meta)
                 if meta.file_type().is_socket()
@@ -38,9 +38,7 @@ impl Drop for Ownership {
 }
 
 pub(super) async fn bind(path: &Path) -> io::Result<(UnixListener, Ownership)> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
+    let path = private_socket_path(path)?;
     let mut lock_path = path.as_os_str().to_os_string();
     lock_path.push(".lock");
     match std::fs::symlink_metadata(&lock_path) {
@@ -57,6 +55,7 @@ pub(super) async fn bind(path: &Path) -> io::Result<(UnixListener, Ownership)> {
         .create(true)
         .truncate(false)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&lock_path)?;
     lock.try_lock().map_err(|err| match err {
         std::fs::TryLockError::WouldBlock => io::Error::new(
@@ -65,17 +64,64 @@ pub(super) async fn bind(path: &Path) -> io::Result<(UnixListener, Ownership)> {
         ),
         std::fs::TryLockError::Error(err) => err,
     })?;
-    prepare_path(path).await?;
-    let listener = UnixListener::bind(path)?;
-    let meta = std::fs::symlink_metadata(path)?;
+    prepare_path(&path).await?;
+    let listener = UnixListener::bind(&path)?;
+    let meta = std::fs::symlink_metadata(&path)?;
     let ownership = Ownership {
         _lock: lock,
         path: path.to_path_buf(),
         device: meta.dev(),
         inode: meta.ino(),
     };
-    set_uds_permissions(path)?;
+    set_uds_permissions(&path)?;
     Ok((listener, ownership))
+}
+
+fn private_socket_path(path: &Path) -> io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "gRPC UDS requires a socket filename",
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)?;
+    let parent = std::fs::canonicalize(parent)?;
+    // SAFETY: geteuid takes no arguments and has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let meta = std::fs::metadata(&parent)?;
+    if meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "gRPC UDS directory {} must be owned by uid {uid} and accessible only to its owner (0700)",
+                parent.display()
+            ),
+        ));
+    }
+    // A private directory can still be renamed by an untrusted ancestor's owner.
+    // Sticky shared ancestors (e.g. /tmp) protect entries owned by other users.
+    for ancestor in parent.ancestors().skip(1) {
+        let meta = std::fs::metadata(ancestor)?;
+        if (meta.uid() != uid && meta.uid() != 0)
+            || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "gRPC UDS directory has an unsafe ancestor: {}",
+                    ancestor.display()
+                ),
+            ));
+        }
+    }
+    Ok(parent.join(name))
 }
 
 async fn prepare_path(path: &Path) -> io::Result<()> {

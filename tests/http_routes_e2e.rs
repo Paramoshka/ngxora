@@ -36,7 +36,11 @@ impl Proxy {
     async fn start_with_http(http_options: &str, extra_servers: &str) -> Self {
         let listener = StdListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let temp = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
         let socket = temp.path().join("control.sock");
         let config = temp.path().join("ngxora.conf");
         std::fs::write(

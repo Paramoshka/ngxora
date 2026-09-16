@@ -22,6 +22,14 @@ struct Process {
     log: PathBuf,
 }
 
+fn private_directory() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
+
 impl Process {
     fn start(dir: &Path, name: &str, config: &str, upgrade: bool, extra: &[String]) -> Self {
         let config_path = dir.join(format!("{name}.conf"));
@@ -218,7 +226,7 @@ async fn tls(
 #[tokio::test]
 async fn handoff_preserves_requests_h2_websocket_and_metrics() {
     timeout(Duration::from_secs(350), async {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_directory();
         let http_reserved = reserve();
         let https_reserved = reserve();
         let metrics_reserved = reserve();
@@ -509,7 +517,7 @@ async fn verify_new_control_plane(
 
 #[tokio::test]
 async fn grpc_uds_disconnects_old_controller_and_applies_to_new_process() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_directory();
     let reserved = reserve();
     let p = port(&reserved);
     drop(reserved);
@@ -605,7 +613,7 @@ async fn grpc_tcp_disconnects_old_controller_and_applies_to_new_process() {
 #[tokio::test]
 async fn grpc_upgrade_retries_occupied_tcp_and_uds_addresses() {
     for uds in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_directory();
         let reserved = reserve();
         let p = port(&reserved);
         drop(reserved);

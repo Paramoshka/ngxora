@@ -1,10 +1,11 @@
 //! NRF refresh scheduling, bounded stale state and atomic service publication.
 
 use super::topology::NrfServiceTopology;
-use super::{RuntimeNrfDiscovery, RuntimeUpstreamSelector};
-use futures::FutureExt;
+use super::{NrfSelectionSnapshot, RuntimeNrfDiscovery};
+use pingora::lb::{Backend, Backends, discovery::Static};
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -41,48 +42,41 @@ impl RuntimeNrfDiscovery {
         crate::metrics::set_nrf_discovery_snapshot(&self.group_name, age, schedule.endpoint_count);
     }
 
-    pub(super) async fn expire_snapshot(&self, selector: &RuntimeUpstreamSelector) {
-        if self.schedule.lock().unwrap().endpoint_count == 0 {
-            return;
-        }
-
-        match self.publish_backends(selector, BTreeSet::new(), None) {
-            Ok(()) => self.schedule.lock().unwrap().endpoint_count = 0,
-            Err(err) => {
-                log::warn!(
-                    "NRF discovery for upstream `{}` failed to expire stale backends: {err}",
-                    self.group_name
-                );
-            }
-        }
+    pub(super) fn expire_snapshot(&self) {
+        self.selection.store(None);
+        self.schedule.lock().unwrap().endpoint_count = 0;
     }
 
-    pub(super) fn publish_backends(
-        &self,
-        selector: &RuntimeUpstreamSelector,
-        backends: BTreeSet<pingora::lb::Backend>,
-        selection: Option<NrfServiceTopology>,
-    ) -> Result<(), String> {
-        let mut current = self.selection.write().unwrap();
-        self.source.set(backends);
-        // RuntimeDiscoverySource is in-memory: never hold the write lock across I/O.
-        selector
-            .update()
-            .now_or_never()
-            .ok_or_else(|| "NRF backend publication unexpectedly blocked".to_string())?
-            .map_err(|err| err.to_string())?;
-        if current.as_ref().map(|value| &value.signature)
-            != selection.as_ref().map(|value| &value.signature)
+    pub(super) async fn publish_backends(&self, backends: BTreeSet<Backend>) -> Result<(), String> {
+        let Some(topology) = NrfServiceTopology::build(&backends, self.policy)? else {
+            self.selection.store(None);
+            return Ok(());
+        };
+        let current = self.selection.load_full();
+        if current
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.topology.signature == topology.signature)
         {
-            *current = selection;
+            return Ok(());
         }
+        // Keep the old view alive while registering the new one, preserving shared
+        // health observations and thresholds for endpoints present in both snapshots.
+        let backends = Backends::new_with_health_registry(
+            Static::new(backends),
+            Arc::clone(&self.health_registry),
+        );
+        backends
+            .update(|_| {})
+            .await
+            .map_err(|err| err.to_string())?;
+        self.selection
+            .store(Some(Arc::new(NrfSelectionSnapshot { topology, backends })));
         Ok(())
     }
 
     pub(super) async fn discover(
         &self,
         now: Instant,
-        selector: &RuntimeUpstreamSelector,
     ) -> Result<crate::upstreams::nrf::DiscoveryResult, String> {
         let expires_at = self.schedule.lock().unwrap().expires_at;
         let Some(expires_at) = expires_at.filter(|expires_at| *expires_at > now) else {
@@ -94,17 +88,13 @@ impl RuntimeNrfDiscovery {
         tokio::select! {
             result = &mut request => result,
             _ = tokio::time::sleep_until(expires_at) => {
-                self.expire_snapshot(selector).await;
+                self.expire_snapshot();
                 request.await
             }
         }
     }
 
-    pub(super) async fn record_failure(
-        &self,
-        now: Instant,
-        selector: &RuntimeUpstreamSelector,
-    ) -> Instant {
+    pub(super) fn record_failure(&self, now: Instant) -> Instant {
         if self.client.query.is_some() {
             crate::metrics::record_scp_event(&self.group_name, "discovery_error");
         } else {
@@ -124,7 +114,7 @@ impl RuntimeNrfDiscovery {
         };
 
         if expired {
-            self.expire_snapshot(selector).await;
+            self.expire_snapshot();
         }
         next_run_at
     }

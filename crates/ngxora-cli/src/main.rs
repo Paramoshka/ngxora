@@ -302,6 +302,9 @@ where
                 if value.is_empty() {
                     return Err("--upgrade-sock requires a non-empty path".into());
                 }
+                if !Path::new(&value).is_absolute() {
+                    return Err("--upgrade-sock requires an absolute filesystem path".into());
+                }
                 if upgrade_sock.replace(value).is_some() {
                     return Err("--upgrade-sock specified more than once".into());
                 }
@@ -488,6 +491,16 @@ mod tests {
             ],
         ] {
             assert!(parse_cli_args(args).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn upgrade_socket_rejects_relative_paths() {
+        for path in ["upgrade.sock", "./upgrade.sock", "../upgrade.sock"] {
+            let error = parse_cli_args(["ngxora", "--upgrade-sock", path, "ngxora.conf"])
+                .expect_err("upgrade coordination requires an absolute path");
+            assert!(error.contains("absolute"), "{error}");
         }
     }
 
