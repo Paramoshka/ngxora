@@ -2,9 +2,9 @@
 
 use super::topology::NrfServiceTopology;
 use super::{RuntimeNrfDiscovery, RuntimeUpstreamSelector};
+use futures::FutureExt;
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -46,9 +46,7 @@ impl RuntimeNrfDiscovery {
             return;
         }
 
-        self.selection.store(None);
-        self.source.set(BTreeSet::new());
-        match selector.update().await {
+        match self.publish_backends(selector, BTreeSet::new(), None) {
             Ok(()) => self.schedule.lock().unwrap().endpoint_count = 0,
             Err(err) => {
                 log::warn!(
@@ -59,14 +57,26 @@ impl RuntimeNrfDiscovery {
         }
     }
 
-    pub(super) fn publish_selection(&self, selection: Option<NrfServiceTopology>) {
-        let current = self.selection.load_full();
+    pub(super) fn publish_backends(
+        &self,
+        selector: &RuntimeUpstreamSelector,
+        backends: BTreeSet<pingora::lb::Backend>,
+        selection: Option<NrfServiceTopology>,
+    ) -> Result<(), String> {
+        let mut current = self.selection.write().unwrap();
+        self.source.set(backends);
+        // RuntimeDiscoverySource is in-memory: never hold the write lock across I/O.
+        selector
+            .update()
+            .now_or_never()
+            .ok_or_else(|| "NRF backend publication unexpectedly blocked".to_string())?
+            .map_err(|err| err.to_string())?;
         if current.as_ref().map(|value| &value.signature)
-            == selection.as_ref().map(|value| &value.signature)
+            != selection.as_ref().map(|value| &value.signature)
         {
-            return;
+            *current = selection;
         }
-        self.selection.store(selection.map(Arc::new));
+        Ok(())
     }
 
     pub(super) async fn discover(

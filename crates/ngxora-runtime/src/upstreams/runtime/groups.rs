@@ -2,7 +2,7 @@
 
 use crate::upstreams::nrf::NrfClient;
 use crate::upstreams::types::{CompiledUpstreamGroup, CompiledUpstreamServer};
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use discovery::{nrf_refresh_delay, nrf_snapshot_expiry};
 use futures::{FutureExt, StreamExt, future, stream};
@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::time::Instant;
 use topology::NrfServiceTopology;
@@ -48,7 +48,8 @@ struct RuntimeNrfDiscovery {
     health_check: crate::upstreams::CompiledHealthCheck,
     stale_if_error: Duration,
     policy: UpstreamSelectionPolicy,
-    selection: ArcSwapOption<NrfServiceTopology>,
+    // Keep topology reads paired with the matching backend readiness generation.
+    selection: RwLock<Option<NrfServiceTopology>>,
     schedule: Mutex<NrfRefreshSchedule>,
 }
 
@@ -287,7 +288,7 @@ impl RuntimeUpstreamGroup {
                 health_check: health_check.clone(),
                 stale_if_error: config.stale_if_error,
                 policy: group.policy,
-                selection: ArcSwapOption::empty(),
+                selection: RwLock::new(None),
                 schedule: Mutex::new(NrfRefreshSchedule {
                     invalid_api: false,
                     candidate_count: 0,
@@ -325,8 +326,10 @@ impl RuntimeUpstreamGroup {
 
     pub(crate) fn select(&self, key: &[u8]) -> Option<CompiledUpstreamServer> {
         if let Some(discovery) = self.nrf_discovery.as_ref() {
-            let selection = discovery.selection.load_full()?;
-            return selection.select(key, |backend| self.selector.backends().ready(backend));
+            let selection = discovery.selection.read().unwrap();
+            return selection
+                .as_ref()?
+                .select(key, |backend| self.selector.backends().ready(backend));
         }
 
         let backend_count = self.selector.backends().get_backend().len();
@@ -424,15 +427,13 @@ impl RuntimeUpstreamGroup {
                         return Some(discovery.record_failure(now, &self.selector).await);
                     }
                 };
-                discovery.source.set(ready);
-                if let Err(err) = self.selector.update().await {
+                if let Err(err) = discovery.publish_backends(&self.selector, ready, selection) {
                     log::warn!(
                         "NRF discovery for upstream `{}` failed to publish backends: {err}",
                         discovery.group_name
                     );
                     return Some(discovery.record_failure(now, &self.selector).await);
                 }
-                discovery.publish_selection(selection);
                 if discovery.client.query.is_some() {
                     crate::metrics::record_scp_event(&discovery.group_name, "discovery_success");
                 } else {
@@ -532,8 +533,8 @@ impl RuntimeUpstreamGroup {
         accept: impl Fn(&CompiledUpstreamServer) -> bool,
     ) -> Option<CompiledUpstreamServer> {
         self.scp_status().ok()?;
-        let selection = self.nrf_discovery.as_ref()?.selection.load_full()?;
-        selection.select(key, |backend| {
+        let selection = self.nrf_discovery.as_ref()?.selection.read().unwrap();
+        selection.as_ref()?.select(key, |backend| {
             self.selector.backends().ready(backend)
                 && backend
                     .ext

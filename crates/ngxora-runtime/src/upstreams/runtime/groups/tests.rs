@@ -66,6 +66,106 @@ fn nrf_topology(
 }
 
 #[test]
+fn nrf_refresh_keeps_selection_and_readiness_consistent() {
+    use crate::upstreams::{CompiledHealthCheck, CompiledNrfDiscovery, HealthCheckType};
+    use ngxora_compile::ir::{NrfEndpointScheme, UpstreamSslOptions};
+
+    let group = RuntimeUpstreamGroup::from_compiled(&CompiledUpstreamGroup {
+        name: "refresh".into(),
+        allow_empty: false,
+        policy: UpstreamSelectionPolicy::RoundRobin,
+        hash_key: None,
+        servers: Vec::new(),
+        nrf_discovery: Some(CompiledNrfDiscovery {
+            api_root: "http://127.0.0.1:1/nnrf-disc/v1".parse().unwrap(),
+            target_nf_type: "SMF".into(),
+            requester_nf_type: "SCP".into(),
+            service_name: "nsmf-pdusession".into(),
+            endpoint_scheme: NrfEndpointScheme::Http,
+            timeout: Duration::from_secs(1),
+            stale_if_error: Duration::from_secs(60),
+            tls_options: UpstreamSslOptions::default(),
+        }),
+        health_check: Some(CompiledHealthCheck {
+            check_type: HealthCheckType::Tcp,
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_secs(5),
+            consecutive_success: 1,
+            consecutive_failure: 1,
+        }),
+    })
+    .unwrap();
+    let discovery = group.nrf_discovery.as_ref().unwrap();
+    let endpoints = [
+        nrf_server("nf", "service", 1, 1, "192.0.2.1", 80),
+        nrf_server("nf", "service", 1, 1, "192.0.2.2", 80),
+    ];
+    let publish = |server: &CompiledUpstreamServer| {
+        let backends = dynamic_synthetic_backends(std::slice::from_ref(server)).unwrap();
+        let topology = NrfServiceTopology::build(&backends, discovery.policy).unwrap();
+        discovery
+            .publish_backends(&group.selector, backends, topology)
+            .unwrap();
+    };
+    publish(&endpoints[0]);
+    {
+        let mut schedule = discovery.schedule.lock().unwrap();
+        schedule.last_success_at = Some(Instant::now());
+        schedule.expires_at = Some(Instant::now() + Duration::from_secs(60));
+        schedule.candidate_count = 1;
+    }
+
+    let start = std::sync::Barrier::new(5);
+    let running = std::sync::atomic::AtomicBool::new(true);
+    std::thread::scope(|threads| {
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                threads.spawn(|| {
+                    start.wait();
+                    let mut failures = 0;
+                    let mut requests = 0;
+                    while running.load(Ordering::Relaxed) {
+                        failures += usize::from(group.select(b"").is_none());
+                        failures += usize::from(group.scp_select(b"", |_| true).is_none());
+                        requests += 2;
+                    }
+                    (requests, failures)
+                })
+            })
+            .collect();
+        start.wait();
+        for index in 0..2_000 {
+            publish(&endpoints[index % 2]);
+        }
+        running.store(false, Ordering::Relaxed);
+        for reader in readers {
+            let (requests, failures) = reader.join().unwrap();
+            assert!(requests > 0);
+            assert_eq!(
+                failures, 0,
+                "healthy endpoints must stay selectable during refresh"
+            );
+        }
+    });
+
+    let backends = group.selector.backends().get_backend();
+    group
+        .selector
+        .backends()
+        .set_enable(backends.first().unwrap(), false);
+    publish(&endpoints[1]);
+    assert!(group.select(b"").is_none());
+    assert!(group.scp_select(b"", |_| true).is_none());
+
+    discovery
+        .publish_backends(&group.selector, BTreeSet::new(), None)
+        .unwrap();
+    assert!(group.select(b"").is_none());
+    assert!(group.scp_select(b"", |_| true).is_none());
+    assert!(group.readiness().is_empty());
+}
+
+#[test]
 fn nrf_service_capacity_weights_services_not_endpoints() {
     let topology = nrf_topology(
         UpstreamSelectionPolicy::RoundRobin,
