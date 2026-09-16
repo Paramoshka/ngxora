@@ -61,6 +61,8 @@ image-builder:
 lint: ## Lint source code
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) fmt --all -- --check
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) clippy $(CARGO_LOCK_FLAGS) --workspace --all-targets --all-features -- -D warnings
+	test -z "$$(gofmt -l sdk/go/client)"
+	GOCACHE="$(GO_BUILD_CACHE)" $(GO) -C sdk/go vet ./...
 
 test: test-unit test-e2e ## Run default test suite
 test-unit: ## Run unit tests
@@ -69,12 +71,13 @@ test-unit: ## Run unit tests
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/tls/ngxora.conf
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/sbi-ready/ngxora.conf
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) run $(CARGO_LOCK_FLAGS) -- --check examples/scp/ngxora.conf
-	GOCACHE="$(GO_BUILD_CACHE)" $(GO) -C sdk/go test ./...
+	GOCACHE="$(GO_BUILD_CACHE)" $(GO) -C sdk/go test -race ./...
 
 test-e2e: ## Run hermetic process-level tests
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --test graceful_upgrade
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --test nrf_e2e
 	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(CARGO) test $(CARGO_LOCK_FLAGS) --test http_routes_e2e
+	NGXORA_TEST_BIN="$${NGXORA_TEST_BIN:-$(abspath $(CARGO_TARGET_DIR))/debug/ngxora}" GOCACHE="$(GO_BUILD_CACHE)" $(GO) -C sdk/go test -race -tags=integration ./client -run '^TestGracefulUpgrade' -count=1
 
 test-open5gs: ## Run the Open5GS NRF interoperability test
 	bash tests/e2e/open5gs/run.sh
